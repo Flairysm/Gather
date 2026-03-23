@@ -1,6 +1,7 @@
 import { useState } from "react";
 import {
   Pressable,
+  RefreshControl,
   SafeAreaView,
   ScrollView,
   Text,
@@ -25,11 +26,18 @@ function isUrgent(timeLeft: string): boolean {
 
 export default function AuctionScreen() {
   const [activeFilter, setActiveFilter] = useState("All");
+  const [refreshing, setRefreshing] = useState(false);
 
   const filtered =
     activeFilter === "All"
       ? auctionItems
       : auctionItems.filter((item) => item.category === activeFilter);
+
+  async function onRefresh() {
+    setRefreshing(true);
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    setRefreshing(false);
+  }
 
   return (
     <SafeAreaView style={a.safe}>
@@ -38,7 +46,26 @@ export default function AuctionScreen() {
         <ScrollView
           showsVerticalScrollIndicator={false}
           contentContainerStyle={a.scroll}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor={C.accent}
+            />
+          }
         >
+          {refreshing && (
+            <View style={a.refreshSkeletonWrap}>
+              <View style={a.refreshSkeletonHeader} />
+              <View style={a.refreshSkeletonPills} />
+              <View style={a.refreshSkeletonGrid}>
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <View key={i} style={a.refreshSkeletonCard} />
+                ))}
+              </View>
+            </View>
+          )}
+
           {/* ── Header ── */}
           <View style={a.header}>
             <View style={a.searchBar}>

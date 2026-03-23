@@ -1,5 +1,6 @@
 import { useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
   Image,
   KeyboardAvoidingView,
@@ -18,7 +19,8 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { C } from "../theme";
 import { cf } from "../styles/createForm.styles";
-import { MARKET_FILTERS, listings } from "../data/market";
+import { MARKET_FILTERS } from "../data/market";
+import { supabase } from "../lib/supabase";
 
 const CATEGORIES = MARKET_FILTERS.filter((f) => f !== "All");
 const CONDITIONS = ["Gem Mint", "Mint", "Near Mint", "Excellent", "Good"];
@@ -29,6 +31,7 @@ type Props = { onBack: () => void };
 export default function CreateListingScreen({ onBack }: Props) {
   const insets = useSafeAreaInsets();
   const [step, setStep] = useState(0);
+  const [submitting, setSubmitting] = useState(false);
 
   const [images, setImages] = useState<string[]>([]);
   const [cardName, setCardName] = useState("");
@@ -92,24 +95,70 @@ export default function CreateListingScreen({ onBack }: Props) {
     }
   }
 
-  function handleSubmit() {
-    const newListing = {
-      id: `l${Date.now()}`,
-      cardName: cardName.trim(),
-      edition: edition.trim() || "Unknown Edition",
-      grade: grade.trim() || "Ungraded",
-      price: price.startsWith("$") ? price : `$${price}`,
-      seller: "you",
-      postedAt: "Just now",
-      category,
-      description: description.trim(),
-      views: 0,
-      condition: condition || "Unspecified",
-      sellerRating: 5.0,
-      sellerSales: 0,
+  async function uploadImage(localUri: string, userId: string, index: number): Promise<string> {
+    const extMatch = localUri.match(/\.(\w+)(\?|$)/);
+    const ext = extMatch?.[1]?.toLowerCase() ?? "jpg";
+    const mimeTypes: Record<string, string> = {
+      jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
+      gif: "image/gif", webp: "image/webp",
     };
-    listings.unshift(newListing);
-    onBack();
+    const contentType = mimeTypes[ext] ?? "image/jpeg";
+    const filePath = `${userId}/${Date.now()}-${index}.${ext}`;
+
+    const resp = await fetch(localUri);
+    const arrayBuf = await resp.arrayBuffer();
+
+    const { error } = await supabase.storage
+      .from("listing-images")
+      .upload(filePath, arrayBuf, { upsert: true, contentType });
+
+    if (error) throw error;
+    const { data } = supabase.storage.from("listing-images").getPublicUrl(filePath);
+    return data.publicUrl;
+  }
+
+  async function handleSubmit() {
+    setSubmitting(true);
+
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      setSubmitting(false);
+      Alert.alert("Error", "Please sign in to create a listing.");
+      return;
+    }
+
+    try {
+      const uploadedUrls = await Promise.all(
+        images.map((uri, i) => uploadImage(uri, user.id, i)),
+      );
+
+      const numericPrice = parseFloat(price.replace(/[$,]/g, ""));
+      if (isNaN(numericPrice) || numericPrice <= 0) {
+        setSubmitting(false);
+        Alert.alert("Error", "Please enter a valid price.");
+        return;
+      }
+
+      const { error } = await supabase.from("listings").insert({
+        seller_id: user.id,
+        card_name: cardName.trim(),
+        edition: edition.trim() || null,
+        grade: grade.trim() || null,
+        condition: condition || null,
+        price: numericPrice,
+        category,
+        description: description.trim() || null,
+        images: uploadedUrls,
+        status: "active",
+      });
+
+      if (error) throw error;
+      onBack();
+    } catch (err: any) {
+      Alert.alert("Error", err?.message ?? "Failed to create listing.");
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   return (
@@ -119,7 +168,6 @@ export default function CreateListingScreen({ onBack }: Props) {
         style={{ flex: 1 }}
         behavior={Platform.OS === "ios" ? "padding" : undefined}
       >
-        {/* ── Header ── */}
         <View style={cf.header}>
           <Pressable style={cf.backBtn} onPress={handleBack}>
             <Feather name="arrow-left" size={20} color={C.textPrimary} />
@@ -128,7 +176,6 @@ export default function CreateListingScreen({ onBack }: Props) {
           <Text style={cf.stepIndicator}>{step + 1} / 3</Text>
         </View>
 
-        {/* ── Step Dots ── */}
         <View style={cf.dotsRow}>
           {[0, 1, 2].map((i) => (
             <View
@@ -147,7 +194,6 @@ export default function CreateListingScreen({ onBack }: Props) {
           contentContainerStyle={cf.scroll}
           keyboardShouldPersistTaps="handled"
         >
-          {/* ═══ STEP 0: Photos ═══ */}
           {step === 0 && (
             <>
               <Text style={cf.sectionTitle}>Upload Card Photos</Text>
@@ -189,7 +235,6 @@ export default function CreateListingScreen({ onBack }: Props) {
             </>
           )}
 
-          {/* ═══ STEP 1: Details ═══ */}
           {step === 1 && (
             <>
               <Text style={cf.sectionTitle}>Card Information</Text>
@@ -272,7 +317,6 @@ export default function CreateListingScreen({ onBack }: Props) {
             </>
           )}
 
-          {/* ═══ STEP 2: Price ═══ */}
           {step === 2 && (
             <>
               <Text style={cf.sectionTitle}>Set Your Price</Text>
@@ -303,7 +347,6 @@ export default function CreateListingScreen({ onBack }: Props) {
                 multiline
               />
 
-              {/* Review Summary */}
               <Text style={cf.fieldLabel}>Review</Text>
               <View style={cf.reviewCard}>
                 {images.length > 0 && (
@@ -348,7 +391,7 @@ export default function CreateListingScreen({ onBack }: Props) {
                 <View style={cf.reviewRow}>
                   <Text style={cf.reviewLabel}>Asking Price</Text>
                   <Text style={[cf.reviewValue, { color: C.link, fontSize: 18, fontWeight: "900" }]}>
-                    {price ? (price.startsWith("$") ? price : `$${price}`) : "—"}
+                    {price ? `$${price.replace(/^\$/, "")}` : "—"}
                   </Text>
                 </View>
               </View>
@@ -356,7 +399,6 @@ export default function CreateListingScreen({ onBack }: Props) {
           )}
         </ScrollView>
 
-        {/* ── Bottom Button ── */}
         <View style={[cf.bottomBar, { paddingBottom: Math.max(insets.bottom, 14) }]}>
           {step < 2 ? (
             <Pressable
@@ -374,13 +416,17 @@ export default function CreateListingScreen({ onBack }: Props) {
             <Pressable
               style={[cf.submitBtn, !canAdvance() && cf.nextBtnDisabled]}
               onPress={handleSubmit}
-              disabled={!canAdvance()}
+              disabled={!canAdvance() || submitting}
             >
-              <Text
-                style={[cf.submitBtnText, !canAdvance() && cf.nextBtnTextDisabled]}
-              >
-                Post Listing
-              </Text>
+              {submitting ? (
+                <ActivityIndicator size="small" color={C.textHero} />
+              ) : (
+                <Text
+                  style={[cf.submitBtnText, !canAdvance() && cf.nextBtnTextDisabled]}
+                >
+                  Post Listing
+                </Text>
+              )}
             </Pressable>
           )}
         </View>

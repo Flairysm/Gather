@@ -1,7 +1,10 @@
-import { useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Animated,
+  Dimensions,
+  Image,
   Pressable,
+  RefreshControl,
   SafeAreaView,
   ScrollView,
   Text,
@@ -16,13 +19,14 @@ import { market as m } from "../styles/market.styles";
 import { shared as sh } from "../styles/shared.styles";
 import {
   MARKET_FILTERS,
-  listings,
-  wantedPosts,
+  formatListingPrice,
+  timeAgo,
   type Listing,
   type WantedPost,
 } from "../data/market";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import { useUser } from "../data/user";
+import { supabase } from "../lib/supabase";
 
 type Tab = "Listings" | "Wanted";
 
@@ -40,6 +44,8 @@ const FAB_ACTIONS = [
     color: C.live,
   },
 ] as const;
+const SKELETON_CARD_W =
+  (Dimensions.get("window").width - S.screenPadding * 2 - S.cardGap) / 2;
 
 export default function MarketScreen() {
   const { push } = useAppNavigation();
@@ -47,7 +53,96 @@ export default function MarketScreen() {
   const [activeTab, setActiveTab] = useState<Tab>("Listings");
   const [activeFilter, setActiveFilter] = useState("All");
   const [fabOpen, setFabOpen] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const anim = useRef(new Animated.Value(0)).current;
+
+  const [listings, setListings] = useState<Listing[]>([]);
+  const [wantedPosts, setWantedPosts] = useState<WantedPost[]>([]);
+  const [vendorStoreNames, setVendorStoreNames] = useState<Record<string, string>>({});
+  const [loadingListings, setLoadingListings] = useState(true);
+  const [loadingWanted, setLoadingWanted] = useState(true);
+
+  const loadListings = useCallback(async () => {
+    setLoadingListings(true);
+    const { data } = await supabase
+      .from("listings")
+      .select(`
+        id, seller_id, card_name, edition, grade, condition, price,
+        category, description, images, views, status, created_at,
+        seller:profiles!seller_id(username, display_name, rating, total_sales, avatar_url)
+      `)
+      .eq("status", "active")
+      .order("created_at", { ascending: false })
+      .limit(50);
+
+    if (data) {
+      const mapped = (data as any[]).map((r) => ({
+          ...r,
+          seller: Array.isArray(r.seller) ? r.seller[0] : r.seller,
+      }));
+      setListings(mapped);
+
+      const sellerIds = Array.from(
+        new Set(
+          mapped
+            .map((r: any) => r.seller_id)
+            .filter((id: string | null | undefined) => Boolean(id)),
+        ),
+      );
+
+      if (sellerIds.length > 0) {
+        const { data: stores } = await supabase
+          .from("vendor_stores")
+          .select("profile_id, store_name")
+          .in("profile_id", sellerIds)
+          .eq("is_active", true);
+
+        if (stores) {
+          const nameMap: Record<string, string> = {};
+          for (const s of stores as any[]) {
+            if (s.profile_id && s.store_name) {
+              nameMap[s.profile_id] = s.store_name;
+            }
+          }
+          setVendorStoreNames(nameMap);
+        } else {
+          setVendorStoreNames({});
+        }
+      } else {
+        setVendorStoreNames({});
+      }
+    }
+    setLoadingListings(false);
+  }, []);
+
+  const loadWanted = useCallback(async () => {
+    setLoadingWanted(true);
+    const { data } = await supabase
+      .from("wanted_posts")
+      .select(`
+        id, buyer_id, card_name, edition, grade_wanted, offer_price,
+        category, description, image_url, views, status, created_at,
+        buyer:profiles!buyer_id(username, display_name, rating, total_purchases, avatar_url)
+      `)
+      .eq("status", "active")
+      .order("created_at", { ascending: false })
+      .limit(50);
+
+    if (data) {
+      setWantedPosts(
+        (data as any[]).map((r) => ({
+          ...r,
+          buyer: Array.isArray(r.buyer) ? r.buyer[0] : r.buyer,
+        })),
+      );
+    }
+    setLoadingWanted(false);
+  }, []);
+
+  useEffect(() => {
+    loadListings().catch(() => {});
+    loadWanted().catch(() => {});
+  }, [loadListings, loadWanted]);
 
   const filteredListings =
     activeFilter === "All"
@@ -91,6 +186,16 @@ export default function MarketScreen() {
     outputRange: ["0deg", "45deg"],
   });
 
+  async function onRefresh() {
+    setRefreshing(true);
+    await Promise.all([
+      loadListings().catch(() => {}),
+      loadWanted().catch(() => {}),
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    setRefreshing(false);
+  }
+
   return (
     <SafeAreaView style={m.safe}>
       <StatusBar style="light" />
@@ -98,8 +203,53 @@ export default function MarketScreen() {
         <ScrollView
           showsVerticalScrollIndicator={false}
           contentContainerStyle={m.scroll}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor={C.accent}
+            />
+          }
         >
-          {/* ── Header ── */}
+          {refreshing && (
+            <View style={{ gap: S.md, marginBottom: S.lg }}>
+              <View
+                style={{
+                  height: 42,
+                  borderRadius: S.radiusSmall,
+                  backgroundColor: C.elevated,
+                  borderWidth: 1,
+                  borderColor: C.border,
+                }}
+              />
+              <View
+                style={{
+                  height: 44,
+                  borderRadius: S.radiusSmall,
+                  backgroundColor: C.elevated,
+                  borderWidth: 1,
+                  borderColor: C.border,
+                }}
+              />
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: S.cardGap }}>
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <View
+                    key={i}
+                    style={{
+                      width: SKELETON_CARD_W,
+                      height: SKELETON_CARD_W * 1.65,
+                      borderRadius: S.radiusCard,
+                      backgroundColor: C.elevated,
+                      borderWidth: 1,
+                      borderColor: C.border,
+                    }}
+                  />
+                ))}
+              </View>
+            </View>
+          )}
+
+          {/* Header */}
           <View style={m.header}>
             <View style={m.searchBar}>
               <Feather name="search" size={S.iconSize.md} color={C.textMuted} />
@@ -114,7 +264,7 @@ export default function MarketScreen() {
             </Pressable>
           </View>
 
-          {/* ── Segment Control ── */}
+          {/* Segment Control */}
           <View style={m.segmentRow}>
             {(["Listings", "Wanted"] as Tab[]).map((tab) => (
               <Pressable
@@ -134,7 +284,7 @@ export default function MarketScreen() {
             ))}
           </View>
 
-          {/* ── Category Filter Pills ── */}
+          {/* Category Filter Pills */}
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
@@ -158,78 +308,167 @@ export default function MarketScreen() {
             ))}
           </ScrollView>
 
-          {/* ── Listings Tab ── */}
+          {/* Listings Tab */}
           {activeTab === "Listings" && (
             <View style={m.listingsGrid}>
-              {filteredListings.map((item: Listing) => (
-                <Pressable
-                  key={item.id}
-                  style={m.listingCard}
-                  onPress={() => push({ type: "LISTING_DETAIL", listingId: item.id })}
-                >
-                  <View style={m.listingArt}>
-                    <View style={m.gradeBadge}>
-                      <Text style={m.gradeBadgeText}>{item.grade}</Text>
-                    </View>
-                  </View>
-                  <View style={m.listingInfo}>
-                    <Text style={m.listingName} numberOfLines={1}>
-                      {item.cardName}
-                    </Text>
-                    <Text style={m.listingEdition}>{item.edition}</Text>
-                    <Text style={m.listingPrice}>{item.price}</Text>
-                    <View style={m.listingMeta}>
-                      <View style={m.sellerRow}>
-                        <View style={m.sellerAvatar} />
-                        <Text style={m.sellerName}>@{item.seller}</Text>
+              {loadingListings && listings.length === 0 ? (
+                <Text style={{ color: C.textMuted, fontSize: 13, padding: 20 }}>
+                  Loading listings...
+                </Text>
+              ) : filteredListings.length === 0 ? (
+                <View style={{ alignItems: "center", padding: 40, width: "100%" }}>
+                  <Ionicons name="storefront-outline" size={32} color={C.textMuted} />
+                  <Text style={{ color: C.textPrimary, fontSize: 14, fontWeight: "800", marginTop: 8 }}>
+                    No listings yet
+                  </Text>
+                  <Text style={{ color: C.textSecondary, fontSize: 12, marginTop: 4 }}>
+                    Be the first to list a card for sale
+                  </Text>
+                </View>
+              ) : (
+                filteredListings.map((item) => (
+                  <Pressable
+                    key={item.id}
+                    style={m.listingCard}
+                    onPress={() => push({ type: "LISTING_DETAIL", listingId: item.id })}
+                  >
+                    <View style={m.listingArt}>
+                      {item.images?.[0] ? (
+                        <Image
+                          source={{ uri: item.images[0] }}
+                          style={{ width: "100%", height: "100%", borderRadius: S.radiusCardInner }}
+                        />
+                      ) : null}
+                      <View
+                        style={{
+                          position: "absolute",
+                          left: 8,
+                          right: 8,
+                          bottom: 8,
+                          backgroundColor: "rgba(4,7,13,0.72)",
+                          borderWidth: 1,
+                          borderColor: "rgba(255,255,255,0.12)",
+                          borderRadius: 8,
+                          paddingHorizontal: 8,
+                          paddingVertical: 4,
+                        }}
+                      >
+                        <Text
+                          numberOfLines={1}
+                          style={{
+                            color: "#fff",
+                            fontSize: 10,
+                            fontWeight: "800",
+                          }}
+                        >
+                          {vendorStoreNames[item.seller_id] ?? "Vendor Store"}
+                        </Text>
                       </View>
-                      <Text style={m.postedAt}>{item.postedAt}</Text>
+                      {item.grade && (
+                        <View style={[m.gradeBadge, { position: "absolute", top: S.sm, right: S.sm }]}>
+                          <Text style={m.gradeBadgeText}>{item.grade}</Text>
+                        </View>
+                      )}
                     </View>
-                  </View>
-                </Pressable>
-              ))}
+                    <View style={m.listingInfo}>
+                      <Text style={m.listingName} numberOfLines={1}>
+                        {item.card_name}
+                      </Text>
+                      <Text style={m.listingEdition}>{item.edition ?? "—"}</Text>
+                      <Text style={m.listingPrice}>
+                        {formatListingPrice(item.price)}
+                      </Text>
+                      <View style={m.listingMeta}>
+                        <View style={m.sellerRow}>
+                          {item.seller?.avatar_url ? (
+                            <Image
+                              source={{ uri: item.seller.avatar_url }}
+                              style={{ width: 16, height: 16, borderRadius: 8 }}
+                            />
+                          ) : (
+                            <View style={m.sellerAvatar} />
+                          )}
+                          <Text style={m.sellerName}>
+                            @{item.seller?.username ?? "user"}
+                          </Text>
+                        </View>
+                        <Text style={m.postedAt}>{timeAgo(item.created_at)}</Text>
+                      </View>
+                    </View>
+                  </Pressable>
+                ))
+              )}
             </View>
           )}
 
-          {/* ── Wanted Tab ── */}
+          {/* Wanted Tab */}
           {activeTab === "Wanted" && (
             <View style={m.wantedGrid}>
-              {filteredWanted.map((item: WantedPost) => (
-                <Pressable
-                  key={item.id}
-                  style={m.wantedCard}
-                  onPress={() => push({ type: "WANTED_DETAIL", wantedId: item.id })}
-                >
-                  <View style={m.wantedArt} />
-                  <View style={m.wantedTag}>
-                    <Text style={m.wantedTagText}>WTB</Text>
-                  </View>
-                  <Text style={m.wantedName} numberOfLines={1}>
-                    {item.cardName}
+              {loadingWanted && wantedPosts.length === 0 ? (
+                <Text style={{ color: C.textMuted, fontSize: 13, padding: 20 }}>
+                  Loading wanted posts...
+                </Text>
+              ) : filteredWanted.length === 0 ? (
+                <View style={{ alignItems: "center", padding: 40, width: "100%" }}>
+                  <MaterialCommunityIcons name="card-search-outline" size={32} color={C.textMuted} />
+                  <Text style={{ color: C.textPrimary, fontSize: 14, fontWeight: "800", marginTop: 8 }}>
+                    No wanted posts yet
                   </Text>
-                  <Text style={m.wantedEdition}>{item.edition}</Text>
-                  <View style={m.gradeWantedChip}>
-                    <Ionicons
-                      name="shield-checkmark-outline"
-                      size={11}
-                      color={C.textIcon}
-                    />
-                    <Text style={m.gradeWantedText}>{item.gradeWanted}</Text>
-                  </View>
-                  <View style={m.wantedDivider} />
-                  <View style={m.offerRow}>
-                    <Text style={m.offerLabel}>Offering</Text>
-                    <Text style={m.offerPrice}>{item.offerPrice}</Text>
-                  </View>
-                  <View style={m.wantedMeta}>
-                    <View style={m.wantedBuyerRow}>
-                      <View style={m.wantedAvatar} />
-                      <Text style={m.wantedBuyer}>@{item.buyer}</Text>
+                  <Text style={{ color: C.textSecondary, fontSize: 12, marginTop: 4 }}>
+                    Post what cards you're looking for
+                  </Text>
+                </View>
+              ) : (
+                filteredWanted.map((item) => (
+                  <Pressable
+                    key={item.id}
+                    style={m.wantedCard}
+                    onPress={() => push({ type: "WANTED_DETAIL", wantedId: item.id })}
+                  >
+                    <View style={m.wantedArt}>
+                      {item.image_url ? (
+                        <Image
+                          source={{ uri: item.image_url }}
+                          style={{ width: "100%", height: "100%", borderRadius: S.radiusCardInner }}
+                        />
+                      ) : null}
                     </View>
-                    <Text style={m.wantedPostedAt}>{item.postedAt}</Text>
-                  </View>
-                </Pressable>
-              ))}
+                    <View style={m.wantedTag}>
+                      <Text style={m.wantedTagText}>WTB</Text>
+                    </View>
+                    <Text style={m.wantedName} numberOfLines={1}>
+                      {item.card_name}
+                    </Text>
+                    <Text style={m.wantedEdition}>{item.edition ?? "—"}</Text>
+                    {item.grade_wanted && (
+                      <View style={m.gradeWantedChip}>
+                        <Ionicons
+                          name="shield-checkmark-outline"
+                          size={11}
+                          color={C.textIcon}
+                        />
+                        <Text style={m.gradeWantedText}>{item.grade_wanted}</Text>
+                      </View>
+                    )}
+                    <View style={m.wantedDivider} />
+                    <View style={m.offerRow}>
+                      <Text style={m.offerLabel}>Offering</Text>
+                      <Text style={m.offerPrice}>
+                        {formatListingPrice(item.offer_price)}
+                      </Text>
+                    </View>
+                    <View style={m.wantedMeta}>
+                      <View style={m.wantedBuyerRow}>
+                        <View style={m.wantedAvatar} />
+                        <Text style={m.wantedBuyer}>
+                          @{item.buyer?.username ?? "user"}
+                        </Text>
+                      </View>
+                      <Text style={m.wantedPostedAt}>{timeAgo(item.created_at)}</Text>
+                    </View>
+                  </Pressable>
+                ))
+              )}
             </View>
           )}
         </ScrollView>

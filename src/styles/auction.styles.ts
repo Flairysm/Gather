@@ -60,6 +60,38 @@ export const auction = StyleSheet.create({
     gap: S.pillGap,
     marginBottom: S.xl,
   },
+  refreshSkeletonWrap: {
+    gap: S.md,
+    marginBottom: S.lg,
+  },
+  refreshSkeletonHeader: {
+    height: 42,
+    borderRadius: S.radiusSmall,
+    backgroundColor: C.elevated,
+    borderWidth: 1,
+    borderColor: C.border,
+  },
+  refreshSkeletonPills: {
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: C.elevated,
+    borderWidth: 1,
+    borderColor: C.border,
+    width: "80%",
+  },
+  refreshSkeletonGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: GRID_GAP,
+  },
+  refreshSkeletonCard: {
+    width: CARD_W,
+    height: CARD_W * 1.65,
+    borderRadius: S.radiusCard,
+    backgroundColor: C.elevated,
+    borderWidth: 1,
+    borderColor: C.border,
+  },
 
   // ── Grid ──
   grid: {

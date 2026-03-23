@@ -31,10 +31,11 @@ export function useCart() {
   return useContext(CartContext);
 }
 
-export function parsePrice(price: string): number {
+export function parsePrice(price: string | number): number {
+  if (typeof price === "number") return price;
   return parseFloat(price.replace(/[$,]/g, "")) || 0;
 }
 
-export function formatPrice(cents: number): string {
-  return `$${cents.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+export function formatPrice(amount: number): string {
+  return `$${amount.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
 }

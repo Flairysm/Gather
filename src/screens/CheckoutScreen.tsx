@@ -41,7 +41,7 @@ export default function CheckoutScreen({ onBack }: Props) {
             {items.map((ci) => (
               <View key={ci.listing.id} style={st.successItem}>
                 <Text style={st.successItemName} numberOfLines={1}>
-                  {ci.listing.cardName} x{ci.quantity}
+                  {ci.listing.card_name} x{ci.quantity}
                 </Text>
                 <Text style={st.successItemPrice}>
                   {formatPrice(parsePrice(ci.listing.price) * ci.quantity)}
@@ -91,10 +91,10 @@ export default function CheckoutScreen({ onBack }: Props) {
                   <View style={st.summaryArt} />
                   <View style={st.summaryInfo}>
                     <Text style={st.summaryName} numberOfLines={1}>
-                      {ci.listing.cardName}
+                      {ci.listing.card_name}
                     </Text>
-                    <Text style={st.summaryEdition}>{ci.listing.edition}</Text>
-                    <Text style={st.summaryGrade}>{ci.listing.grade}</Text>
+                    <Text style={st.summaryEdition}>{ci.listing.edition ?? "—"}</Text>
+                    <Text style={st.summaryGrade}>{ci.listing.grade ?? "Ungraded"}</Text>
                     <Text style={st.summaryQty}>Qty: {ci.quantity}</Text>
                   </View>
                 </View>

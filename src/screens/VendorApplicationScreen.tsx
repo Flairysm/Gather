@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
-  Animated,
+  ActivityIndicator,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -14,7 +14,8 @@ import { Feather, Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { C, S } from "../theme";
-import { useUser, type VendorStatus } from "../data/user";
+import { useUser } from "../data/user";
+import { supabase } from "../lib/supabase";
 
 type Props = { onBack: () => void };
 
@@ -29,6 +30,9 @@ export default function VendorApplicationScreen({ onBack }: Props) {
   const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
   const [experience, setExperience] = useState("");
   const [submitted, setSubmitted] = useState(vendorStatus === "pending");
+  const [submitting, setSubmitting] = useState(false);
+  const [loadingExisting, setLoadingExisting] = useState(true);
+  const [formError, setFormError] = useState<string | null>(null);
 
   function toggleCategory(cat: string) {
     setSelectedCategories((prev) =>
@@ -41,9 +45,103 @@ export default function VendorApplicationScreen({ onBack }: Props) {
     description.trim().length > 0 &&
     selectedCategories.length > 0;
 
-  function handleSubmit() {
+  useEffect(() => {
+    let mounted = true;
+
+    async function loadExistingApplication() {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+
+      if (!mounted) return;
+      if (!user) {
+        setLoadingExisting(false);
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from("vendor_applications")
+        .select("store_name, description, categories, status, notes")
+        .eq("profile_id", user.id)
+        .maybeSingle();
+
+      if (!mounted) return;
+
+      if (error) {
+        setFormError(error.message);
+        setLoadingExisting(false);
+        return;
+      }
+
+      if (data) {
+        setStoreName(data.store_name ?? "");
+        setDescription(data.description ?? "");
+        setSelectedCategories(data.categories ?? []);
+        if (data.status === "approved") setVendorStatus("approved");
+        if (data.status === "pending") {
+          setVendorStatus("pending");
+          setSubmitted(true);
+        }
+      }
+
+      setLoadingExisting(false);
+    }
+
+    loadExistingApplication();
+
+    return () => {
+      mounted = false;
+    };
+  }, [setVendorStatus]);
+
+  async function handleSubmit() {
+    setFormError(null);
+    setSubmitting(true);
+
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+      setSubmitting(false);
+      setFormError("Please sign in to submit a vendor application.");
+      return;
+    }
+
+    const payload = {
+      profile_id: user.id,
+      store_name: storeName.trim(),
+      description: description.trim(),
+      categories: selectedCategories,
+      notes: experience.trim() || null,
+      status: "pending" as const,
+      updated_at: new Date().toISOString(),
+    };
+
+    const { error } = await supabase
+      .from("vendor_applications")
+      .upsert(payload, { onConflict: "profile_id" });
+
+    setSubmitting(false);
+
+    if (error) {
+      setFormError(error.message);
+      return;
+    }
+
     setVendorStatus("pending");
     setSubmitted(true);
+  }
+
+  if (loadingExisting) {
+    return (
+      <SafeAreaView style={st.safe}>
+        <StatusBar style="light" />
+        <View style={st.loadingWrap}>
+          <ActivityIndicator size="large" color={C.accent} />
+        </View>
+      </SafeAreaView>
+    );
   }
 
   if (submitted || vendorStatus === "pending") {
@@ -177,6 +275,12 @@ export default function VendorApplicationScreen({ onBack }: Props) {
           placeholderTextColor={C.textMuted}
         />
 
+        {formError && (
+          <View style={st.errorBox}>
+            <Text style={st.errorText}>{formError}</Text>
+          </View>
+        )}
+
         {/* ── Terms ── */}
         <View style={st.termsRow}>
           <Ionicons name="information-circle" size={16} color={C.textAccent} />
@@ -192,10 +296,16 @@ export default function VendorApplicationScreen({ onBack }: Props) {
         <Pressable
           style={[st.submitBtn, !canSubmit && st.submitBtnDisabled]}
           onPress={handleSubmit}
-          disabled={!canSubmit}
+          disabled={!canSubmit || submitting}
         >
-          <Ionicons name="storefront" size={18} color={C.textHero} />
-          <Text style={st.submitText}>Submit Application</Text>
+          {submitting ? (
+            <ActivityIndicator size="small" color={C.textHero} />
+          ) : (
+            <>
+              <Ionicons name="storefront" size={18} color={C.textHero} />
+              <Text style={st.submitText}>Submit Application</Text>
+            </>
+          )}
         </Pressable>
       </View>
     </SafeAreaView>
@@ -437,4 +547,23 @@ const st = StyleSheet.create({
     marginTop: S.lg,
   },
   doneBtnText: { color: C.textHero, fontSize: 15, fontWeight: "800" },
+  loadingWrap: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  errorBox: {
+    marginTop: S.lg,
+    borderRadius: S.radiusSmall,
+    borderWidth: 1,
+    borderColor: "rgba(239,68,68,0.35)",
+    backgroundColor: "rgba(239,68,68,0.12)",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  errorText: {
+    color: C.danger,
+    fontSize: 12,
+    fontWeight: "600",
+  },
 });

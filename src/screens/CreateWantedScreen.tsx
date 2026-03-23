@@ -1,5 +1,6 @@
 import { useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
   Image,
   KeyboardAvoidingView,
@@ -18,7 +19,8 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { C } from "../theme";
 import { cf } from "../styles/createForm.styles";
-import { MARKET_FILTERS, wantedPosts } from "../data/market";
+import { MARKET_FILTERS } from "../data/market";
+import { supabase } from "../lib/supabase";
 
 const CATEGORIES = MARKET_FILTERS.filter((f) => f !== "All");
 
@@ -27,6 +29,7 @@ type Props = { onBack: () => void };
 export default function CreateWantedScreen({ onBack }: Props) {
   const insets = useSafeAreaInsets();
   const [step, setStep] = useState(0);
+  const [submitting, setSubmitting] = useState(false);
 
   const [image, setImage] = useState<string | null>(null);
   const [cardName, setCardName] = useState("");
@@ -82,23 +85,75 @@ export default function CreateWantedScreen({ onBack }: Props) {
     }
   }
 
-  function handleSubmit() {
-    const newWanted = {
-      id: `w${Date.now()}`,
-      cardName: cardName.trim(),
-      edition: edition.trim() || "Any Edition",
-      gradeWanted: gradeWanted.trim() || "Any",
-      offerPrice: offerPrice.startsWith("$") ? offerPrice : `$${offerPrice}`,
-      buyer: "you",
-      postedAt: "Just now",
-      category,
-      description: description.trim(),
-      views: 0,
-      buyerRating: 5.0,
-      buyerPurchases: 0,
-    };
-    wantedPosts.unshift(newWanted);
-    onBack();
+  async function handleSubmit() {
+    setSubmitting(true);
+
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      setSubmitting(false);
+      Alert.alert("Error", "Please sign in to create a wanted post.");
+      return;
+    }
+
+    try {
+      const numericPrice = parseFloat(offerPrice.replace(/[$,]/g, ""));
+      if (isNaN(numericPrice) || numericPrice <= 0) {
+        setSubmitting(false);
+        Alert.alert("Error", "Please enter a valid offer price.");
+        return;
+      }
+
+      let imageUrl: string | null = null;
+      if (image) {
+        const extMatch = image.match(/\.(\w+)(\?|$)/);
+        const ext = extMatch?.[1]?.toLowerCase() ?? "jpg";
+        const mimeTypes: Record<string, string> = {
+          jpg: "image/jpeg",
+          jpeg: "image/jpeg",
+          png: "image/png",
+          gif: "image/gif",
+          webp: "image/webp",
+        };
+        const contentType = mimeTypes[ext] ?? "image/jpeg";
+        const filePath = `${user.id}/wanted-${Date.now()}.${ext}`;
+        const resp = await fetch(image);
+        const arrayBuf = await resp.arrayBuffer();
+
+        const { error: uploadError } = await supabase.storage
+          .from("listing-images")
+          .upload(filePath, arrayBuf, {
+            upsert: true,
+            contentType,
+          });
+
+        if (uploadError) {
+          throw uploadError;
+        }
+        const { data: publicUrlData } = supabase.storage
+          .from("listing-images")
+          .getPublicUrl(filePath);
+        imageUrl = publicUrlData.publicUrl;
+      }
+
+      const { error } = await supabase.from("wanted_posts").insert({
+        buyer_id: user.id,
+        card_name: cardName.trim(),
+        edition: edition.trim() || null,
+        grade_wanted: gradeWanted.trim() || null,
+        offer_price: numericPrice,
+        category,
+        description: description.trim() || null,
+        image_url: imageUrl,
+        status: "active",
+      });
+
+      if (error) throw error;
+      onBack();
+    } catch (err: any) {
+      Alert.alert("Error", err?.message ?? "Failed to create wanted post.");
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   return (
@@ -355,16 +410,20 @@ export default function CreateWantedScreen({ onBack }: Props) {
             <Pressable
               style={[cf.submitBtn, !canAdvance() && cf.nextBtnDisabled]}
               onPress={handleSubmit}
-              disabled={!canAdvance()}
+              disabled={!canAdvance() || submitting}
             >
-              <Text
-                style={[
-                  cf.submitBtnText,
-                  !canAdvance() && cf.nextBtnTextDisabled,
-                ]}
-              >
-                Post Wanted
-              </Text>
+              {submitting ? (
+                <ActivityIndicator size="small" color={C.textHero} />
+              ) : (
+                <Text
+                  style={[
+                    cf.submitBtnText,
+                    !canAdvance() && cf.nextBtnTextDisabled,
+                  ]}
+                >
+                  Post Wanted
+                </Text>
+              )}
             </Pressable>
           )}
         </View>

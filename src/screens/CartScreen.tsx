@@ -49,16 +49,13 @@ export default function CartScreen({ onBack }: Props) {
                 <View style={st.cardArt} />
                 <View style={st.cardInfo}>
                   <Text style={st.cardName} numberOfLines={1}>
-                    {ci.listing.cardName}
+                    {ci.listing.card_name}
                   </Text>
-                  <Text style={st.cardEdition}>{ci.listing.edition}</Text>
-                  <Text style={st.cardGrade}>{ci.listing.grade}</Text>
-                  <Text style={st.stockHint}>
-                    Max {ci.listing.stockAvailable} in stock
-                  </Text>
+                  <Text style={st.cardEdition}>{ci.listing.edition ?? "—"}</Text>
+                  <Text style={st.cardGrade}>{ci.listing.grade ?? "Ungraded"}</Text>
                   <View style={st.sellerRow}>
                     <View style={st.sellerDot} />
-                    <Text style={st.sellerName}>@{ci.listing.seller}</Text>
+                    <Text style={st.sellerName}>@{ci.listing.seller?.username ?? "user"}</Text>
                   </View>
                 </View>
                 <View style={st.cardRight}>
@@ -78,13 +75,8 @@ export default function CartScreen({ onBack }: Props) {
                     </Pressable>
                     <Text style={st.qtyValue}>{ci.quantity}</Text>
                     <Pressable
-                      style={[
-                        st.qtyBtn,
-                        ci.quantity >= ci.listing.stockAvailable &&
-                          st.qtyBtnDisabled,
-                      ]}
+                      style={st.qtyBtn}
                       onPress={() => setQuantity(ci.listing.id, ci.quantity + 1)}
-                      disabled={ci.quantity >= ci.listing.stockAvailable}
                     >
                       <Feather name="plus" size={12} color={C.textPrimary} />
                     </Pressable>

@@ -1,6 +1,7 @@
 import {
   Image,
   Pressable,
+  RefreshControl,
   SafeAreaView,
   ScrollView,
   Switch,
@@ -10,9 +11,11 @@ import {
 import { StatusBar } from "expo-status-bar";
 import { Feather, Ionicons } from "@expo/vector-icons";
 import { StyleSheet } from "react-native";
+import { useCallback, useState } from "react";
 import { C, S } from "../theme";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import { useUser } from "../data/user";
+import { supabase } from "../lib/supabase";
 
 type SettingRow = {
   id: string;
@@ -30,6 +33,15 @@ type Section = {
 
 const SECTIONS: Section[] = [
   {
+    title: "Trading",
+    rows: [
+      { id: "shipping", icon: "cube-outline", label: "Shipping Address" },
+      { id: "payment", icon: "card-outline", label: "Payment Methods" },
+      { id: "listings", icon: "storefront-outline", label: "My Listings" },
+      { id: "bids", icon: "hammer-outline", label: "My Bids" },
+    ],
+  },
+  {
     title: "Account",
     rows: [
       { id: "profile", icon: "person-outline", label: "Edit Profile" },
@@ -45,15 +57,6 @@ const SECTIONS: Section[] = [
       { id: "dark_mode", icon: "moon-outline", label: "Dark Mode", toggle: true },
       { id: "currency", icon: "cash-outline", label: "Currency", value: "USD" },
       { id: "categories", icon: "pricetag-outline", label: "My Categories", value: "Pokémon, MTG" },
-    ],
-  },
-  {
-    title: "Trading",
-    rows: [
-      { id: "shipping", icon: "cube-outline", label: "Shipping Address" },
-      { id: "payment", icon: "card-outline", label: "Payment Methods" },
-      { id: "listings", icon: "storefront-outline", label: "My Listings" },
-      { id: "bids", icon: "hammer-outline", label: "My Bids" },
     ],
   },
   {
@@ -76,7 +79,51 @@ const SECTIONS: Section[] = [
 
 export default function SettingsScreen() {
   const { push } = useAppNavigation();
-  const { isVerifiedVendor, vendorStatus } = useUser();
+  const { isVerifiedVendor, vendorStatus, setVendorStatus } = useUser();
+  const [refreshing, setRefreshing] = useState(false);
+
+  const refreshVendorState = useCallback(async () => {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+      setVendorStatus("none");
+      return;
+    }
+
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("verified_seller")
+      .eq("id", user.id)
+      .maybeSingle();
+
+    if (profile?.verified_seller) {
+      setVendorStatus("approved");
+      return;
+    }
+
+    const { data: application } = await supabase
+      .from("vendor_applications")
+      .select("status")
+      .eq("profile_id", user.id)
+      .maybeSingle();
+
+    setVendorStatus(application?.status === "pending" ? "pending" : "none");
+  }, [setVendorStatus]);
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await refreshVendorState().catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    setRefreshing(false);
+  }, [refreshVendorState]);
+
+  function handleRowPress(rowId: string) {
+    if (rowId === "listings") {
+      push({ type: "MY_LISTINGS" });
+    }
+  }
 
   return (
     <SafeAreaView style={st.safe}>
@@ -84,6 +131,13 @@ export default function SettingsScreen() {
       <ScrollView
         showsVerticalScrollIndicator={false}
         contentContainerStyle={st.scroll}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            tintColor={C.accent}
+          />
+        }
       >
         {/* ── Profile Card ── */}
         <View style={st.profileCard}>
@@ -134,7 +188,23 @@ export default function SettingsScreen() {
         </View>
 
         {/* ── Vendor Card ── */}
-        {!isVerifiedVendor && (
+        {isVerifiedVendor ? (
+          <Pressable
+            style={st.vendorCard}
+            onPress={() => push({ type: "VENDOR_HUB" })}
+          >
+            <View style={st.vendorIconWrap}>
+              <Ionicons name="storefront" size={22} color={C.accent} />
+            </View>
+            <View style={st.vendorCardInfo}>
+              <Text style={st.vendorCardTitle}>Vendor Hub</Text>
+              <Text style={st.vendorCardSub}>
+                Manage your store, display items &amp; listings
+              </Text>
+            </View>
+            <Feather name="chevron-right" size={18} color={C.textMuted} />
+          </Pressable>
+        ) : (
           <Pressable
             style={st.vendorCard}
             onPress={() => push({ type: "VENDOR_APPLICATION" })}
@@ -163,7 +233,7 @@ export default function SettingsScreen() {
             <View style={st.sectionCard}>
               {section.rows.map((row, i) => (
                 <View key={row.id}>
-                  <Pressable style={st.row}>
+                  <Pressable style={st.row} onPress={() => handleRowPress(row.id)}>
                     <View style={[st.rowIcon, row.danger && st.rowIconDanger]}>
                       <Ionicons
                         name={row.icon}

@@ -14,7 +14,10 @@ export type AppScreen =
   | { type: "CREATE_WANTED" }
   | { type: "CART" }
   | { type: "CHECKOUT" }
-  | { type: "VENDOR_APPLICATION" };
+  | { type: "VENDOR_APPLICATION" }
+  | { type: "VENDOR_HUB" }
+  | { type: "VENDOR_STORE_PAGE"; storeId: string }
+  | { type: "MY_LISTINGS" };
 
 type StackItem = { id: number; screen: AppScreen };
 

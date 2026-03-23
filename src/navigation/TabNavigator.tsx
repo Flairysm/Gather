@@ -22,7 +22,11 @@ import CreateWantedScreen from "../screens/CreateWantedScreen";
 import CartScreen from "../screens/CartScreen";
 import CheckoutScreen from "../screens/CheckoutScreen";
 import VendorApplicationScreen from "../screens/VendorApplicationScreen";
+import VendorHubScreen from "../screens/VendorHubScreen";
+import VendorStorePageScreen from "../screens/VendorStorePageScreen";
+import MyListingsScreen from "../screens/MyListingsScreen";
 import { UserContext, type VendorStatus } from "../data/user";
+import { supabase } from "../lib/supabase";
 
 type TabId = "HOME" | "MARKET" | "LIVE" | "AUCTION" | "SETTINGS";
 
@@ -79,6 +83,12 @@ function renderOverlay(screen: AppScreen, pop: () => void) {
       return <CheckoutScreen onBack={pop} />;
     case "VENDOR_APPLICATION":
       return <VendorApplicationScreen onBack={pop} />;
+    case "VENDOR_HUB":
+      return <VendorHubScreen onBack={pop} />;
+    case "VENDOR_STORE_PAGE":
+      return <VendorStorePageScreen storeId={screen.storeId} onBack={pop} />;
+    case "MY_LISTINGS":
+      return <MyListingsScreen onBack={pop} />;
   }
 }
 
@@ -95,18 +105,12 @@ function useCartState() {
 
   const addItem = useCallback((listing: Listing, quantity: number = 1) => {
     setItems((prev) => {
-      const safeQty = Math.max(1, Math.min(quantity, listing.stockAvailable));
+      const safeQty = Math.max(1, quantity);
       const existing = prev.find((ci) => ci.listing.id === listing.id);
       if (existing) {
         return prev.map((ci) =>
           ci.listing.id === listing.id
-            ? {
-                ...ci,
-                quantity: Math.min(
-                  ci.quantity + safeQty,
-                  ci.listing.stockAvailable,
-                ),
-              }
+            ? { ...ci, quantity: ci.quantity + safeQty }
             : ci,
         );
       }
@@ -119,12 +123,7 @@ function useCartState() {
       prev.flatMap((ci) => {
         if (ci.listing.id !== listingId) return [ci];
         if (quantity <= 0) return [];
-        return [
-          {
-            ...ci,
-            quantity: Math.min(Math.max(1, quantity), ci.listing.stockAvailable),
-          },
-        ];
+        return [{ ...ci, quantity: Math.max(1, quantity) }];
       }),
     );
   }, []);
@@ -162,6 +161,60 @@ export default function TabNavigator() {
     vendorStatus,
     setVendorStatus,
   };
+
+  useEffect(() => {
+    let mounted = true;
+
+    async function syncVendorStatus() {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+
+      if (!mounted) return;
+      if (!user) {
+        setVendorStatus("none");
+        return;
+      }
+
+      // Seller access is controlled by profiles.verified_seller.
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("verified_seller")
+        .eq("id", user.id)
+        .maybeSingle();
+
+      if (!mounted) return;
+      if (profile?.verified_seller) {
+        setVendorStatus("approved");
+        return;
+      }
+
+      // If not approved, check if application is still pending.
+      const { data: app } = await supabase
+        .from("vendor_applications")
+        .select("status")
+        .eq("profile_id", user.id)
+        .maybeSingle();
+
+      if (!mounted) return;
+      setVendorStatus(app?.status === "pending" ? "pending" : "none");
+    }
+
+    syncVendorStatus().catch(() => {
+      if (mounted) setVendorStatus("none");
+    });
+
+    const { data: authSub } = supabase.auth.onAuthStateChange(() => {
+      syncVendorStatus().catch(() => {
+        if (mounted) setVendorStatus("none");
+      });
+    });
+
+    return () => {
+      mounted = false;
+      authSub.subscription.unsubscribe();
+    };
+  }, []);
 
   function switchTab(id: TabId) {
     setMounted((prev) => {
