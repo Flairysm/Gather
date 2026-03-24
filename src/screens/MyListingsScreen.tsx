@@ -73,7 +73,7 @@ export default function MyListingsScreen({ onBack }: Props) {
     const { data } = await supabase
       .from("listings")
       .select(
-        "id, seller_id, card_name, edition, grade, condition, price, category, description, images, views, status, created_at",
+        "id, seller_id, card_name, edition, grade, condition, price, quantity, category, description, images, views, status, created_at",
       )
       .eq("seller_id", user.id)
       .order("created_at", { ascending: false });

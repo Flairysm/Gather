@@ -1,4 +1,7 @@
+import { useCallback, useEffect, useState } from "react";
 import {
+  ActivityIndicator,
+  Image,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -10,30 +13,86 @@ import {
 import { StatusBar } from "expo-status-bar";
 import { Feather, Ionicons } from "@expo/vector-icons";
 import { C, S } from "../theme";
-import { conversations, type Conversation } from "../data/messages";
+import {
+  loadConversations,
+  subscribeToConversations,
+  formatTimestamp,
+  type Conversation,
+} from "../data/messages";
 import { useAppNavigation } from "../navigation/NavigationContext";
+import { supabase } from "../lib/supabase";
 
 type Props = { onBack: () => void };
 
 export default function MessagesScreen({ onBack }: Props) {
   const { push } = useAppNavigation();
+  const [convos, setConvos] = useState<Conversation[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState("");
+  const [userId, setUserId] = useState<string | null>(null);
+
+  const fetchConversations = useCallback(async (uid: string) => {
+    try {
+      const data = await loadConversations(uid);
+      setConvos(data);
+    } catch {
+      // silent
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    let channel: ReturnType<typeof subscribeToConversations> | null = null;
+
+    (async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) {
+        setLoading(false);
+        return;
+      }
+      setUserId(user.id);
+      await fetchConversations(user.id);
+
+      channel = subscribeToConversations(user.id, () => {
+        fetchConversations(user.id);
+      });
+    })();
+
+    return () => {
+      if (channel) supabase.removeChannel(channel);
+    };
+  }, [fetchConversations]);
+
+  const filtered = search.trim()
+    ? convos.filter(
+        (c) =>
+          (c.otherUser.username ?? "")
+            .toLowerCase()
+            .includes(search.toLowerCase()) ||
+          (c.otherUser.displayName ?? "")
+            .toLowerCase()
+            .includes(search.toLowerCase()) ||
+          (c.topic ?? "").toLowerCase().includes(search.toLowerCase()),
+      )
+    : convos;
 
   return (
     <SafeAreaView style={st.safe}>
       <StatusBar style="light" />
 
-      {/* ── Header ── */}
+      {/* Header */}
       <View style={st.header}>
         <Pressable style={st.backBtn} onPress={onBack}>
           <Feather name="arrow-left" size={20} color={C.textPrimary} />
         </Pressable>
         <Text style={st.title}>Messages</Text>
-        <Pressable style={st.iconBtn}>
-          <Feather name="edit" size={18} color={C.textSearch} />
-        </Pressable>
+        <View style={{ width: 36 }} />
       </View>
 
-      {/* ── Search ── */}
+      {/* Search */}
       <View style={st.searchWrap}>
         <View style={st.searchBar}>
           <Feather name="search" size={16} color={C.textMuted} />
@@ -41,64 +100,97 @@ export default function MessagesScreen({ onBack }: Props) {
             style={st.searchInput}
             placeholder="Search messages"
             placeholderTextColor={C.textMuted}
+            value={search}
+            onChangeText={setSearch}
           />
         </View>
       </View>
 
-      <ScrollView showsVerticalScrollIndicator={false}>
-        {conversations.map((conv: Conversation) => (
-          <Pressable
-            key={conv.id}
-            style={st.row}
-            onPress={() => push({ type: "CHAT", conversationId: conv.id })}
-          >
-            <View style={st.avatarWrap}>
-              <View style={st.avatar}>
-                <Text style={st.avatarText}>
-                  {conv.user.charAt(0).toUpperCase()}
-                </Text>
-              </View>
-              {conv.online && <View style={st.onlineDot} />}
-            </View>
+      {loading ? (
+        <View style={st.center}>
+          <ActivityIndicator size="large" color={C.accent} />
+        </View>
+      ) : filtered.length === 0 ? (
+        <View style={st.center}>
+          <Ionicons name="chatbubbles-outline" size={48} color={C.textMuted} />
+          <Text style={st.emptyText}>
+            {search.trim() ? "No matching conversations" : "No messages yet"}
+          </Text>
+          <Text style={st.emptySubtext}>
+            {search.trim()
+              ? "Try a different search term"
+              : "Start a conversation from a listing"}
+          </Text>
+        </View>
+      ) : (
+        <ScrollView showsVerticalScrollIndicator={false}>
+          {filtered.map((conv) => {
+            const displayName =
+              conv.otherUser.displayName ??
+              conv.otherUser.username ??
+              "User";
 
-            <View style={st.rowContent}>
-              <View style={st.rowTop}>
-                <Text style={[st.userName, conv.unread > 0 && st.userNameUnread]}>
-                  {conv.user}
-                </Text>
-                <Text style={st.timestamp}>{conv.timestamp}</Text>
-              </View>
-              {conv.topic && (
-                <View style={st.topicRow}>
-                  <Ionicons name="pricetag-outline" size={10} color={C.textAccent} />
-                  <Text style={st.topicText}>{conv.topic}</Text>
-                </View>
-              )}
-              <Text
-                style={[st.lastMessage, conv.unread > 0 && st.lastMessageUnread]}
-                numberOfLines={1}
+            return (
+              <Pressable
+                key={conv.id}
+                style={st.row}
+                onPress={() =>
+                  push({ type: "CHAT", conversationId: conv.id })
+                }
               >
-                {conv.lastMessage}
-              </Text>
-            </View>
+                <View style={st.avatarWrap}>
+                  {conv.listingImage ? (
+                    <Image
+                      source={{ uri: conv.listingImage }}
+                      style={st.avatarImg}
+                    />
+                  ) : (
+                    <View style={st.avatar}>
+                      <Text style={st.avatarText}>
+                        {displayName.charAt(0).toUpperCase()}
+                      </Text>
+                    </View>
+                  )}
+                </View>
 
-            {conv.unread > 0 && (
-              <View style={st.unreadBadge}>
-                <Text style={st.unreadText}>{conv.unread}</Text>
-              </View>
-            )}
-          </Pressable>
-        ))}
-      </ScrollView>
+                <View style={st.rowContent}>
+                  <View style={st.rowTop}>
+                    <Text style={st.userName} numberOfLines={1}>
+                      {displayName}
+                    </Text>
+                    {conv.lastMessageAt && (
+                      <Text style={st.timestamp}>
+                        {formatTimestamp(conv.lastMessageAt)}
+                      </Text>
+                    )}
+                  </View>
+                  {conv.topic && (
+                    <View style={st.topicRow}>
+                      <Ionicons
+                        name="pricetag-outline"
+                        size={10}
+                        color={C.textAccent}
+                      />
+                      <Text style={st.topicText}>{conv.topic}</Text>
+                    </View>
+                  )}
+                  {conv.lastMessage && (
+                    <Text style={st.lastMessage} numberOfLines={1}>
+                      {conv.lastMessage}
+                    </Text>
+                  )}
+                </View>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
+      )}
     </SafeAreaView>
   );
 }
 
 const st = StyleSheet.create({
-  safe: {
-    flex: 1,
-    backgroundColor: C.bg,
-  },
+  safe: { flex: 1, backgroundColor: C.bg },
   header: {
     flexDirection: "row",
     alignItems: "center",
@@ -122,16 +214,6 @@ const st = StyleSheet.create({
     fontSize: 20,
     fontWeight: "800",
   },
-  iconBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: C.elevated,
-    borderWidth: 1,
-    borderColor: C.borderIcon,
-    alignItems: "center",
-    justifyContent: "center",
-  },
   searchWrap: {
     paddingHorizontal: S.screenPadding,
     marginBottom: S.lg,
@@ -152,8 +234,24 @@ const st = StyleSheet.create({
     color: C.textPrimary,
     fontSize: 14,
   },
-
-  // ── Conversation row ──
+  center: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 12,
+    paddingHorizontal: S.screenPadding,
+  },
+  emptyText: {
+    color: C.textPrimary,
+    fontSize: 16,
+    fontWeight: "700",
+  },
+  emptySubtext: {
+    color: C.textSecondary,
+    fontSize: 13,
+    fontWeight: "500",
+    textAlign: "center",
+  },
   row: {
     flexDirection: "row",
     alignItems: "center",
@@ -174,21 +272,17 @@ const st = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  avatarImg: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    borderWidth: 1.5,
+    borderColor: C.borderAvatar,
+  },
   avatarText: {
     color: C.textHero,
     fontSize: 16,
     fontWeight: "800",
-  },
-  onlineDot: {
-    position: "absolute",
-    bottom: 1,
-    right: 1,
-    width: 11,
-    height: 11,
-    borderRadius: 6,
-    backgroundColor: C.success,
-    borderWidth: 2,
-    borderColor: C.bg,
   },
   rowContent: {
     flex: 1,
@@ -202,10 +296,9 @@ const st = StyleSheet.create({
   userName: {
     color: C.textPrimary,
     fontSize: 14,
-    fontWeight: "500",
-  },
-  userNameUnread: {
-    fontWeight: "800",
+    fontWeight: "700",
+    flex: 1,
+    marginRight: 8,
   },
   timestamp: {
     color: C.textMuted,
@@ -227,23 +320,5 @@ const st = StyleSheet.create({
     color: C.textSecondary,
     fontSize: 12,
     fontWeight: "400",
-  },
-  lastMessageUnread: {
-    color: C.textPrimary,
-    fontWeight: "600",
-  },
-  unreadBadge: {
-    minWidth: 20,
-    height: 20,
-    borderRadius: 10,
-    backgroundColor: C.accent,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: 5,
-  },
-  unreadText: {
-    color: C.textHero,
-    fontSize: 10,
-    fontWeight: "800",
   },
 });

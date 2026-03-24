@@ -47,11 +47,28 @@ const FAB_ACTIONS = [
 const SKELETON_CARD_W =
   (Dimensions.get("window").width - S.screenPadding * 2 - S.cardGap) / 2;
 
+function hasDisplayableCondition(condition: string | null | undefined) {
+  const normalized = (condition ?? "").trim().toLowerCase();
+  return Boolean(
+    normalized &&
+      normalized !== "na" &&
+      normalized !== "n/a" &&
+      normalized !== "condition n/a",
+  );
+}
+
+function formatGradeLabel(grade: string | null | undefined) {
+  const value = (grade ?? "").trim();
+  if (!value) return null;
+  return value;
+}
+
 export default function MarketScreen() {
   const { push } = useAppNavigation();
   const { isVerifiedVendor } = useUser();
   const [activeTab, setActiveTab] = useState<Tab>("Listings");
   const [activeFilter, setActiveFilter] = useState("All");
+  const [searchQuery, setSearchQuery] = useState("");
   const [fabOpen, setFabOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const anim = useRef(new Animated.Value(0)).current;
@@ -67,7 +84,7 @@ export default function MarketScreen() {
     const { data } = await supabase
       .from("listings")
       .select(`
-        id, seller_id, card_name, edition, grade, condition, price,
+        id, seller_id, card_name, edition, grade, condition, price, quantity,
         category, description, images, views, status, created_at,
         seller:profiles!seller_id(username, display_name, rating, total_sales, avatar_url)
       `)
@@ -144,6 +161,8 @@ export default function MarketScreen() {
     loadWanted().catch(() => {});
   }, [loadListings, loadWanted]);
 
+  const normalizedQuery = searchQuery.trim().toLowerCase();
+
   const filteredListings =
     activeFilter === "All"
       ? listings
@@ -153,6 +172,40 @@ export default function MarketScreen() {
     activeFilter === "All"
       ? wantedPosts
       : wantedPosts.filter((w) => w.category === activeFilter);
+
+  const searchedListings = normalizedQuery
+    ? filteredListings.filter((item) => {
+        const haystack = [
+          item.card_name,
+          item.edition ?? "",
+          item.grade ?? "",
+          item.condition ?? "",
+          item.category ?? "",
+          vendorStoreNames[item.seller_id] ?? "",
+          item.seller?.username ?? "",
+          item.seller?.display_name ?? "",
+        ]
+          .join(" ")
+          .toLowerCase();
+        return haystack.includes(normalizedQuery);
+      })
+    : filteredListings;
+
+  const searchedWanted = normalizedQuery
+    ? filteredWanted.filter((item) => {
+        const haystack = [
+          item.card_name,
+          item.edition ?? "",
+          item.grade_wanted ?? "",
+          item.category ?? "",
+          item.buyer?.username ?? "",
+          item.buyer?.display_name ?? "",
+        ]
+          .join(" ")
+          .toLowerCase();
+        return haystack.includes(normalizedQuery);
+      })
+    : filteredWanted;
 
   function toggleFab() {
     Animated.spring(anim, {
@@ -257,7 +310,14 @@ export default function MarketScreen() {
                 style={m.searchInput}
                 placeholder="Search Market"
                 placeholderTextColor={C.textMuted}
+                value={searchQuery}
+                onChangeText={setSearchQuery}
               />
+              {searchQuery.trim().length > 0 && (
+                <Pressable onPress={() => setSearchQuery("")} hitSlop={10}>
+                  <Feather name="x-circle" size={16} color={C.textMuted} />
+                </Pressable>
+              )}
             </View>
             <Pressable style={m.iconBtn}>
               <Feather name="sliders" size={S.iconSize.md} color={C.textSearch} />
@@ -315,18 +375,20 @@ export default function MarketScreen() {
                 <Text style={{ color: C.textMuted, fontSize: 13, padding: 20 }}>
                   Loading listings...
                 </Text>
-              ) : filteredListings.length === 0 ? (
+              ) : searchedListings.length === 0 ? (
                 <View style={{ alignItems: "center", padding: 40, width: "100%" }}>
                   <Ionicons name="storefront-outline" size={32} color={C.textMuted} />
                   <Text style={{ color: C.textPrimary, fontSize: 14, fontWeight: "800", marginTop: 8 }}>
-                    No listings yet
+                    {normalizedQuery ? "No matching listings" : "No listings yet"}
                   </Text>
                   <Text style={{ color: C.textSecondary, fontSize: 12, marginTop: 4 }}>
-                    Be the first to list a card for sale
+                    {normalizedQuery
+                      ? "Try a different keyword"
+                      : "Be the first to list a card for sale"}
                   </Text>
                 </View>
               ) : (
-                filteredListings.map((item) => (
+                searchedListings.map((item) => (
                   <Pressable
                     key={item.id}
                     style={m.listingCard}
@@ -339,34 +401,28 @@ export default function MarketScreen() {
                           style={{ width: "100%", height: "100%", borderRadius: S.radiusCardInner }}
                         />
                       ) : null}
-                      <View
-                        style={{
-                          position: "absolute",
-                          left: 8,
-                          right: 8,
-                          bottom: 8,
-                          backgroundColor: "rgba(4,7,13,0.72)",
-                          borderWidth: 1,
-                          borderColor: "rgba(255,255,255,0.12)",
-                          borderRadius: 8,
-                          paddingHorizontal: 8,
-                          paddingVertical: 4,
-                        }}
-                      >
-                        <Text
-                          numberOfLines={1}
-                          style={{
-                            color: "#fff",
-                            fontSize: 10,
-                            fontWeight: "800",
-                          }}
-                        >
+                      <View style={(m as any).vendorBadge}>
+                        <Ionicons
+                          name="storefront-outline"
+                          size={11}
+                          color={C.textSearch}
+                        />
+                        <Text numberOfLines={1} style={(m as any).vendorBadgeText}>
                           {vendorStoreNames[item.seller_id] ?? "Vendor Store"}
                         </Text>
                       </View>
-                      {item.grade && (
-                        <View style={[m.gradeBadge, { position: "absolute", top: S.sm, right: S.sm }]}>
-                          <Text style={m.gradeBadgeText}>{item.grade}</Text>
+                      {hasDisplayableCondition(item.condition) && (
+                        <View style={m.conditionBadge}>
+                          <Text numberOfLines={1} style={m.conditionBadgeText}>
+                            {item.condition}
+                          </Text>
+                        </View>
+                      )}
+                      {formatGradeLabel(item.grade) && (
+                        <View style={[m.gradeBadge, m.gradeBadgeTopLeft]}>
+                          <Text style={m.gradeBadgeText}>
+                            {formatGradeLabel(item.grade)}
+                          </Text>
                         </View>
                       )}
                     </View>
@@ -408,18 +464,20 @@ export default function MarketScreen() {
                 <Text style={{ color: C.textMuted, fontSize: 13, padding: 20 }}>
                   Loading wanted posts...
                 </Text>
-              ) : filteredWanted.length === 0 ? (
+              ) : searchedWanted.length === 0 ? (
                 <View style={{ alignItems: "center", padding: 40, width: "100%" }}>
                   <MaterialCommunityIcons name="card-search-outline" size={32} color={C.textMuted} />
                   <Text style={{ color: C.textPrimary, fontSize: 14, fontWeight: "800", marginTop: 8 }}>
-                    No wanted posts yet
+                    {normalizedQuery ? "No matching wanted posts" : "No wanted posts yet"}
                   </Text>
                   <Text style={{ color: C.textSecondary, fontSize: 12, marginTop: 4 }}>
-                    Post what cards you're looking for
+                    {normalizedQuery
+                      ? "Try a different keyword"
+                      : "Post what cards you're looking for"}
                   </Text>
                 </View>
               ) : (
-                filteredWanted.map((item) => (
+                searchedWanted.map((item) => (
                   <Pressable
                     key={item.id}
                     style={m.wantedCard}

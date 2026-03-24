@@ -5,9 +5,13 @@ import { C } from "../theme";
 const SCREEN_W = Dimensions.get("window").width;
 const IOS_EASE = Easing.bezier(0.25, 0.46, 0.45, 0.94);
 
+export type ChatScreenParams =
+  | { type: "CHAT"; conversationId: string; openOffer?: boolean }
+  | { type: "CHAT"; sellerId: string; listingId: string; topic?: string; openOffer?: boolean };
+
 export type AppScreen =
   | { type: "MESSAGES" }
-  | { type: "CHAT"; conversationId: string; openOffer?: boolean }
+  | ChatScreenParams
   | { type: "LISTING_DETAIL"; listingId: string }
   | { type: "WANTED_DETAIL"; wantedId: string }
   | { type: "CREATE_LISTING" }
@@ -17,7 +21,9 @@ export type AppScreen =
   | { type: "VENDOR_APPLICATION" }
   | { type: "VENDOR_HUB" }
   | { type: "VENDOR_STORE_PAGE"; storeId: string }
-  | { type: "MY_LISTINGS" };
+  | { type: "MY_LISTINGS" }
+  | { type: "MY_ORDERS" }
+  | { type: "EDIT_PROFILE" };
 
 type StackItem = { id: number; screen: AppScreen };
 

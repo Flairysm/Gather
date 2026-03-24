@@ -33,6 +33,7 @@ export default function VendorApplicationScreen({ onBack }: Props) {
   const [submitting, setSubmitting] = useState(false);
   const [loadingExisting, setLoadingExisting] = useState(true);
   const [formError, setFormError] = useState<string | null>(null);
+  const [reviewNotes, setReviewNotes] = useState<string | null>(null);
 
   function toggleCategory(cat: string) {
     setSelectedCategories((prev) =>
@@ -77,10 +78,15 @@ export default function VendorApplicationScreen({ onBack }: Props) {
         setStoreName(data.store_name ?? "");
         setDescription(data.description ?? "");
         setSelectedCategories(data.categories ?? []);
+        setReviewNotes(data.notes ?? null);
         if (data.status === "approved") setVendorStatus("approved");
         if (data.status === "pending") {
           setVendorStatus("pending");
           setSubmitted(true);
+        }
+        if (data.status === "rejected") {
+          setVendorStatus("rejected");
+          setSubmitted(false);
         }
       }
 
@@ -200,6 +206,24 @@ export default function VendorApplicationScreen({ onBack }: Props) {
         contentContainerStyle={st.scroll}
       >
         {/* ── Intro ── */}
+        {vendorStatus === "rejected" && (
+          <View style={st.rejectedCard}>
+            <View style={st.rejectedHeader}>
+              <Ionicons name="alert-circle" size={18} color={C.danger} />
+              <Text style={st.rejectedTitle}>Previous application was rejected</Text>
+            </View>
+            <Text style={st.rejectedSub}>
+              Update your store details and submit again for another review.
+            </Text>
+            {reviewNotes ? (
+              <View style={st.rejectedNotesBox}>
+                <Text style={st.rejectedNotesLabel}>Reviewer notes</Text>
+                <Text style={st.rejectedNotesText}>{reviewNotes}</Text>
+              </View>
+            ) : null}
+          </View>
+        )}
+
         <View style={st.introCard}>
           <Ionicons name="storefront" size={28} color={C.accent} />
           <Text style={st.introTitle}>Start Selling on Gather</Text>
@@ -565,5 +589,51 @@ const st = StyleSheet.create({
     color: C.danger,
     fontSize: 12,
     fontWeight: "600",
+  },
+  rejectedCard: {
+    borderRadius: S.radiusCard,
+    borderWidth: 1,
+    borderColor: "rgba(239,68,68,0.35)",
+    backgroundColor: "rgba(239,68,68,0.1)",
+    padding: S.lg,
+    marginBottom: S.lg,
+    gap: 8,
+  },
+  rejectedHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  rejectedTitle: {
+    color: C.danger,
+    fontSize: 13,
+    fontWeight: "800",
+  },
+  rejectedSub: {
+    color: C.textPrimary,
+    fontSize: 12,
+    fontWeight: "500",
+    lineHeight: 18,
+  },
+  rejectedNotesBox: {
+    borderRadius: S.radiusSmall,
+    borderWidth: 1,
+    borderColor: "rgba(239,68,68,0.35)",
+    backgroundColor: "rgba(4,7,13,0.32)",
+    padding: 10,
+    gap: 4,
+  },
+  rejectedNotesLabel: {
+    color: C.textSecondary,
+    fontSize: 10,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.4,
+  },
+  rejectedNotesText: {
+    color: C.textPrimary,
+    fontSize: 12,
+    fontWeight: "500",
+    lineHeight: 17,
   },
 });

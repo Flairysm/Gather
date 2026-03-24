@@ -1,11 +1,12 @@
 import { useState } from "react";
-import { Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Alert, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { Feather, Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { C, S } from "../theme";
 import { useCart, parsePrice, formatPrice } from "../data/cart";
+import { supabase } from "../lib/supabase";
 
 type Props = { onBack: () => void };
 
@@ -13,10 +14,79 @@ export default function CheckoutScreen({ onBack }: Props) {
   const { items, clearCart, total } = useCart();
   const insets = useSafeAreaInsets();
   const [confirmed, setConfirmed] = useState(false);
+  const [processing, setProcessing] = useState(false);
   const totalUnits = items.reduce((sum, ci) => sum + ci.quantity, 0);
 
-  function handleConfirm() {
-    setConfirmed(true);
+  async function handleConfirm() {
+    if (processing || items.length === 0) return;
+    setProcessing(true);
+
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        Alert.alert("Error", "You must be signed in to complete a purchase.");
+        setProcessing(false);
+        return;
+      }
+
+      const ownItems = items.filter((ci) => ci.listing.seller_id === user.id);
+      if (ownItems.length > 0) {
+        Alert.alert(
+          "Cannot Purchase Own Listing",
+          `You own ${ownItems.length === 1 ? `"${ownItems[0].listing.card_name}"` : `${ownItems.length} items`} in your cart. Remove them before checking out.`,
+        );
+        setProcessing(false);
+        return;
+      }
+
+      const orderTotal = items.reduce(
+        (acc, ci) => acc + parsePrice(ci.listing.price) * ci.quantity,
+        0,
+      );
+
+      const { data: order, error: orderErr } = await supabase
+        .from("orders")
+        .insert({ buyer_id: user.id, total: orderTotal })
+        .select("id")
+        .single();
+
+      if (orderErr || !order) {
+        throw new Error(orderErr?.message ?? "Failed to create order");
+      }
+
+      const orderItems = items.map((ci) => ({
+        order_id: order.id,
+        listing_id: ci.listing.id,
+        seller_id: ci.listing.seller_id,
+        quantity: ci.quantity,
+        unit_price: parsePrice(ci.listing.price),
+      }));
+
+      const { error: itemsErr } = await supabase
+        .from("order_items")
+        .insert(orderItems);
+
+      if (itemsErr) {
+        throw new Error(itemsErr.message);
+      }
+
+      for (const ci of items) {
+        const newQty = Math.max(0, (ci.listing.quantity ?? 1) - ci.quantity);
+        await supabase
+          .from("listings")
+          .update({
+            quantity: newQty,
+            ...(newQty <= 0 ? { status: "sold" } : {}),
+          })
+          .eq("id", ci.listing.id);
+      }
+
+      setConfirmed(true);
+    } catch (err: any) {
+      Alert.alert("Purchase Failed", err.message ?? "Something went wrong. Please try again.");
+    } finally {
+      setProcessing(false);
+    }
   }
 
   function handleDone() {
@@ -164,9 +234,19 @@ export default function CheckoutScreen({ onBack }: Props) {
 
       {/* ── Bottom Bar ── */}
       <View style={[st.bottomBar, { paddingBottom: Math.max(insets.bottom, 14) }]}>
-        <Pressable style={st.confirmBtn} onPress={handleConfirm}>
-          <Ionicons name="lock-closed" size={18} color={C.textHero} />
-          <Text style={st.confirmText}>Confirm Purchase  •  {total()}</Text>
+        <Pressable
+          style={[st.confirmBtn, processing && { opacity: 0.7 }]}
+          onPress={handleConfirm}
+          disabled={processing}
+        >
+          {processing ? (
+            <ActivityIndicator size="small" color={C.textHero} />
+          ) : (
+            <Ionicons name="lock-closed" size={18} color={C.textHero} />
+          )}
+          <Text style={st.confirmText}>
+            {processing ? "Processing…" : `Confirm Purchase  •  ${total()}`}
+          </Text>
         </Pressable>
       </View>
     </SafeAreaView>

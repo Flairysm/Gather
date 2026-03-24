@@ -40,6 +40,7 @@ export default function CreateListingScreen({ onBack }: Props) {
   const [grade, setGrade] = useState("");
   const [condition, setCondition] = useState("");
   const [price, setPrice] = useState("");
+  const [quantity, setQuantity] = useState("1");
   const [description, setDescription] = useState("");
 
   const stepTitles = ["Add Photos", "Card Details", "Set Price"];
@@ -139,6 +140,9 @@ export default function CreateListingScreen({ onBack }: Props) {
         return;
       }
 
+      const qty = parseInt(quantity, 10);
+      const safeQty = isNaN(qty) || qty < 1 ? 1 : qty;
+
       const { error } = await supabase.from("listings").insert({
         seller_id: user.id,
         card_name: cardName.trim(),
@@ -146,6 +150,7 @@ export default function CreateListingScreen({ onBack }: Props) {
         grade: grade.trim() || null,
         condition: condition || null,
         price: numericPrice,
+        quantity: safeQty,
         category,
         description: description.trim() || null,
         images: uploadedUrls,
@@ -336,6 +341,16 @@ export default function CreateListingScreen({ onBack }: Props) {
                   keyboardType="numeric"
                 />
               </View>
+
+              <Text style={cf.fieldLabel}>Quantity</Text>
+              <TextInput
+                style={cf.input}
+                value={quantity}
+                onChangeText={setQuantity}
+                placeholder="1"
+                placeholderTextColor={C.textMuted}
+                keyboardType="number-pad"
+              />
 
               <Text style={cf.fieldLabel}>Description</Text>
               <TextInput

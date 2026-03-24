@@ -25,7 +25,9 @@ import VendorApplicationScreen from "../screens/VendorApplicationScreen";
 import VendorHubScreen from "../screens/VendorHubScreen";
 import VendorStorePageScreen from "../screens/VendorStorePageScreen";
 import MyListingsScreen from "../screens/MyListingsScreen";
-import { UserContext, type VendorStatus } from "../data/user";
+import MyOrdersScreen from "../screens/MyOrdersScreen";
+import EditProfileScreen from "../screens/EditProfileScreen";
+import { UserContext, fetchVendorStatus, type VendorStatus } from "../data/user";
 import { supabase } from "../lib/supabase";
 
 type TabId = "HOME" | "MARKET" | "LIVE" | "AUCTION" | "SETTINGS";
@@ -68,7 +70,15 @@ function renderOverlay(screen: AppScreen, pop: () => void) {
     case "MESSAGES":
       return <MessagesScreen onBack={pop} />;
     case "CHAT":
-      return <ChatScreen conversationId={screen.conversationId} openOffer={screen.openOffer} onBack={pop} />;
+      return (
+        <ChatScreen
+          {...("conversationId" in screen
+            ? { conversationId: screen.conversationId }
+            : { sellerId: screen.sellerId, listingId: screen.listingId, topic: screen.topic })}
+          openOffer={screen.openOffer}
+          onBack={pop}
+        />
+      );
     case "LISTING_DETAIL":
       return <ListingDetailScreen listingId={screen.listingId} onBack={pop} />;
     case "WANTED_DETAIL":
@@ -89,6 +99,10 @@ function renderOverlay(screen: AppScreen, pop: () => void) {
       return <VendorStorePageScreen storeId={screen.storeId} onBack={pop} />;
     case "MY_LISTINGS":
       return <MyListingsScreen onBack={pop} />;
+    case "MY_ORDERS":
+      return <MyOrdersScreen onBack={pop} />;
+    case "EDIT_PROFILE":
+      return <EditProfileScreen onBack={pop} />;
   }
 }
 
@@ -105,16 +119,17 @@ function useCartState() {
 
   const addItem = useCallback((listing: Listing, quantity: number = 1) => {
     setItems((prev) => {
+      const maxStock = listing.quantity ?? 99;
       const safeQty = Math.max(1, quantity);
       const existing = prev.find((ci) => ci.listing.id === listing.id);
       if (existing) {
         return prev.map((ci) =>
           ci.listing.id === listing.id
-            ? { ...ci, quantity: ci.quantity + safeQty }
+            ? { ...ci, quantity: Math.min(ci.quantity + safeQty, maxStock) }
             : ci,
         );
       }
-      return [...prev, { listing, quantity: safeQty, addedAt: Date.now() }];
+      return [...prev, { listing, quantity: Math.min(safeQty, maxStock), addedAt: Date.now() }];
     });
   }, []);
 
@@ -123,7 +138,8 @@ function useCartState() {
       prev.flatMap((ci) => {
         if (ci.listing.id !== listingId) return [ci];
         if (quantity <= 0) return [];
-        return [{ ...ci, quantity: Math.max(1, quantity) }];
+        const maxStock = ci.listing.quantity ?? 99;
+        return [{ ...ci, quantity: Math.min(Math.max(1, quantity), maxStock) }];
       }),
     );
   }, []);
@@ -166,38 +182,10 @@ export default function TabNavigator() {
     let mounted = true;
 
     async function syncVendorStatus() {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-
       if (!mounted) return;
-      if (!user) {
-        setVendorStatus("none");
-        return;
-      }
-
-      // Seller access is controlled by profiles.verified_seller.
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("verified_seller")
-        .eq("id", user.id)
-        .maybeSingle();
-
+      const nextStatus = await fetchVendorStatus();
       if (!mounted) return;
-      if (profile?.verified_seller) {
-        setVendorStatus("approved");
-        return;
-      }
-
-      // If not approved, check if application is still pending.
-      const { data: app } = await supabase
-        .from("vendor_applications")
-        .select("status")
-        .eq("profile_id", user.id)
-        .maybeSingle();
-
-      if (!mounted) return;
-      setVendorStatus(app?.status === "pending" ? "pending" : "none");
+      setVendorStatus(nextStatus);
     }
 
     syncVendorStatus().catch(() => {

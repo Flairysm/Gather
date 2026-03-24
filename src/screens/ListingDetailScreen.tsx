@@ -1,6 +1,8 @@
 import {
   ActivityIndicator,
   Animated,
+  Dimensions,
+  Easing,
   Image,
   Pressable,
   SafeAreaView,
@@ -17,8 +19,11 @@ import { C, S } from "../theme";
 import { ld } from "../styles/listingDetail.styles";
 import { formatListingPrice, timeAgo, type Listing } from "../data/market";
 import { useAppNavigation } from "../navigation/NavigationContext";
-import { useCart } from "../data/cart";
+import { useCart, parsePrice, formatPrice } from "../data/cart";
 import { supabase } from "../lib/supabase";
+
+const SCREEN_H = Dimensions.get("window").height;
+const SPRING_CONFIG = { tension: 65, friction: 11, useNativeDriver: true };
 
 type Props = {
   listingId: string;
@@ -31,6 +36,7 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
   const insets = useSafeAreaInsets();
   const [item, setItem] = useState<Listing | null>(null);
   const [similar, setSimilar] = useState<Listing[]>([]);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [showCartToast, setShowCartToast] = useState(false);
   const [showQtyPicker, setShowQtyPicker] = useState(false);
@@ -38,12 +44,52 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const toastAnim = useRef(new Animated.Value(0)).current;
 
+  // Bottom-sheet animation values
+  const sheetAnim = useRef(new Animated.Value(0)).current;
+  const backdropAnim = useRef(new Animated.Value(0)).current;
+
+  function openSheet() {
+    setQtyToAdd(1);
+    setShowQtyPicker(true);
+    sheetAnim.setValue(0);
+    backdropAnim.setValue(0);
+    Animated.parallel([
+      Animated.spring(sheetAnim, { ...SPRING_CONFIG, toValue: 1 }),
+      Animated.timing(backdropAnim, {
+        toValue: 1,
+        duration: 250,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }
+
+  function closeSheet(cb?: () => void) {
+    Animated.parallel([
+      Animated.timing(sheetAnim, {
+        toValue: 0,
+        duration: 200,
+        easing: Easing.in(Easing.cubic),
+        useNativeDriver: true,
+      }),
+      Animated.timing(backdropAnim, {
+        toValue: 0,
+        duration: 200,
+        easing: Easing.in(Easing.cubic),
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      setShowQtyPicker(false);
+      cb?.();
+    });
+  }
+
   const loadListing = useCallback(async () => {
     setLoading(true);
     const { data } = await supabase
       .from("listings")
       .select(`
-        id, seller_id, card_name, edition, grade, condition, price,
+        id, seller_id, card_name, edition, grade, condition, price, quantity,
         category, description, images, views, status, created_at,
         seller:profiles!seller_id(username, display_name, rating, total_sales, avatar_url)
       `)
@@ -60,7 +106,7 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
       const { data: sim } = await supabase
         .from("listings")
         .select(`
-          id, seller_id, card_name, edition, grade, condition, price,
+          id, seller_id, card_name, edition, grade, condition, price, quantity,
           category, description, images, views, status, created_at,
           seller:profiles!seller_id(username, display_name, rating, total_sales, avatar_url)
         `)
@@ -83,6 +129,9 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
   }, [listingId]);
 
   useEffect(() => {
+    supabase.auth.getUser().then(({ data: { user } }) => {
+      if (user) setCurrentUserId(user.id);
+    });
     loadListing().catch(() => setLoading(false));
     return () => {
       if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -148,6 +197,7 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
   return (
     <SafeAreaView style={ld.safe}>
       <StatusBar style="light" />
+      {/* Success toast */}
       {showCartToast && (
         <Animated.View
           style={[
@@ -159,55 +209,157 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
                 {
                   translateY: toastAnim.interpolate({
                     inputRange: [0, 1],
-                    outputRange: [-10, 0],
+                    outputRange: [-16, 0],
+                  }),
+                },
+                {
+                  scale: toastAnim.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [0.95, 1],
                   }),
                 },
               ],
             },
           ]}
         >
-          <Text style={ld.cartToastText}>Successfully added to cart</Text>
+          <Ionicons name="checkmark-circle" size={18} color={C.textHero} />
+          <Text style={ld.cartToastText}>Added to cart</Text>
         </Animated.View>
       )}
+
+      {/* Quantity bottom sheet */}
       {showQtyPicker && (
-        <View style={ld.qtyOverlay}>
-          <View style={ld.qtySheet}>
-            <Text style={ld.qtyTitle}>Select Quantity</Text>
+        <View style={ld.qtyOverlay} pointerEvents="box-none">
+          <Animated.View
+            style={[ld.qtyBackdrop, { opacity: backdropAnim }]}
+          >
+            <Pressable
+              style={{ flex: 1 }}
+              onPress={() => closeSheet()}
+            />
+          </Animated.View>
+
+          <Animated.View
+            style={[
+              ld.qtySheet,
+              {
+                paddingBottom: Math.max(insets.bottom, 20),
+                transform: [
+                  {
+                    translateY: sheetAnim.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [SCREEN_H * 0.5, 0],
+                    }),
+                  },
+                ],
+              },
+            ]}
+          >
+            {/* Drag handle */}
+            <View style={ld.qtyHandle} />
+
+            {/* Item preview */}
+            <View style={ld.qtyItemPreview}>
+              <View style={ld.qtyItemThumb}>
+                {item.images?.[0] ? (
+                  <Image
+                    source={{ uri: item.images[0] }}
+                    style={{ width: "100%", height: "100%", borderRadius: 10 }}
+                  />
+                ) : (
+                  <Ionicons name="image-outline" size={20} color={C.textMuted} />
+                )}
+              </View>
+              <View style={ld.qtyItemInfo}>
+                <Text style={ld.qtyItemName} numberOfLines={2}>
+                  {item.card_name}
+                </Text>
+                {item.edition ? (
+                  <Text style={ld.qtyItemEdition}>{item.edition}</Text>
+                ) : null}
+                <Text style={ld.qtyItemPrice}>
+                  {formatListingPrice(item.price)}
+                </Text>
+              </View>
+            </View>
+
+            <View style={ld.qtyDivider} />
+
+            {/* Stock indicator */}
+            <View style={ld.qtyStockRow}>
+              <Ionicons
+                name={item.quantity > 0 ? "checkmark-circle" : "close-circle"}
+                size={15}
+                color={item.quantity > 0 ? C.success : C.danger}
+              />
+              <Text
+                style={[
+                  ld.qtyStockText,
+                  item.quantity > 0 ? ld.qtyStockInStock : ld.qtyStockOut,
+                ]}
+              >
+                {item.quantity > 0
+                  ? `${item.quantity} in stock`
+                  : "Out of stock"}
+              </Text>
+            </View>
+
+            {/* Quantity stepper */}
+            <Text style={ld.qtyTitle}>Quantity</Text>
             <View style={ld.qtyRow}>
               <Pressable
                 style={[ld.qtyBtn, qtyToAdd <= 1 && ld.qtyBtnDisabled]}
                 onPress={() => setQtyToAdd((prev) => Math.max(1, prev - 1))}
                 disabled={qtyToAdd <= 1}
+                hitSlop={12}
               >
-                <Feather name="minus" size={16} color={C.textPrimary} />
+                <Feather name="minus" size={18} color={qtyToAdd <= 1 ? C.textMuted : C.textPrimary} />
               </Pressable>
-              <Text style={ld.qtyValue}>{qtyToAdd}</Text>
+              <View style={ld.qtyValueWrap}>
+                <Text style={ld.qtyValue}>{qtyToAdd}</Text>
+              </View>
               <Pressable
-                style={ld.qtyBtn}
-                onPress={() => setQtyToAdd((prev) => prev + 1)}
+                style={[ld.qtyBtn, qtyToAdd >= item.quantity && ld.qtyBtnDisabled]}
+                onPress={() => setQtyToAdd((prev) => Math.min(item.quantity, prev + 1))}
+                disabled={qtyToAdd >= item.quantity}
+                hitSlop={12}
               >
-                <Feather name="plus" size={16} color={C.textPrimary} />
+                <Feather name="plus" size={18} color={qtyToAdd >= item.quantity ? C.textMuted : C.textPrimary} />
               </Pressable>
             </View>
+
+            {/* Subtotal */}
+            <View style={ld.qtySubtotalRow}>
+              <Text style={ld.qtySubtotalLabel}>Subtotal</Text>
+              <Text style={ld.qtySubtotalValue}>
+                {formatPrice(parsePrice(item.price) * qtyToAdd)}
+              </Text>
+            </View>
+
+            {/* Actions */}
             <View style={ld.qtyActions}>
               <Pressable
                 style={ld.qtyCancelBtn}
-                onPress={() => setShowQtyPicker(false)}
+                onPress={() => closeSheet()}
               >
                 <Text style={ld.qtyCancelText}>Cancel</Text>
               </Pressable>
               <Pressable
                 style={ld.qtyConfirmBtn}
                 onPress={() => {
-                  addItem(item, qtyToAdd);
-                  setShowQtyPicker(false);
-                  triggerCartToast();
+                  closeSheet(() => {
+                    addItem(item, qtyToAdd);
+                    triggerCartToast();
+                  });
                 }}
               >
-                <Text style={ld.qtyConfirmText}>Add {qtyToAdd} to Cart</Text>
+                <Ionicons name="cart" size={16} color={C.textHero} />
+                <Text style={ld.qtyConfirmText}>
+                  Add to Cart
+                </Text>
               </Pressable>
             </View>
-          </View>
+          </Animated.View>
         </View>
       )}
 
@@ -268,6 +420,11 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
           <View>
             <Text style={ld.priceLabel}>Asking Price</Text>
             <Text style={ld.price}>{formatListingPrice(item.price)}</Text>
+            <Text style={ld.stockText}>
+              {item.quantity > 0
+                ? `${item.quantity} available`
+                : "Out of stock"}
+            </Text>
           </View>
           {item.condition && (
             <View style={ld.conditionChip}>
@@ -384,29 +541,53 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
 
       {/* Bottom Bar */}
       <View style={[ld.bottomBar, { paddingBottom: Math.max(insets.bottom, 14) }]}>
-        <Pressable
-          style={ld.msgIconBtn}
-          onPress={() => push({ type: "MESSAGES" })}
-        >
-          <Feather name="message-circle" size={19} color={C.textPrimary} />
-        </Pressable>
-        <Pressable
-          style={ld.buyNowBtn}
-          onPress={() => {
-            setQtyToAdd(1);
-            setShowQtyPicker(true);
-          }}
-        >
-          <Ionicons name="cart" size={18} color={C.textHero} />
-          <Text style={ld.buyNowText}>Add to Cart</Text>
-        </Pressable>
-        <Pressable
-          style={ld.makeOfferBtn}
-          onPress={() => push({ type: "MESSAGES" })}
-        >
-          <Ionicons name="pricetag" size={18} color={C.textHero} />
-          <Text style={ld.makeOfferText}>Make Offer</Text>
-        </Pressable>
+        {currentUserId && currentUserId === item.seller_id ? (
+          <View style={ld.ownListingBar}>
+            <Ionicons name="storefront-outline" size={18} color={C.textAccent} />
+            <Text style={ld.ownListingText}>This is your listing</Text>
+          </View>
+        ) : (
+          <>
+            <Pressable
+              style={ld.msgIconBtn}
+              onPress={() =>
+                push({
+                  type: "CHAT",
+                  sellerId: item.seller_id,
+                  listingId: item.id,
+                  topic: item.card_name,
+                })
+              }
+            >
+              <Feather name="message-circle" size={19} color={C.textPrimary} />
+            </Pressable>
+            <Pressable
+              style={[ld.buyNowBtn, item.quantity <= 0 && { opacity: 0.45 }]}
+              onPress={openSheet}
+              disabled={item.quantity <= 0}
+            >
+              <Ionicons name="cart" size={18} color={C.textHero} />
+              <Text style={ld.buyNowText}>
+                {item.quantity > 0 ? "Add to Cart" : "Sold Out"}
+              </Text>
+            </Pressable>
+            <Pressable
+              style={ld.makeOfferBtn}
+              onPress={() =>
+                push({
+                  type: "CHAT",
+                  sellerId: item.seller_id,
+                  listingId: item.id,
+                  topic: item.card_name,
+                  openOffer: true,
+                })
+              }
+            >
+              <Ionicons name="pricetag" size={18} color={C.textHero} />
+              <Text style={ld.makeOfferText}>Make Offer</Text>
+            </Pressable>
+          </>
+        )}
       </View>
     </SafeAreaView>
   );

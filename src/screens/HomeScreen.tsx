@@ -47,17 +47,35 @@ type VendorStoreRow = {
       id: string;
       card_name: string;
       edition: string | null;
+      grade: string | null;
+      condition: string | null;
       price: number;
       images: string[];
     } | null;
   }[];
 };
 
+function resolveConditionLabel(
+  condition: string | null | undefined,
+  grade: string | null | undefined,
+) {
+  const normalizedCondition = (condition ?? "").trim();
+  const lower = normalizedCondition.toLowerCase();
+  const isNaCondition =
+    lower === "na" || lower === "n/a" || lower === "condition n/a";
+
+  if (normalizedCondition && !isNaCondition) return normalizedCondition;
+
+  const normalizedGrade = (grade ?? "").trim();
+  return normalizedGrade || null;
+}
+
 export default function HomeScreen() {
   const { push } = useAppNavigation();
   const { items } = useCart();
   const [banner, setBanner] = useState<FeaturedBanner | null>(null);
   const [vendorStores, setVendorStores] = useState<VendorStoreRow[]>([]);
+  const [searchQuery, setSearchQuery] = useState("");
   const [refreshing, setRefreshing] = useState(false);
 
   const loadFeaturedBanner = useCallback(async () => {
@@ -80,7 +98,7 @@ export default function HomeScreen() {
         id, store_name, description, logo_url, banner_url, theme_color,
         display_items:vendor_display_items(
           listing_id, display_order,
-          listing:listings(id, card_name, edition, price, images)
+          listing:listings(id, card_name, edition, grade, condition, price, quantity, images)
         )
       `)
       .eq("is_active", true)
@@ -122,6 +140,43 @@ export default function HomeScreen() {
     setRefreshing(false);
   }
 
+  const normalizedQuery = searchQuery.trim().toLowerCase();
+  const filteredVendorStores = normalizedQuery
+    ? vendorStores
+        .map((store) => {
+          const storeMatches = [
+            store.store_name,
+            store.description ?? "",
+          ]
+            .join(" ")
+            .toLowerCase()
+            .includes(normalizedQuery);
+
+          const matchedItems = store.display_items.filter((di) => {
+            if (!di.listing) return false;
+            const haystack = [
+              di.listing.card_name,
+              di.listing.edition ?? "",
+              di.listing.grade ?? "",
+              di.listing.condition ?? "",
+            ]
+              .join(" ")
+              .toLowerCase();
+            return haystack.includes(normalizedQuery);
+          });
+
+          return {
+            ...store,
+            display_items: storeMatches ? store.display_items : matchedItems,
+          };
+        })
+        .filter(
+          (store) =>
+            store.display_items.length > 0 ||
+            store.store_name.toLowerCase().includes(normalizedQuery),
+        )
+    : vendorStores;
+
   return (
     <SafeAreaView style={h.safe}>
       <StatusBar style="light" />
@@ -145,7 +200,14 @@ export default function HomeScreen() {
                 style={h.searchInput}
                 placeholder="Search Gather"
                 placeholderTextColor={C.textMuted}
+                value={searchQuery}
+                onChangeText={setSearchQuery}
               />
+              {searchQuery.trim().length > 0 && (
+                <Pressable onPress={() => setSearchQuery("")} hitSlop={10}>
+                  <Feather name="x-circle" size={16} color={C.textMuted} />
+                </Pressable>
+              )}
             </View>
             <View style={h.headerActions}>
               <Pressable style={h.iconBtn} onPress={() => push({ type: "CART" })}>
@@ -231,7 +293,7 @@ export default function HomeScreen() {
           </ScrollView>
 
           {/* Vendor Stores — each store is its own section */}
-          {vendorStores.map((store) => (
+          {filteredVendorStores.map((store) => (
             <View key={store.id} style={h.vendorSection}>
               {/* Section header — same pattern as placeholders */}
               <View style={sh.sectionRow}>
@@ -268,8 +330,14 @@ export default function HomeScreen() {
                   showsHorizontalScrollIndicator={false}
                   contentContainerStyle={h.vaultScroll}
                 >
-                  {store.display_items.map((di) =>
-                    di.listing ? (
+                  {store.display_items.map((di) => {
+                    if (!di.listing) return null;
+                    const label = resolveConditionLabel(
+                      di.listing.condition,
+                      di.listing.grade,
+                    );
+
+                    return (
                       <Pressable
                         key={di.listing_id}
                         style={[h.vaultCard, { width: S.vaultCardW }]}
@@ -286,6 +354,13 @@ export default function HomeScreen() {
                           ) : (
                             <View style={h.artPlaceholder} />
                           )}
+                          {label ? (
+                            <View style={h.conditionBadge}>
+                              <Text numberOfLines={1} style={h.conditionBadgeText}>
+                                {label}
+                              </Text>
+                            </View>
+                          ) : null}
                         </View>
                         <Text style={h.vaultEdition}>
                           {di.listing.edition ?? "Listing"}
@@ -299,8 +374,8 @@ export default function HomeScreen() {
                           </Text>
                         </View>
                       </Pressable>
-                    ) : null,
-                  )}
+                    );
+                  })}
                 </ScrollView>
               ) : (
                 <View style={h.noDisplayItems}>
@@ -311,6 +386,11 @@ export default function HomeScreen() {
               )}
             </View>
           ))}
+          {normalizedQuery && filteredVendorStores.length === 0 && (
+            <View style={h.noDisplayItems}>
+              <Text style={h.noDisplayItemsText}>No matching results</Text>
+            </View>
+          )}
         </ScrollView>
 
       </View>

@@ -75,12 +75,19 @@ export default function CartScreen({ onBack }: Props) {
                     </Pressable>
                     <Text style={st.qtyValue}>{ci.quantity}</Text>
                     <Pressable
-                      style={st.qtyBtn}
+                      style={[
+                        st.qtyBtn,
+                        ci.quantity >= (ci.listing.quantity ?? 99) && st.qtyBtnDisabled,
+                      ]}
                       onPress={() => setQuantity(ci.listing.id, ci.quantity + 1)}
+                      disabled={ci.quantity >= (ci.listing.quantity ?? 99)}
                     >
                       <Feather name="plus" size={12} color={C.textPrimary} />
                     </Pressable>
                   </View>
+                  <Text style={st.stockHint}>
+                    {ci.listing.quantity ?? "?"} in stock
+                  </Text>
                   <Pressable
                     style={st.removeBtn}
                     onPress={() => removeItem(ci.listing.id)}

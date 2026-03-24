@@ -30,6 +30,7 @@ export const vendorHub = StyleSheet.create({
     textAlign: "center",
   },
 
+  // ── Tabs ──
   tabRow: {
     flexDirection: "row",
     marginHorizontal: S.screenPadding,
@@ -37,7 +38,7 @@ export const vendorHub = StyleSheet.create({
     borderRadius: 14,
     borderWidth: 1,
     borderColor: C.border,
-    padding: 4,
+    padding: 3,
     marginBottom: S.lg,
   },
   tabBtn: {
@@ -45,16 +46,16 @@ export const vendorHub = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    paddingVertical: 10,
+    paddingVertical: 9,
     borderRadius: 10,
-    gap: 6,
+    gap: 5,
   },
   tabBtnActive: {
     backgroundColor: C.accentGlow,
   },
   tabLabel: {
     color: C.textMuted,
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: "700",
   },
   tabLabelActive: {
@@ -66,7 +67,288 @@ export const vendorHub = StyleSheet.create({
     paddingBottom: 60,
   },
 
-  // Store Design - Preview
+  // ── Overview ──
+  statsGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+    marginBottom: 20,
+  },
+  statCard: {
+    width: "48%" as any,
+    backgroundColor: C.surface,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: C.border,
+    padding: 14,
+    gap: 6,
+  },
+  statIconRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  statIconWrap: {
+    width: 32,
+    height: 32,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  statValue: {
+    color: C.textPrimary,
+    fontSize: 22,
+    fontWeight: "900",
+  },
+  statLabel: {
+    color: C.textSecondary,
+    fontSize: 11,
+    fontWeight: "600",
+    letterSpacing: 0.3,
+  },
+  quickActions: {
+    flexDirection: "row",
+    gap: 10,
+    marginBottom: 20,
+  },
+  quickBtn: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    backgroundColor: C.surface,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: C.border,
+    paddingVertical: 14,
+  },
+  quickBtnPrimary: {
+    backgroundColor: C.accent,
+    borderColor: C.accent,
+  },
+  quickBtnText: {
+    color: C.textPrimary,
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  quickBtnTextPrimary: {
+    color: "#fff",
+  },
+  recentOrdersSection: {
+    marginBottom: 20,
+  },
+  recentOrderCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: C.surface,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: C.border,
+    padding: 12,
+    gap: 10,
+    marginBottom: 8,
+  },
+  recentOrderThumb: {
+    width: 40,
+    height: 40,
+    borderRadius: 10,
+    backgroundColor: C.elevated,
+    borderWidth: 1,
+    borderColor: C.border,
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "hidden",
+  },
+  recentOrderThumbImg: {
+    width: 40,
+    height: 40,
+    borderRadius: 10,
+  },
+  recentOrderInfo: {
+    flex: 1,
+  },
+  recentOrderName: {
+    color: C.textPrimary,
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  recentOrderMeta: {
+    color: C.textSecondary,
+    fontSize: 11,
+    fontWeight: "500",
+    marginTop: 2,
+  },
+  recentOrderRight: {
+    alignItems: "flex-end",
+    gap: 4,
+  },
+  recentOrderPrice: {
+    color: C.accent,
+    fontSize: 13,
+    fontWeight: "800",
+  },
+
+  // ── Orders ──
+  filterRow: {
+    flexDirection: "row",
+    paddingHorizontal: S.screenPadding,
+    gap: 8,
+    marginBottom: S.md,
+  },
+  filterChip: {
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: 20,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border,
+  },
+  filterChipActive: {
+    backgroundColor: C.accentGlow,
+    borderColor: C.accent,
+  },
+  filterChipText: {
+    color: C.textMuted,
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  filterChipTextActive: {
+    color: C.accent,
+  },
+  orderCard: {
+    backgroundColor: C.surface,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: C.border,
+    marginBottom: 10,
+    overflow: "hidden",
+  },
+  orderCardHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 12,
+    paddingTop: 12,
+    paddingBottom: 6,
+  },
+  orderIdText: {
+    color: C.textMuted,
+    fontSize: 10,
+    fontWeight: "700",
+    letterSpacing: 0.5,
+    textTransform: "uppercase",
+  },
+  orderDateText: {
+    color: C.textMuted,
+    fontSize: 10,
+    fontWeight: "600",
+  },
+  orderCardBody: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 12,
+    paddingBottom: 10,
+    gap: 10,
+  },
+  orderItemThumb: {
+    width: 48,
+    height: 48,
+    borderRadius: 10,
+    backgroundColor: C.elevated,
+    borderWidth: 1,
+    borderColor: C.border,
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "hidden",
+  },
+  orderItemThumbImg: {
+    width: 48,
+    height: 48,
+    borderRadius: 10,
+  },
+  orderItemInfo: {
+    flex: 1,
+  },
+  orderItemName: {
+    color: C.textPrimary,
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  orderItemMeta: {
+    color: C.textSecondary,
+    fontSize: 11,
+    fontWeight: "500",
+    marginTop: 1,
+  },
+  orderBuyerRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    marginTop: 3,
+  },
+  orderBuyerDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: C.accent,
+  },
+  orderBuyerName: {
+    color: C.textAccent,
+    fontSize: 11,
+    fontWeight: "600",
+  },
+  orderItemRight: {
+    alignItems: "flex-end",
+    gap: 4,
+  },
+  orderItemPrice: {
+    color: C.accent,
+    fontSize: 14,
+    fontWeight: "900",
+  },
+  orderItemQty: {
+    color: C.textSecondary,
+    fontSize: 11,
+    fontWeight: "600",
+  },
+  orderCardFooter: {
+    flexDirection: "row",
+    alignItems: "center",
+    borderTopWidth: 1,
+    borderTopColor: C.border,
+    padding: 10,
+    gap: 8,
+  },
+  fulfillmentChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 8,
+    borderWidth: 1,
+  },
+  fulfillmentChipText: {
+    fontSize: 11,
+    fontWeight: "700",
+  },
+  fulfillmentBtn: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    borderRadius: 10,
+    paddingVertical: 10,
+  },
+  fulfillmentBtnText: {
+    color: "#fff",
+    fontSize: 12,
+    fontWeight: "800",
+  },
+
+  // ── Store Design ──
   previewCard: {
     borderRadius: S.radiusCard,
     borderWidth: 1,
@@ -167,8 +449,6 @@ export const vendorHub = StyleSheet.create({
     fontSize: 13,
     fontWeight: "600",
   },
-
-  // Colors
   colorRow: {
     flexDirection: "row",
     gap: 12,
@@ -186,12 +466,12 @@ export const vendorHub = StyleSheet.create({
     borderWidth: 3,
     borderColor: "#fff",
   },
-
   saveBtn: {
     borderRadius: 14,
     paddingVertical: 14,
     alignItems: "center",
     justifyContent: "center",
+    marginBottom: 24,
   },
   saveBtnText: {
     color: "#fff",
@@ -199,7 +479,7 @@ export const vendorHub = StyleSheet.create({
     fontWeight: "800",
   },
 
-  // Display Items
+  // Display Items (inside Store tab)
   displayHeader: {
     flexDirection: "row",
     alignItems: "center",
@@ -253,14 +533,20 @@ export const vendorHub = StyleSheet.create({
     fontWeight: "500",
     marginTop: 2,
   },
+  displayPrice: {
+    color: C.accent,
+    fontSize: 12,
+    fontWeight: "800",
+    marginTop: 3,
+  },
   displayActions: {
     flexDirection: "row",
-    gap: 4,
+    gap: 8,
   },
   miniBtn: {
-    width: 28,
-    height: 28,
-    borderRadius: 8,
+    width: 36,
+    height: 36,
+    borderRadius: 10,
     backgroundColor: C.elevated,
     borderWidth: 1,
     borderColor: C.border,
@@ -271,6 +557,7 @@ export const vendorHub = StyleSheet.create({
     opacity: 0.35,
   },
 
+  // ── Empty states ──
   emptyCard: {
     alignItems: "center",
     justifyContent: "center",
@@ -294,7 +581,7 @@ export const vendorHub = StyleSheet.create({
     paddingHorizontal: 40,
   },
 
-  // My Listings
+  // ── My Listings ──
   listingsHeader: {
     flexDirection: "row",
     alignItems: "center",
@@ -316,16 +603,19 @@ export const vendorHub = StyleSheet.create({
     fontSize: 12,
     fontWeight: "800",
   },
-  listingRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: C.surface,
+  listingCardWrap: {
     borderRadius: 14,
     borderWidth: 1,
     borderColor: C.border,
+    backgroundColor: C.surface,
+    marginBottom: 8,
+    overflow: "hidden",
+  },
+  listingRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
     padding: 12,
     gap: 10,
-    marginBottom: 8,
   },
   listingThumb: {
     width: 48,
@@ -361,9 +651,38 @@ export const vendorHub = StyleSheet.create({
     fontWeight: "800",
     marginTop: 2,
   },
+  listingQty: {
+    color: C.textSecondary,
+    fontSize: 11,
+    fontWeight: "600",
+  },
   listingActions: {
     alignItems: "flex-end",
+    gap: 8,
+  },
+  rowActionButtons: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  listingActionBtn: {
+    flexDirection: "row",
+    alignItems: "center",
     gap: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: C.border,
+    paddingHorizontal: 10,
+    minHeight: 34,
+    backgroundColor: C.elevated,
+  },
+  listingActionBtnText: {
+    color: C.textPrimary,
+    fontSize: 11,
+    fontWeight: "700",
+  },
+  listingActionBtnDangerText: {
+    color: C.danger,
   },
   statusChip: {
     borderRadius: 6,
@@ -390,12 +709,12 @@ export const vendorHub = StyleSheet.create({
   displayToggle: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 4,
-    borderRadius: 6,
+    gap: 6,
+    borderRadius: 8,
     borderWidth: 1,
     borderColor: C.border,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
+    paddingHorizontal: 10,
+    minHeight: 34,
   },
   displayToggleActive: {
     borderColor: "rgba(245,158,11,0.4)",
@@ -403,14 +722,72 @@ export const vendorHub = StyleSheet.create({
   },
   displayToggleText: {
     color: C.textMuted,
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: "700",
   },
   displayToggleTextActive: {
     color: "#F59E0B",
   },
+  listingEditor: {
+    borderTopWidth: 1,
+    borderTopColor: C.border,
+    backgroundColor: C.elevated,
+    padding: 10,
+    gap: 8,
+  },
+  editorRow: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  editorInput: {
+    backgroundColor: C.surface,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: C.border,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    color: C.textPrimary,
+    fontSize: 13,
+    fontWeight: "500",
+  },
+  editorHalf: {
+    flex: 1,
+  },
+  editorActions: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    gap: 8,
+    marginTop: 2,
+  },
+  editorCancelBtn: {
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: C.border,
+    backgroundColor: C.surface,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  editorCancelText: {
+    color: C.textSecondary,
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  editorSaveBtn: {
+    borderRadius: 8,
+    backgroundColor: C.accent,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    minWidth: 108,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  editorSaveText: {
+    color: "#fff",
+    fontSize: 12,
+    fontWeight: "800",
+  },
 
-  // Toast
+  // ── Toast ──
   toast: {
     position: "absolute",
     bottom: 40,

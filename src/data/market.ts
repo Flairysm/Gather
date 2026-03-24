@@ -6,6 +6,7 @@ export type Listing = {
   grade: string | null;
   condition: string | null;
   price: number;
+  quantity: number;
   category: string;
   description: string | null;
   images: string[];

@@ -34,6 +34,7 @@ type StoreListing = {
   card_name: string;
   edition: string | null;
   grade: string | null;
+  condition: string | null;
   price: number;
   images: string[];
   category: string;
@@ -67,9 +68,30 @@ export default function VendorStorePageScreen({
 
     setStore(storeData as StoreData);
 
+    // Prefer the curated display list first for consistency with Home + Vendor Hub.
+    const { data: displayData } = await supabase
+      .from("vendor_display_items")
+      .select(`
+        display_order,
+        listing:listings(id, card_name, edition, grade, condition, price, images, category, status)
+      `)
+      .eq("store_id", storeId)
+      .order("display_order", { ascending: true });
+
+    const curatedListings =
+      (displayData as any[] | null)?.map((row) =>
+        Array.isArray(row.listing) ? row.listing[0] : row.listing,
+      ).filter((l) => l && l.status === "active") ?? [];
+
+    if (curatedListings.length > 0) {
+      setListings(curatedListings as StoreListing[]);
+      setLoading(false);
+      return;
+    }
+
     const { data: listingData } = await supabase
       .from("listings")
-      .select("id, card_name, edition, grade, price, images, category")
+      .select("id, card_name, edition, grade, condition, price, quantity, images, category")
       .eq("seller_id", (storeData as any).profile_id)
       .eq("status", "active")
       .order("created_at", { ascending: false });
