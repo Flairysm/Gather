@@ -24,7 +24,7 @@ export const CartContext = createContext<CartContextValue>({
   removeItem: () => {},
   clearCart: () => {},
   isInCart: () => false,
-  total: () => "$0",
+  total: () => "RM0",
 });
 
 export function useCart() {
@@ -33,9 +33,10 @@ export function useCart() {
 
 export function parsePrice(price: string | number): number {
   if (typeof price === "number") return price;
-  return parseFloat(price.replace(/[$,]/g, "")) || 0;
+  const cleaned = price.replace(/(RM|\$|,)/gi, "");
+  return parseFloat(cleaned) || 0;
 }
 
 export function formatPrice(amount: number): string {
-  return `$${amount.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+  return `RM${amount.toLocaleString("en-MY", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
 }

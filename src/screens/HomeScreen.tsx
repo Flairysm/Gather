@@ -17,11 +17,12 @@ import { Feather, Ionicons } from "@expo/vector-icons";
 import { C, S } from "../theme";
 import { home as h } from "../styles/home.styles";
 import { shared as sh } from "../styles/shared.styles";
-import { FILTERS } from "../data/mock";
 import type { FilterItem } from "../data/mock";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import { useCart } from "../data/cart";
-import { useCallback, useEffect, useState } from "react";
+import { useFeedPreferences } from "../data/feedPreferences";
+import { ALL_CATEGORIES } from "../data/categories";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "../lib/supabase";
 
 type FeaturedBanner = {
@@ -35,6 +36,7 @@ type FeaturedBanner = {
 
 type VendorStoreRow = {
   id: string;
+  profile_id: string;
   store_name: string;
   description: string | null;
   logo_url: string | null;
@@ -50,6 +52,7 @@ type VendorStoreRow = {
       grade: string | null;
       condition: string | null;
       price: number;
+      category: string;
       images: string[];
     } | null;
   }[];
@@ -73,10 +76,24 @@ function resolveConditionLabel(
 export default function HomeScreen() {
   const { push } = useAppNavigation();
   const { items } = useCart();
+  const { selectedCategories } = useFeedPreferences();
   const [banner, setBanner] = useState<FeaturedBanner | null>(null);
   const [vendorStores, setVendorStores] = useState<VendorStoreRow[]>([]);
+  const [liveProfileIds, setLiveProfileIds] = useState<Set<string>>(new Set());
   const [searchQuery, setSearchQuery] = useState("");
+  const [activeFilter, setActiveFilter] = useState("For You");
   const [refreshing, setRefreshing] = useState(false);
+
+  const feedFilters: FilterItem[] = useMemo(() => {
+    const catPills: FilterItem[] = ALL_CATEGORIES
+      .filter((c) => selectedCategories.includes(c.key))
+      .map((c) => ({ label: c.key }));
+    return [
+      { label: "For You" },
+      ...catPills,
+      { label: "See All Categories", isSeeAll: true },
+    ];
+  }, [selectedCategories]);
 
   const loadFeaturedBanner = useCallback(async () => {
     const { data } = await supabase
@@ -95,10 +112,10 @@ export default function HomeScreen() {
     const { data } = await supabase
       .from("vendor_stores")
       .select(`
-        id, store_name, description, logo_url, banner_url, theme_color,
+        id, profile_id, store_name, description, logo_url, banner_url, theme_color,
         display_items:vendor_display_items(
           listing_id, display_order,
-          listing:listings(id, card_name, edition, grade, condition, price, quantity, images)
+          listing:listings(id, card_name, edition, grade, condition, price, quantity, category, images)
         )
       `)
       .eq("is_active", true)
@@ -120,41 +137,55 @@ export default function HomeScreen() {
     }
   }, []);
 
+  const loadLiveStreams = useCallback(async () => {
+    const { data } = await supabase
+      .from("live_streams")
+      .select("streamer_id")
+      .eq("is_live", true);
+    if (data) {
+      setLiveProfileIds(new Set(data.map((s: any) => s.streamer_id)));
+    }
+  }, []);
+
   useEffect(() => {
-    let mounted = true;
     loadFeaturedBanner().catch(() => {});
     loadVendorStores().catch(() => {});
-
-    return () => {
-      mounted = false;
-    };
-  }, [loadFeaturedBanner, loadVendorStores]);
+    loadLiveStreams().catch(() => {});
+  }, [loadFeaturedBanner, loadVendorStores, loadLiveStreams]);
 
   async function onRefresh() {
     setRefreshing(true);
     await Promise.all([
       loadFeaturedBanner().catch(() => {}),
       loadVendorStores().catch(() => {}),
+      loadLiveStreams().catch(() => {}),
     ]);
     await new Promise((resolve) => setTimeout(resolve, 700));
     setRefreshing(false);
   }
 
   const normalizedQuery = searchQuery.trim().toLowerCase();
-  const filteredVendorStores = normalizedQuery
-    ? vendorStores
-        .map((store) => {
-          const storeMatches = [
-            store.store_name,
-            store.description ?? "",
-          ]
-            .join(" ")
-            .toLowerCase()
-            .includes(normalizedQuery);
 
-          const matchedItems = store.display_items.filter((di) => {
+  const filteredVendorStores = vendorStores
+    .map((store) => {
+      let items = store.display_items;
+
+      if (activeFilter !== "For You") {
+        items = items.filter(
+          (di) => di.listing && di.listing.category === activeFilter,
+        );
+      }
+
+      if (normalizedQuery) {
+        const storeMatches = [store.store_name, store.description ?? ""]
+          .join(" ")
+          .toLowerCase()
+          .includes(normalizedQuery);
+
+        if (!storeMatches) {
+          items = items.filter((di) => {
             if (!di.listing) return false;
-            const haystack = [
+            const hay = [
               di.listing.card_name,
               di.listing.edition ?? "",
               di.listing.grade ?? "",
@@ -162,20 +193,19 @@ export default function HomeScreen() {
             ]
               .join(" ")
               .toLowerCase();
-            return haystack.includes(normalizedQuery);
+            return hay.includes(normalizedQuery);
           });
+        }
+      }
 
-          return {
-            ...store,
-            display_items: storeMatches ? store.display_items : matchedItems,
-          };
-        })
-        .filter(
-          (store) =>
-            store.display_items.length > 0 ||
-            store.store_name.toLowerCase().includes(normalizedQuery),
-        )
-    : vendorStores;
+      return { ...store, display_items: items };
+    })
+    .filter(
+      (store) =>
+        store.display_items.length > 0 ||
+        (normalizedQuery &&
+          store.store_name.toLowerCase().includes(normalizedQuery)),
+    );
 
   return (
     <SafeAreaView style={h.safe}>
@@ -271,25 +301,35 @@ export default function HomeScreen() {
             showsHorizontalScrollIndicator={false}
             contentContainerStyle={h.filterScroll}
           >
-            {FILTERS.map((item: FilterItem, i) => (
-              <Pressable
-                key={item.label}
-                style={[
-                  sh.pill,
-                  item.isSeeAll ? sh.pillSeeAll : i === 0 && sh.pillActive,
-                ]}
-              >
-                <Text
-                  style={
-                    item.isSeeAll
-                      ? sh.pillSeeAllText
-                      : [sh.pillText, i === 0 && sh.pillTextActive]
-                  }
+            {feedFilters.map((item: FilterItem) => {
+              const isActive = !item.isSeeAll && activeFilter === item.label;
+              return (
+                <Pressable
+                  key={item.label}
+                  style={[
+                    sh.pill,
+                    item.isSeeAll ? sh.pillSeeAll : isActive && sh.pillActive,
+                  ]}
+                  onPress={() => {
+                    if (item.isSeeAll) {
+                      push({ type: "BROWSE_CATEGORIES" });
+                    } else {
+                      setActiveFilter(item.label);
+                    }
+                  }}
                 >
-                  {item.label}
-                </Text>
-              </Pressable>
-            ))}
+                  <Text
+                    style={
+                      item.isSeeAll
+                        ? sh.pillSeeAllText
+                        : [sh.pillText, isActive && sh.pillTextActive]
+                    }
+                  >
+                    {item.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
           </ScrollView>
 
           {/* Vendor Stores — each store is its own section */}
@@ -310,7 +350,11 @@ export default function HomeScreen() {
                   </View>
                   <View>
                     <Text style={sh.sectionName}>{store.store_name}</Text>
-                    <Text style={sh.offlineTag}>● OFFLINE</Text>
+                    {liveProfileIds.has(store.profile_id) ? (
+                      <Text style={sh.liveTag}>● LIVE</Text>
+                    ) : (
+                      <Text style={sh.offlineTag}>● OFFLINE</Text>
+                    )}
                   </View>
                 </View>
                 <Pressable
@@ -370,7 +414,10 @@ export default function HomeScreen() {
                         </Text>
                         <View style={h.priceRow}>
                           <Text style={h.vaultPrice}>
-                            ${Number(di.listing.price).toLocaleString()}
+                            RM
+                            {Number(di.listing.price).toLocaleString("en-MY", {
+                              maximumFractionDigits: 0,
+                            })}
                           </Text>
                         </View>
                       </Pressable>
@@ -386,9 +433,15 @@ export default function HomeScreen() {
               )}
             </View>
           ))}
-          {normalizedQuery && filteredVendorStores.length === 0 && (
+          {filteredVendorStores.length === 0 && (
             <View style={h.noDisplayItems}>
-              <Text style={h.noDisplayItemsText}>No matching results</Text>
+              <Text style={h.noDisplayItemsText}>
+                {normalizedQuery
+                  ? "No matching results"
+                  : activeFilter !== "For You"
+                    ? `No ${activeFilter} items in stores right now`
+                    : "No vendor stores yet"}
+              </Text>
             </View>
           )}
         </ScrollView>

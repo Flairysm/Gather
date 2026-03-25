@@ -96,7 +96,7 @@ export default function CreateWantedScreen({ onBack }: Props) {
     }
 
     try {
-      const numericPrice = parseFloat(offerPrice.replace(/[$,]/g, ""));
+      const numericPrice = parseFloat(offerPrice.replace(/(RM|\$|,)/gi, ""));
       if (isNaN(numericPrice) || numericPrice <= 0) {
         setSubmitting(false);
         Alert.alert("Error", "Please enter a valid offer price.");
@@ -314,7 +314,7 @@ export default function CreateWantedScreen({ onBack }: Props) {
 
               <Text style={cf.fieldLabel}>Offer Price *</Text>
               <View style={cf.priceInputRow}>
-                <Text style={cf.dollarSign}>$</Text>
+                <Text style={cf.dollarSign}>RM</Text>
                 <TextInput
                   style={cf.priceInput}
                   value={offerPrice}
@@ -376,9 +376,7 @@ export default function CreateWantedScreen({ onBack }: Props) {
                     ]}
                   >
                     {offerPrice
-                      ? offerPrice.startsWith("$")
-                        ? offerPrice
-                        : `$${offerPrice}`
+                      ? `RM${offerPrice.replace(/^(RM|\$)/i, "")}`
                       : "—"}
                   </Text>
                 </View>

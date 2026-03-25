@@ -76,6 +76,7 @@ export default function MyListingsScreen({ onBack }: Props) {
         "id, seller_id, card_name, edition, grade, condition, price, quantity, category, description, images, views, status, created_at",
       )
       .eq("seller_id", user.id)
+      .neq("status", "removed")
       .order("created_at", { ascending: false });
 
     const { data: wantedData } = await supabase
@@ -104,15 +105,17 @@ export default function MyListingsScreen({ onBack }: Props) {
 
   async function handleDelete(id: string) {
     if (!currentUserId) return;
-    Alert.alert("Delete listing", "Are you sure you want to delete this listing?", [
+    Alert.alert("Remove listing", "This will remove it from marketplace, but keep order history.", [
       { text: "Cancel", style: "cancel" },
       {
-        text: "Delete",
+        text: "Remove",
         style: "destructive",
         onPress: async () => {
+          // Keep order history intact: listings are referenced by `order_items`, so we soft-remove.
+          await supabase.from("vendor_display_items").delete().eq("listing_id", id);
           const { error } = await supabase
             .from("listings")
-            .delete()
+            .update({ status: "removed", updated_at: new Date().toISOString() })
             .eq("id", id)
             .eq("seller_id", currentUserId);
           if (error) {
@@ -151,7 +154,9 @@ export default function MyListingsScreen({ onBack }: Props) {
   async function handleSaveEdit() {
     if (!editing || !currentUserId) return;
     setSaving(true);
-    const nextPrice = parseFloat(String(editing.price).replace(/[$,]/g, ""));
+    const nextPrice = parseFloat(
+      String(editing.price).replace(/(RM|\$|,)/gi, ""),
+    );
     if (isNaN(nextPrice) || nextPrice <= 0) {
       setSaving(false);
       Alert.alert("Error", "Price must be a valid number.");
@@ -186,7 +191,9 @@ export default function MyListingsScreen({ onBack }: Props) {
   async function handleSaveWantedEdit() {
     if (!editingWanted || !currentUserId) return;
     setSaving(true);
-    const nextPrice = parseFloat(String(editingWanted.offer_price).replace(/[$,]/g, ""));
+    const nextPrice = parseFloat(
+      String(editingWanted.offer_price).replace(/(RM|\$|,)/gi, ""),
+    );
     if (isNaN(nextPrice) || nextPrice <= 0) {
       setSaving(false);
       Alert.alert("Error", "Offer price must be a valid number.");
@@ -290,10 +297,10 @@ export default function MyListingsScreen({ onBack }: Props) {
                   {"grade_wanted" in item && item.grade_wanted ? `• ${item.grade_wanted}` : ""}
                 </Text>
                 <Text style={st.price}>
-                  $
+                  RM
                   {Number(
                     "price" in item ? item.price : item.offer_price,
-                  ).toLocaleString()}
+                  ).toLocaleString("en-MY", { maximumFractionDigits: 0 })}
                 </Text>
               </View>
               <View style={st.actions}>

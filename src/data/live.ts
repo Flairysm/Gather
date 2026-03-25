@@ -57,7 +57,7 @@ export const liveStreams: LiveStream[] = [
   {
     id: "ls6",
     streamer: "collector_x",
-    title: "Auction Night — Starting at $1!",
+    title: "Auction Night — Starting at RM1!",
     category: "Mixed",
     viewers: "5.1K",
     tags: ["Auction", "Deals"],

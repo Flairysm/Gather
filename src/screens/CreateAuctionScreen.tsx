@@ -26,9 +26,19 @@ const CATEGORIES = MARKET_FILTERS.filter((f) => f !== "All");
 const CONDITIONS = ["Gem Mint", "Mint", "Near Mint", "Excellent", "Good"];
 const MAX_IMAGES = 4;
 
+type Duration = { label: string; hours: number };
+const DURATIONS: Duration[] = [
+  { label: "1 Hour", hours: 1 },
+  { label: "3 Hours", hours: 3 },
+  { label: "12 Hours", hours: 12 },
+  { label: "1 Day", hours: 24 },
+  { label: "3 Days", hours: 72 },
+  { label: "7 Days", hours: 168 },
+];
+
 type Props = { onBack: () => void };
 
-export default function CreateListingScreen({ onBack }: Props) {
+export default function CreateAuctionScreen({ onBack }: Props) {
   const insets = useSafeAreaInsets();
   const [step, setStep] = useState(0);
   const [submitting, setSubmitting] = useState(false);
@@ -39,11 +49,14 @@ export default function CreateListingScreen({ onBack }: Props) {
   const [category, setCategory] = useState("");
   const [grade, setGrade] = useState("");
   const [condition, setCondition] = useState("");
-  const [price, setPrice] = useState("");
-  const [quantity, setQuantity] = useState("1");
+  const [startingPrice, setStartingPrice] = useState("");
+  const [reservePrice, setReservePrice] = useState("");
+  const [buyNowPrice, setBuyNowPrice] = useState("");
+  const [duration, setDuration] = useState<Duration>(DURATIONS[3]);
+  const [minIncrement, setMinIncrement] = useState("1");
   const [description, setDescription] = useState("");
 
-  const stepTitles = ["Add Photos", "Card Details", "Set Price"];
+  const stepTitles = ["Add Photos", "Card Details", "Auction Settings"];
 
   async function pickFromGallery() {
     const result = await ImagePicker.launchImageLibraryAsync({
@@ -61,7 +74,7 @@ export default function CreateListingScreen({ onBack }: Props) {
   async function pickFromCamera() {
     const perm = await ImagePicker.requestCameraPermissionsAsync();
     if (!perm.granted) {
-      Alert.alert("Permission needed", "Camera access is required to take photos.");
+      Alert.alert("Permission needed", "Camera access is required.");
       return;
     }
     const result = await ImagePicker.launchCameraAsync({ quality: 0.8 });
@@ -77,23 +90,17 @@ export default function CreateListingScreen({ onBack }: Props) {
   function canAdvance(): boolean {
     if (step === 0) return images.length > 0;
     if (step === 1) return cardName.trim().length > 0 && category.length > 0;
-    return price.trim().length > 0;
+    return startingPrice.trim().length > 0;
   }
 
   function handleNext() {
-    if (step < 2) {
-      setStep(step + 1);
-    } else {
-      handleSubmit();
-    }
+    if (step < 2) setStep(step + 1);
+    else handleSubmit();
   }
 
   function handleBack() {
-    if (step > 0) {
-      setStep(step - 1);
-    } else {
-      onBack();
-    }
+    if (step > 0) setStep(step - 1);
+    else onBack();
   }
 
   async function uploadImage(localUri: string, userId: string, index: number): Promise<string> {
@@ -104,15 +111,12 @@ export default function CreateListingScreen({ onBack }: Props) {
       gif: "image/gif", webp: "image/webp",
     };
     const contentType = mimeTypes[ext] ?? "image/jpeg";
-    const filePath = `${userId}/${Date.now()}-${index}.${ext}`;
-
+    const filePath = `${userId}/auction-${Date.now()}-${index}.${ext}`;
     const resp = await fetch(localUri);
     const arrayBuf = await resp.arrayBuffer();
-
     const { error } = await supabase.storage
       .from("listing-images")
       .upload(filePath, arrayBuf, { upsert: true, contentType });
-
     if (error) throw error;
     const { data } = supabase.storage.from("listing-images").getPublicUrl(filePath);
     return data.publicUrl;
@@ -120,47 +124,67 @@ export default function CreateListingScreen({ onBack }: Props) {
 
   async function handleSubmit() {
     setSubmitting(true);
-
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) {
       setSubmitting(false);
-      Alert.alert("Error", "Please sign in to create a listing.");
+      Alert.alert("Error", "Please sign in.");
       return;
     }
 
     try {
-      const uploadedUrls = await Promise.all(
-        images.map((uri, i) => uploadImage(uri, user.id, i)),
-      );
+      const uploadedUrls = await Promise.all(images.map((uri, i) => uploadImage(uri, user.id, i)));
 
-      const numericPrice = parseFloat(price.replace(/(RM|\$|,)/gi, ""));
-      if (isNaN(numericPrice) || numericPrice <= 0) {
+      const numStart = parseFloat(startingPrice.replace(/(RM|\$|,)/gi, ""));
+      if (isNaN(numStart) || numStart <= 0) {
         setSubmitting(false);
-        Alert.alert("Error", "Please enter a valid price.");
+        Alert.alert("Error", "Please enter a valid starting price.");
         return;
       }
 
-      const qty = parseInt(quantity, 10);
-      const safeQty = isNaN(qty) || qty < 1 ? 1 : qty;
+      const numReserve = reservePrice.trim()
+        ? parseFloat(reservePrice.replace(/(RM|\$|,)/gi, ""))
+        : null;
+      if (numReserve !== null && (isNaN(numReserve) || numReserve < numStart)) {
+        setSubmitting(false);
+        Alert.alert("Error", "Reserve price must be at least the starting price.");
+        return;
+      }
 
-      const { error } = await supabase.from("listings").insert({
+      const numBuyNow = buyNowPrice.trim()
+        ? parseFloat(buyNowPrice.replace(/(RM|\$|,)/gi, ""))
+        : null;
+      if (numBuyNow !== null && (isNaN(numBuyNow) || numBuyNow <= numStart)) {
+        setSubmitting(false);
+        Alert.alert("Error", "Buy Now price must be higher than starting price.");
+        return;
+      }
+
+      const numIncrement = parseFloat(minIncrement.replace(/(RM|\$|,)/gi, "")) || 1;
+
+      const endsAt = new Date(Date.now() + duration.hours * 3600000).toISOString();
+
+      const { error } = await supabase.from("auction_items").insert({
         seller_id: user.id,
         card_name: cardName.trim(),
         edition: edition.trim() || null,
         grade: grade.trim() || null,
         condition: condition || null,
-        price: numericPrice,
-        quantity: safeQty,
+        starting_price: numStart,
+        reserve_price: numReserve,
+        buy_now_price: numBuyNow,
+        min_bid_increment: numIncrement,
         category,
         description: description.trim() || null,
         images: uploadedUrls,
+        ends_at: endsAt,
+        original_ends_at: endsAt,
         status: "active",
       });
 
       if (error) throw error;
       onBack();
     } catch (err: any) {
-      Alert.alert("Error", err?.message ?? "Failed to create listing.");
+      Alert.alert("Error", err?.message ?? "Failed to create auction.");
     } finally {
       setSubmitting(false);
     }
@@ -183,14 +207,7 @@ export default function CreateListingScreen({ onBack }: Props) {
 
         <View style={cf.dotsRow}>
           {[0, 1, 2].map((i) => (
-            <View
-              key={i}
-              style={[
-                cf.dot,
-                i === step && cf.dotActive,
-                i < step && cf.dotCompleted,
-              ]}
-            />
+            <View key={i} style={[cf.dot, i === step && cf.dotActive, i < step && cf.dotCompleted]} />
           ))}
         </View>
 
@@ -202,19 +219,12 @@ export default function CreateListingScreen({ onBack }: Props) {
           {step === 0 && (
             <>
               <Text style={cf.sectionTitle}>Upload Card Photos</Text>
-              <Text style={cf.sectionSub}>
-                Add up to {MAX_IMAGES} photos. Front, back, close-ups of any
-                flaws.
-              </Text>
-
+              <Text style={cf.sectionSub}>Add up to {MAX_IMAGES} photos of your card.</Text>
               <View style={cf.imageGrid}>
                 {images.map((uri, i) => (
                   <View key={uri} style={[cf.imageSlot, cf.imageSlotFilled]}>
                     <Image source={{ uri }} style={cf.imagePreview} />
-                    <Pressable
-                      style={cf.imageRemove}
-                      onPress={() => removeImage(i)}
-                    >
+                    <Pressable style={cf.imageRemove} onPress={() => removeImage(i)}>
                       <Feather name="x" size={12} color="#fff" />
                     </Pressable>
                   </View>
@@ -226,7 +236,6 @@ export default function CreateListingScreen({ onBack }: Props) {
                   </Pressable>
                 )}
               </View>
-
               <View style={cf.pickerRow}>
                 <Pressable style={cf.pickerBtn} onPress={pickFromCamera}>
                   <Feather name="camera" size={18} color={C.textAccent} />
@@ -243,79 +252,31 @@ export default function CreateListingScreen({ onBack }: Props) {
           {step === 1 && (
             <>
               <Text style={cf.sectionTitle}>Card Information</Text>
-              <Text style={cf.sectionSub}>
-                Fill in the details about your card.
-              </Text>
+              <Text style={cf.sectionSub}>Fill in the details about your card.</Text>
 
               <Text style={cf.fieldLabel}>Card Name *</Text>
-              <TextInput
-                style={cf.textInput}
-                value={cardName}
-                onChangeText={setCardName}
-                placeholder="e.g. Charizard Holo"
-                placeholderTextColor={C.textMuted}
-              />
+              <TextInput style={cf.textInput} value={cardName} onChangeText={setCardName} placeholder="e.g. Charizard Holo" placeholderTextColor={C.textMuted} />
 
               <Text style={cf.fieldLabel}>Edition</Text>
-              <TextInput
-                style={cf.textInput}
-                value={edition}
-                onChangeText={setEdition}
-                placeholder="e.g. 1999 Base Set"
-                placeholderTextColor={C.textMuted}
-              />
+              <TextInput style={cf.textInput} value={edition} onChangeText={setEdition} placeholder="e.g. 1999 Base Set" placeholderTextColor={C.textMuted} />
 
               <Text style={cf.fieldLabel}>Category *</Text>
               <View style={cf.categoryRow}>
                 {CATEGORIES.map((cat) => (
-                  <Pressable
-                    key={cat}
-                    style={[
-                      cf.categoryPill,
-                      category === cat && cf.categoryPillActive,
-                    ]}
-                    onPress={() => setCategory(cat)}
-                  >
-                    <Text
-                      style={[
-                        cf.categoryPillText,
-                        category === cat && cf.categoryPillTextActive,
-                      ]}
-                    >
-                      {cat}
-                    </Text>
+                  <Pressable key={cat} style={[cf.categoryPill, category === cat && cf.categoryPillActive]} onPress={() => setCategory(cat)}>
+                    <Text style={[cf.categoryPillText, category === cat && cf.categoryPillTextActive]}>{cat}</Text>
                   </Pressable>
                 ))}
               </View>
 
               <Text style={cf.fieldLabel}>Grade</Text>
-              <TextInput
-                style={cf.textInput}
-                value={grade}
-                onChangeText={setGrade}
-                placeholder="e.g. PSA 10, BGS 9.5"
-                placeholderTextColor={C.textMuted}
-              />
+              <TextInput style={cf.textInput} value={grade} onChangeText={setGrade} placeholder="e.g. PSA 10, BGS 9.5" placeholderTextColor={C.textMuted} />
 
               <Text style={cf.fieldLabel}>Condition</Text>
               <View style={cf.conditionRow}>
                 {CONDITIONS.map((c) => (
-                  <Pressable
-                    key={c}
-                    style={[
-                      cf.conditionChip,
-                      condition === c && cf.conditionChipActive,
-                    ]}
-                    onPress={() => setCondition(c)}
-                  >
-                    <Text
-                      style={[
-                        cf.conditionChipText,
-                        condition === c && cf.conditionChipTextActive,
-                      ]}
-                    >
-                      {c}
-                    </Text>
+                  <Pressable key={c} style={[cf.conditionChip, condition === c && cf.conditionChipActive]} onPress={() => setCondition(c)}>
+                    <Text style={[cf.conditionChipText, condition === c && cf.conditionChipTextActive]}>{c}</Text>
                   </Pressable>
                 ))}
               </View>
@@ -324,40 +285,54 @@ export default function CreateListingScreen({ onBack }: Props) {
 
           {step === 2 && (
             <>
-              <Text style={cf.sectionTitle}>Set Your Price</Text>
-              <Text style={cf.sectionSub}>
-                Enter your asking price and add a description.
-              </Text>
+              <Text style={cf.sectionTitle}>Auction Settings</Text>
+              <Text style={cf.sectionSub}>Configure your auction parameters.</Text>
 
-              <Text style={cf.fieldLabel}>Asking Price *</Text>
+              <Text style={cf.fieldLabel}>Starting Price *</Text>
               <View style={cf.priceInputRow}>
                 <Text style={cf.dollarSign}>RM</Text>
-                <TextInput
-                  style={cf.priceInput}
-                  value={price}
-                  onChangeText={setPrice}
-                  placeholder="0.00"
-                  placeholderTextColor={C.textMuted}
-                  keyboardType="numeric"
-                />
+                <TextInput style={cf.priceInput} value={startingPrice} onChangeText={setStartingPrice} placeholder="0.00" placeholderTextColor={C.textMuted} keyboardType="numeric" />
               </View>
 
-              <Text style={cf.fieldLabel}>Quantity</Text>
-              <TextInput
-                style={cf.input}
-                value={quantity}
-                onChangeText={setQuantity}
-                placeholder="1"
-                placeholderTextColor={C.textMuted}
-                keyboardType="number-pad"
-              />
+              <Text style={cf.fieldLabel}>Reserve Price (optional)</Text>
+              <View style={cf.priceInputRow}>
+                <Text style={cf.dollarSign}>RM</Text>
+                <TextInput style={cf.priceInput} value={reservePrice} onChangeText={setReservePrice} placeholder="Min price to sell" placeholderTextColor={C.textMuted} keyboardType="numeric" />
+              </View>
+
+              <Text style={cf.fieldLabel}>Buy It Now Price (optional)</Text>
+              <View style={cf.priceInputRow}>
+                <Text style={cf.dollarSign}>RM</Text>
+                <TextInput style={cf.priceInput} value={buyNowPrice} onChangeText={setBuyNowPrice} placeholder="Instant purchase price" placeholderTextColor={C.textMuted} keyboardType="numeric" />
+              </View>
+
+              <Text style={cf.fieldLabel}>Min Bid Increment</Text>
+              <View style={cf.priceInputRow}>
+                <Text style={cf.dollarSign}>RM</Text>
+                <TextInput style={cf.priceInput} value={minIncrement} onChangeText={setMinIncrement} placeholder="1" placeholderTextColor={C.textMuted} keyboardType="numeric" />
+              </View>
+
+              <Text style={cf.fieldLabel}>Duration</Text>
+              <View style={cf.categoryRow}>
+                {DURATIONS.map((d) => (
+                  <Pressable
+                    key={d.label}
+                    style={[cf.categoryPill, duration.label === d.label && cf.categoryPillActive]}
+                    onPress={() => setDuration(d)}
+                  >
+                    <Text style={[cf.categoryPillText, duration.label === d.label && cf.categoryPillTextActive]}>
+                      {d.label}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
 
               <Text style={cf.fieldLabel}>Description</Text>
               <TextInput
                 style={cf.textArea}
                 value={description}
                 onChangeText={setDescription}
-                placeholder="Describe the card's condition, history, notable features..."
+                placeholder="Describe the card, its history, notable features..."
                 placeholderTextColor={C.textMuted}
                 multiline
               />
@@ -368,11 +343,7 @@ export default function CreateListingScreen({ onBack }: Props) {
                   <>
                     <View style={cf.reviewImages}>
                       {images.map((uri) => (
-                        <Image
-                          key={uri}
-                          source={{ uri }}
-                          style={cf.reviewThumb}
-                        />
+                        <Image key={uri} source={{ uri }} style={cf.reviewThumb} />
                       ))}
                     </View>
                     <View style={cf.reviewDivider} />
@@ -380,15 +351,11 @@ export default function CreateListingScreen({ onBack }: Props) {
                 )}
                 <View style={cf.reviewRow}>
                   <Text style={cf.reviewLabel}>Card</Text>
-                  <Text style={cf.reviewValue} numberOfLines={1}>
-                    {cardName || "—"}
-                  </Text>
+                  <Text style={cf.reviewValue} numberOfLines={1}>{cardName || "—"}</Text>
                 </View>
                 <View style={cf.reviewRow}>
                   <Text style={cf.reviewLabel}>Edition</Text>
-                  <Text style={cf.reviewValue} numberOfLines={1}>
-                    {edition || "—"}
-                  </Text>
+                  <Text style={cf.reviewValue} numberOfLines={1}>{edition || "—"}</Text>
                 </View>
                 <View style={cf.reviewRow}>
                   <Text style={cf.reviewLabel}>Category</Text>
@@ -404,12 +371,36 @@ export default function CreateListingScreen({ onBack }: Props) {
                 </View>
                 <View style={cf.reviewDivider} />
                 <View style={cf.reviewRow}>
-                  <Text style={cf.reviewLabel}>Asking Price</Text>
+                  <Text style={cf.reviewLabel}>Starting Price</Text>
                   <Text style={[cf.reviewValue, { color: C.link, fontSize: 18, fontWeight: "900" }]}>
-                    {price
-                      ? `RM${price.replace(/^(RM|\$)/i, "")}`
+                    {startingPrice
+                      ? `RM${startingPrice.replace(/^(RM|\$)/i, "")}`
                       : "—"}
                   </Text>
+                </View>
+                {reservePrice.trim() ? (
+                  <View style={cf.reviewRow}>
+                    <Text style={cf.reviewLabel}>Reserve</Text>
+                    <Text style={cf.reviewValue}>
+                      RM${reservePrice.replace(/^(RM|\$)/i, "")}
+                    </Text>
+                  </View>
+                ) : null}
+                {buyNowPrice.trim() ? (
+                  <View style={cf.reviewRow}>
+                    <Text style={cf.reviewLabel}>Buy Now</Text>
+                    <Text style={[cf.reviewValue, { color: C.success }]}>
+                      RM${buyNowPrice.replace(/^(RM|\$)/i, "")}
+                    </Text>
+                  </View>
+                ) : null}
+                <View style={cf.reviewRow}>
+                  <Text style={cf.reviewLabel}>Duration</Text>
+                  <Text style={cf.reviewValue}>{duration.label}</Text>
+                </View>
+                <View style={cf.reviewRow}>
+                  <Text style={cf.reviewLabel}>Min Raise</Text>
+                  <Text style={cf.reviewValue}>RM{minIncrement || "1"}</Text>
                 </View>
               </View>
             </>
@@ -423,11 +414,7 @@ export default function CreateListingScreen({ onBack }: Props) {
               onPress={handleNext}
               disabled={!canAdvance()}
             >
-              <Text
-                style={[cf.nextBtnText, !canAdvance() && cf.nextBtnTextDisabled]}
-              >
-                Continue
-              </Text>
+              <Text style={[cf.nextBtnText, !canAdvance() && cf.nextBtnTextDisabled]}>Continue</Text>
             </Pressable>
           ) : (
             <Pressable
@@ -438,10 +425,8 @@ export default function CreateListingScreen({ onBack }: Props) {
               {submitting ? (
                 <ActivityIndicator size="small" color={C.textHero} />
               ) : (
-                <Text
-                  style={[cf.submitBtnText, !canAdvance() && cf.nextBtnTextDisabled]}
-                >
-                  Post Listing
+                <Text style={[cf.submitBtnText, !canAdvance() && cf.nextBtnTextDisabled]}>
+                  Start Auction
                 </Text>
               )}
             </Pressable>

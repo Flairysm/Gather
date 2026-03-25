@@ -4,6 +4,8 @@ import {
   Dimensions,
   Easing,
   Image,
+  NativeScrollEvent,
+  NativeSyntheticEvent,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -14,6 +16,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { StatusBar } from "expo-status-bar";
 import { Feather, Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { Share } from "react-native";
 
 import { C, S } from "../theme";
 import { ld } from "../styles/listingDetail.styles";
@@ -36,11 +39,14 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
   const insets = useSafeAreaInsets();
   const [item, setItem] = useState<Listing | null>(null);
   const [similar, setSimilar] = useState<Listing[]>([]);
+  const [vendorStore, setVendorStore] = useState<{ id: string; store_name: string; logo_url: string | null } | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [showCartToast, setShowCartToast] = useState(false);
   const [showQtyPicker, setShowQtyPicker] = useState(false);
   const [qtyToAdd, setQtyToAdd] = useState(1);
+  const [isSaved, setIsSaved] = useState(false);
+  const [heroIndex, setHeroIndex] = useState(0);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const toastAnim = useRef(new Animated.Value(0)).current;
 
@@ -91,7 +97,7 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
       .select(`
         id, seller_id, card_name, edition, grade, condition, price, quantity,
         category, description, images, views, status, created_at,
-        seller:profiles!seller_id(username, display_name, rating, total_sales, avatar_url)
+        seller:profiles!seller_id(username, display_name, rating, total_sales, review_count, avatar_url)
       `)
       .eq("id", listingId)
       .maybeSingle();
@@ -102,6 +108,17 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
         seller: Array.isArray(data.seller) ? data.seller[0] : data.seller,
       } as Listing;
       setItem(listing);
+      setVendorStore(null);
+
+      const { data: storeData } = await supabase
+        .from("vendor_stores")
+        .select("id, store_name, logo_url")
+        .eq("profile_id", listing.seller_id)
+        .eq("is_active", true)
+        .maybeSingle();
+      if (storeData?.id && storeData?.store_name) {
+        setVendorStore(storeData as any);
+      }
 
       const { data: sim } = await supabase
         .from("listings")
@@ -130,13 +147,48 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data: { user } }) => {
-      if (user) setCurrentUserId(user.id);
+      if (user) {
+        setCurrentUserId(user.id);
+        supabase
+          .from("saved_items")
+          .select("id")
+          .eq("user_id", user.id)
+          .eq("item_type", "listing")
+          .eq("item_id", listingId)
+          .maybeSingle()
+          .then(({ data }) => setIsSaved(!!data));
+      }
     });
+    supabase.rpc("increment_listing_views", { p_listing_id: listingId });
     loadListing().catch(() => setLoading(false));
     return () => {
       if (toastTimer.current) clearTimeout(toastTimer.current);
     };
   }, [loadListing]);
+
+  useEffect(() => {
+    setHeroIndex(0);
+  }, [item?.id]);
+
+  async function handleShare() {
+    if (!item) return;
+    Share.share({
+      message: `Check out "${item.card_name}" on Gather for ${formatListingPrice(item.price)}!`,
+    });
+  }
+
+  async function handleToggleSave() {
+    const { data, error } = await supabase.rpc("toggle_save_item", {
+      p_item_type: "listing",
+      p_item_id: listingId,
+    });
+    if (!error) setIsSaved((data as any).saved);
+  }
+
+  function handleHeroScroll(e: NativeSyntheticEvent<NativeScrollEvent>) {
+    const next = Math.round(e.nativeEvent.contentOffset.x / Dimensions.get("window").width);
+    setHeroIndex(next);
+  }
 
   function triggerCartToast() {
     setShowCartToast(true);
@@ -370,11 +422,11 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
         </Pressable>
         <Text style={ld.headerTitle}>Listing</Text>
         <View style={ld.headerActions}>
-          <Pressable style={ld.headerIconBtn}>
+          <Pressable style={ld.headerIconBtn} onPress={handleShare}>
             <Feather name="share" size={16} color={C.textSearch} />
           </Pressable>
-          <Pressable style={ld.headerIconBtn}>
-            <Feather name="bookmark" size={16} color={C.textSearch} />
+          <Pressable style={ld.headerIconBtn} onPress={handleToggleSave}>
+            <Ionicons name={isSaved ? "bookmark" : "bookmark-outline"} size={16} color={isSaved ? C.accent : C.textSearch} />
           </Pressable>
         </View>
       </View>
@@ -385,17 +437,40 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
       >
         {/* Hero Art */}
         <View style={ld.heroArt}>
-          {item.images?.[0] ? (
-            <Image
-              source={{ uri: item.images[0] }}
-              style={{ width: "100%", height: "100%", borderRadius: S.radiusCard }}
-            />
+          {item.images && item.images.length > 0 ? (
+            <View style={ld.heroPagerWrap}>
+              <ScrollView
+                horizontal
+                pagingEnabled
+                showsHorizontalScrollIndicator={false}
+                onMomentumScrollEnd={handleHeroScroll}
+              >
+                {item.images.map((uri, idx) => (
+                  <View key={`${item.id}-img-${idx}`} style={ld.heroSlide}>
+                    <Image
+                      source={{ uri }}
+                      style={{ width: "100%", height: "100%", borderRadius: S.radiusCard }}
+                    />
+                  </View>
+                ))}
+              </ScrollView>
+            </View>
           ) : (
             <Text style={ld.heroPlaceholderText}>Card Image</Text>
           )}
           {item.grade && (
             <View style={ld.heroGradeBadge}>
               <Text style={ld.heroGradeText}>{item.grade}</Text>
+            </View>
+          )}
+          {item.images && item.images.length > 1 && (
+            <View style={ld.heroDots}>
+              {item.images.map((_, idx) => (
+                <View
+                  key={`${item.id}-dot-${idx}`}
+                  style={[ld.heroDot, idx === heroIndex && ld.heroDotActive]}
+                />
+              ))}
             </View>
           )}
           <View style={ld.viewsBadge}>
@@ -439,34 +514,53 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
         {/* Seller */}
         <View style={ld.sellerSection}>
           <View style={ld.sellerAvatar}>
-            {item.seller?.avatar_url ? (
+            {vendorStore?.logo_url ? (
+              <Image
+                source={{ uri: vendorStore.logo_url }}
+                style={{ width: "100%", height: "100%", borderRadius: 20 }}
+              />
+            ) : item.seller?.avatar_url ? (
               <Image
                 source={{ uri: item.seller.avatar_url }}
                 style={{ width: "100%", height: "100%", borderRadius: 20 }}
               />
             ) : (
               <Text style={ld.sellerAvatarText}>
-                {(item.seller?.username ?? "U").charAt(0).toUpperCase()}
+                {(vendorStore?.store_name ?? item.seller?.display_name ?? item.seller?.username ?? "V")
+                  .charAt(0)
+                  .toUpperCase()}
               </Text>
             )}
           </View>
           <View style={ld.sellerInfo}>
             <Text style={ld.sellerName}>
-              @{item.seller?.username ?? "user"}
+              {vendorStore?.store_name ??
+                item.seller?.display_name ??
+                (item.seller?.username ? `@${item.seller.username}` : "Vendor")}
             </Text>
             <View style={ld.sellerMeta}>
               <View style={ld.ratingRow}>
                 <Ionicons name="star" size={12} color="#F59E0B" />
-                <Text style={ld.ratingText}>{item.seller?.rating ?? "5.0"}</Text>
+                <Text style={ld.ratingText}>
+                  {Number(item.seller?.rating ?? 5).toFixed(1)}
+                  {(item.seller as any)?.review_count > 0
+                    ? ` (${(item.seller as any).review_count})`
+                    : ""}
+                </Text>
               </View>
               <Text style={ld.salesText}>
                 {item.seller?.total_sales ?? 0} sales
               </Text>
             </View>
           </View>
-          <Pressable style={ld.viewProfileBtn}>
-            <Text style={ld.viewProfileText}>View Profile</Text>
-          </Pressable>
+          {vendorStore?.id ? (
+            <Pressable
+              style={ld.viewProfileBtn}
+              onPress={() => push({ type: "VENDOR_STORE_PAGE", storeId: vendorStore.id })}
+            >
+              <Text style={ld.viewProfileText}>View Vendor</Text>
+            </Pressable>
+          ) : null}
         </View>
 
         <View style={ld.divider} />

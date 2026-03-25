@@ -75,7 +75,9 @@ export default function MarketScreen() {
 
   const [listings, setListings] = useState<Listing[]>([]);
   const [wantedPosts, setWantedPosts] = useState<WantedPost[]>([]);
-  const [vendorStoreNames, setVendorStoreNames] = useState<Record<string, string>>({});
+  const [vendorStores, setVendorStores] = useState<
+    Record<string, { store_name: string; logo_url: string | null }>
+  >({});
   const [loadingListings, setLoadingListings] = useState(true);
   const [loadingWanted, setLoadingWanted] = useState(true);
 
@@ -110,23 +112,29 @@ export default function MarketScreen() {
       if (sellerIds.length > 0) {
         const { data: stores } = await supabase
           .from("vendor_stores")
-          .select("profile_id, store_name")
+          .select("profile_id, store_name, logo_url")
           .in("profile_id", sellerIds)
           .eq("is_active", true);
 
         if (stores) {
-          const nameMap: Record<string, string> = {};
+          const storeMap: Record<
+            string,
+            { store_name: string; logo_url: string | null }
+          > = {};
           for (const s of stores as any[]) {
             if (s.profile_id && s.store_name) {
-              nameMap[s.profile_id] = s.store_name;
+              storeMap[s.profile_id] = {
+                store_name: s.store_name,
+                logo_url: s.logo_url ?? null,
+              };
             }
           }
-          setVendorStoreNames(nameMap);
+          setVendorStores(storeMap);
         } else {
-          setVendorStoreNames({});
+          setVendorStores({});
         }
       } else {
-        setVendorStoreNames({});
+        setVendorStores({});
       }
     }
     setLoadingListings(false);
@@ -181,7 +189,7 @@ export default function MarketScreen() {
           item.grade ?? "",
           item.condition ?? "",
           item.category ?? "",
-          vendorStoreNames[item.seller_id] ?? "",
+          vendorStores[item.seller_id]?.store_name ?? "",
           item.seller?.username ?? "",
           item.seller?.display_name ?? "",
         ]
@@ -401,16 +409,6 @@ export default function MarketScreen() {
                           style={{ width: "100%", height: "100%", borderRadius: S.radiusCardInner }}
                         />
                       ) : null}
-                      <View style={(m as any).vendorBadge}>
-                        <Ionicons
-                          name="storefront-outline"
-                          size={11}
-                          color={C.textSearch}
-                        />
-                        <Text numberOfLines={1} style={(m as any).vendorBadgeText}>
-                          {vendorStoreNames[item.seller_id] ?? "Vendor Store"}
-                        </Text>
-                      </View>
                       {hasDisplayableCondition(item.condition) && (
                         <View style={m.conditionBadge}>
                           <Text numberOfLines={1} style={m.conditionBadgeText}>
@@ -436,7 +434,12 @@ export default function MarketScreen() {
                       </Text>
                       <View style={m.listingMeta}>
                         <View style={m.sellerRow}>
-                          {item.seller?.avatar_url ? (
+                          {vendorStores[item.seller_id]?.logo_url ? (
+                            <Image
+                              source={{ uri: vendorStores[item.seller_id]!.logo_url! }}
+                              style={{ width: 16, height: 16, borderRadius: 8 }}
+                            />
+                          ) : item.seller?.avatar_url ? (
                             <Image
                               source={{ uri: item.seller.avatar_url }}
                               style={{ width: 16, height: 16, borderRadius: 8 }}
@@ -445,7 +448,9 @@ export default function MarketScreen() {
                             <View style={m.sellerAvatar} />
                           )}
                           <Text style={m.sellerName}>
-                            @{item.seller?.username ?? "user"}
+                            {vendorStores[item.seller_id]?.store_name ??
+                              item.seller?.display_name ??
+                              (item.seller?.username ? `@${item.seller.username}` : "Vendor")}
                           </Text>
                         </View>
                         <Text style={m.postedAt}>{timeAgo(item.created_at)}</Text>

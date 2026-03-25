@@ -273,6 +273,14 @@ export const ld = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  heroPagerWrap: {
+    width: "100%",
+    height: "100%",
+  },
+  heroSlide: {
+    width: SCREEN_W,
+    height: SCREEN_W * 1.1,
+  },
   heroPlaceholderText: {
     color: C.textMuted,
     fontSize: 14,
@@ -293,6 +301,28 @@ export const ld = StyleSheet.create({
     ...T.badge,
     color: C.textAccent,
     fontSize: 11,
+  },
+  heroDots: {
+    position: "absolute",
+    bottom: S.lg,
+    right: S.lg,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    backgroundColor: "rgba(0,0,0,0.45)",
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+  },
+  heroDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: "rgba(255,255,255,0.45)",
+  },
+  heroDotActive: {
+    width: 14,
+    backgroundColor: C.textPrimary,
   },
   viewsBadge: {
     position: "absolute",

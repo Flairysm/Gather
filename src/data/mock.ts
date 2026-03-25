@@ -23,12 +23,15 @@ export type FilterItem = {
 export const FILTERS: FilterItem[] = [
   { label: "For You" },
   { label: "Pokémon" },
+  { label: "MTG" },
+  { label: "Sports" },
+  { label: "YGO" },
   { label: "See All Categories", isSeeAll: true },
 ];
 
 export const streamFeatured: StreamCard[] = [
-  { id: "sf1", edition: "1999 Base Set", name: "Charizard Holo", price: "$8,240" },
-  { id: "sf2", edition: "Topps Chrome", name: "Shohei Ohtani RC", price: "$4,120" },
+  { id: "sf1", edition: "1999 Base Set", name: "Charizard Holo", price: "RM8,240" },
+  { id: "sf2", edition: "Topps Chrome", name: "Shohei Ohtani RC", price: "RM4,120" },
 ];
 
 export const vaultCards: VaultCard[] = [
@@ -37,7 +40,7 @@ export const vaultCards: VaultCard[] = [
     badge: "GEM MT 10",
     edition: "Alpha Edition",
     name: "Black Lotus",
-    price: "$124,500",
+    price: "RM124,500",
     trend: "+2.1%",
     trendUp: true,
   },
@@ -46,7 +49,7 @@ export const vaultCards: VaultCard[] = [
     badge: "PSA 10",
     edition: "2020 Nat Treasures",
     name: "Joe Burrow RPA",
-    price: "$14,800",
+    price: "RM14,800",
     trend: "+1.3%",
     trendUp: true,
   },
@@ -55,7 +58,7 @@ export const vaultCards: VaultCard[] = [
     badge: "BGS 9.5",
     edition: "1st Edition Base",
     name: "Charizard Holo",
-    price: "$8,240",
+    price: "RM8,240",
     trend: "-0.8%",
     trendUp: false,
   },

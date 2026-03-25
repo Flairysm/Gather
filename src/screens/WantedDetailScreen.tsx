@@ -8,6 +8,7 @@ import {
   View,
 } from "react-native";
 import { useCallback, useEffect, useState } from "react";
+import { Share } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { Feather, Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -29,6 +30,7 @@ export default function WantedDetailScreen({ wantedId, onBack }: Props) {
   const [item, setItem] = useState<WantedPost | null>(null);
   const [similar, setSimilar] = useState<WantedPost[]>([]);
   const [loading, setLoading] = useState(true);
+  const [isSaved, setIsSaved] = useState(false);
 
   const loadPost = useCallback(async () => {
     setLoading(true);
@@ -75,8 +77,36 @@ export default function WantedDetailScreen({ wantedId, onBack }: Props) {
   }, [wantedId]);
 
   useEffect(() => {
+    supabase.auth.getUser().then(({ data: { user } }) => {
+      if (user) {
+        supabase
+          .from("saved_items")
+          .select("id")
+          .eq("user_id", user.id)
+          .eq("item_type", "wanted")
+          .eq("item_id", wantedId)
+          .maybeSingle()
+          .then(({ data }) => setIsSaved(!!data));
+      }
+    });
+    supabase.rpc("increment_wanted_views", { p_wanted_id: wantedId });
     loadPost().catch(() => setLoading(false));
   }, [loadPost]);
+
+  function handleShare() {
+    if (!item) return;
+    Share.share({
+      message: `Looking for "${item.card_name}" on Gather — offering ${formatListingPrice(item.offer_price)}!`,
+    });
+  }
+
+  async function handleToggleSave() {
+    const { data, error } = await supabase.rpc("toggle_save_item", {
+      p_item_type: "wanted",
+      p_item_id: wantedId,
+    });
+    if (!error) setIsSaved((data as any).saved);
+  }
 
   if (loading) {
     return (
@@ -124,11 +154,11 @@ export default function WantedDetailScreen({ wantedId, onBack }: Props) {
         </Pressable>
         <Text style={wd.headerTitle}>Wanted</Text>
         <View style={wd.headerActions}>
-          <Pressable style={wd.headerIconBtn}>
+          <Pressable style={wd.headerIconBtn} onPress={handleShare}>
             <Feather name="share" size={16} color={C.textSearch} />
           </Pressable>
-          <Pressable style={wd.headerIconBtn}>
-            <Feather name="bookmark" size={16} color={C.textSearch} />
+          <Pressable style={wd.headerIconBtn} onPress={handleToggleSave}>
+            <Ionicons name={isSaved ? "bookmark" : "bookmark-outline"} size={16} color={isSaved ? C.accent : C.textSearch} />
           </Pressable>
         </View>
       </View>
@@ -201,7 +231,7 @@ export default function WantedDetailScreen({ wantedId, onBack }: Props) {
             <View style={wd.buyerMeta}>
               <View style={wd.ratingRow}>
                 <Ionicons name="star" size={12} color="#F59E0B" />
-                <Text style={wd.ratingText}>{item.buyer?.rating ?? "5.0"}</Text>
+                <Text style={wd.ratingText}>{Number(item.buyer?.rating ?? 5).toFixed(1)}</Text>
               </View>
               <Text style={wd.purchasesText}>
                 {item.buyer?.total_purchases ?? 0} purchases

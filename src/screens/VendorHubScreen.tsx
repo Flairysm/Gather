@@ -21,7 +21,7 @@ import { vendorHub as vh } from "../styles/vendorHub.styles";
 
 // ── Types ──
 
-type TabId = "overview" | "orders" | "listings" | "store";
+type TabId = "overview" | "orders" | "listings" | "auctions" | "store";
 
 type VendorStore = {
   id: string;
@@ -91,12 +91,29 @@ type OverviewStats = {
   pendingShipments: number;
 };
 
+type VendorAuction = {
+  id: string;
+  card_name: string;
+  edition: string | null;
+  grade: string | null;
+  starting_price: number;
+  current_bid: number | null;
+  bid_count: number;
+  images: string[] | null;
+  ends_at: string;
+  status: string;
+  winner_id: string | null;
+  created_at: string;
+  winner?: { username: string | null; display_name: string | null } | null;
+};
+
 // ── Constants ──
 
 const TABS: { id: TabId; label: string; icon: string }[] = [
   { id: "overview", label: "Overview", icon: "analytics-outline" },
   { id: "orders", label: "Orders", icon: "receipt-outline" },
   { id: "listings", label: "Listings", icon: "pricetag-outline" },
+  { id: "auctions", label: "Auctions", icon: "hammer-outline" },
   { id: "store", label: "Store", icon: "storefront-outline" },
 ];
 
@@ -172,7 +189,7 @@ function formatListingStatus(status: string) {
 }
 
 function formatCurrency(v: number) {
-  return `$${v.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+  return `RM${v.toLocaleString("en-MY", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
 }
 
 function relativeTime(dateStr: string) {
@@ -236,6 +253,10 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
   const [editPrice, setEditPrice] = useState("");
   const [editQuantity, setEditQuantity] = useState("");
   const [savingListing, setSavingListing] = useState(false);
+
+  // Auctions
+  const [myAuctions, setMyAuctions] = useState<VendorAuction[]>([]);
+  const [auctionFilter, setAuctionFilter] = useState<"all" | "active" | "ended" | "cancelled">("all");
 
   // ── Helpers ──
 
@@ -314,6 +335,7 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
         .from("listings")
         .select("id, card_name, edition, grade, condition, price, quantity, images, status, created_at")
         .eq("seller_id", user.id)
+        .neq("status", "removed")
         .order("created_at", { ascending: false });
       if (error) throw error;
       setMyListings((data ?? []) as VendorListing[]);
@@ -418,6 +440,30 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
     }
   }, [userId]);
 
+  const loadMyAuctions = useCallback(async () => {
+    if (!userId) return;
+    try {
+      const { data, error } = await supabase
+        .from("auction_items")
+        .select(`
+          id, card_name, edition, grade, starting_price, current_bid,
+          bid_count, images, ends_at, status, winner_id, created_at,
+          winner:profiles!winner_id(username, display_name)
+        `)
+        .eq("seller_id", userId)
+        .order("created_at", { ascending: false });
+      if (error) throw error;
+      setMyAuctions(
+        (data ?? []).map((r: any) => ({
+          ...r,
+          winner: Array.isArray(r.winner) ? r.winner[0] : r.winner,
+        })),
+      );
+    } catch (e) {
+      showToast(errMsg(e, "Failed to load auctions"));
+    }
+  }, [userId]);
+
   // ── Initial Load ──
 
   useEffect(() => {
@@ -432,7 +478,8 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
     if (!userId) return;
     loadOverview();
     loadOrderItems();
-  }, [userId, loadOverview, loadOrderItems]);
+    loadMyAuctions();
+  }, [userId, loadOverview, loadOrderItems, loadMyAuctions]);
 
   useEffect(() => {
     if (store?.id) {
@@ -659,14 +706,20 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
   }
 
   async function removeListing(item: VendorListing) {
-    Alert.alert("Remove listing?", "This will permanently delete the listing.", [
+    Alert.alert(
+      "Remove listing?",
+      "This will remove it from your store, but keep order history.",
+      [
       { text: "Cancel", style: "cancel" },
       {
         text: "Remove",
         style: "destructive",
         onPress: async () => {
           await supabase.from("vendor_display_items").delete().eq("listing_id", item.id);
-          const { error } = await supabase.from("listings").delete().eq("id", item.id);
+          const { error } = await supabase
+            .from("listings")
+            .update({ status: "removed", updated_at: new Date().toISOString() })
+            .eq("id", item.id);
           if (error) { showToast(errMsg(error, "Failed to remove listing")); return; }
           if (editingListingId === item.id) cancelEditListing();
           await loadMyListings();
@@ -676,6 +729,36 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
       },
     ]);
   }
+
+  // ── Auction Actions ──
+
+  async function cancelAuction(auction: VendorAuction) {
+    if ((auction.bid_count ?? 0) > 0) {
+      Alert.alert("Cannot Cancel", "This auction already has bids and cannot be cancelled.");
+      return;
+    }
+    Alert.alert("Cancel Auction?", "This will permanently cancel the auction.", [
+      { text: "Keep", style: "cancel" },
+      {
+        text: "Cancel Auction",
+        style: "destructive",
+        onPress: async () => {
+          const { error } = await supabase
+            .from("auction_items")
+            .update({ status: "cancelled", updated_at: new Date().toISOString() })
+            .eq("id", auction.id);
+          if (error) { showToast(errMsg(error, "Failed to cancel auction")); return; }
+          await loadMyAuctions();
+          showToast("Auction cancelled");
+        },
+      },
+    ]);
+  }
+
+  const filteredAuctions =
+    auctionFilter === "all"
+      ? myAuctions
+      : myAuctions.filter((a) => a.status === auctionFilter);
 
   // ── Filtered orders ──
 
@@ -1016,7 +1099,7 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
                           {item.condition ? ` · ${item.condition}` : ""}
                         </Text>
                         <Text style={vh.listingPrice}>
-                          ${Number(item.price).toLocaleString()}
+                          {formatCurrency(Number(item.price))}
                           <Text style={vh.listingQty}>  ·  Qty: {item.quantity}</Text>
                         </Text>
                       </View>
@@ -1123,6 +1206,163 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
                       </View>
                     )}
                   </View>
+                );
+              }}
+            />
+          )}
+        </View>
+      )}
+
+      {/* ═══════════════ AUCTIONS TAB ═══════════════ */}
+      {tab === "auctions" && (
+        <View style={{ flex: 1 }}>
+          <View style={vh.listingsHeader}>
+            <Text style={vh.sectionTitle}>My Auctions</Text>
+            <Pressable
+              style={vh.newListingBtn}
+              onPress={() => push({ type: "CREATE_AUCTION" })}
+            >
+              <Feather name="plus" size={16} color="#fff" />
+              <Text style={vh.newListingBtnText}>New Auction</Text>
+            </Pressable>
+          </View>
+
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={vh.filterRow}
+            style={{ flexGrow: 0 }}
+          >
+            {(["all", "active", "ended", "cancelled"] as const).map((f) => (
+              <Pressable
+                key={f}
+                style={[vh.filterChip, auctionFilter === f && vh.filterChipActive]}
+                onPress={() => setAuctionFilter(f)}
+              >
+                <Text style={[vh.filterChipText, auctionFilter === f && vh.filterChipTextActive]}>
+                  {f === "all" ? "All" : f.charAt(0).toUpperCase() + f.slice(1)}
+                  {f !== "all" && ` (${myAuctions.filter((a) => a.status === f).length})`}
+                </Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+
+          {filteredAuctions.length === 0 ? (
+            <View style={[vh.emptyCard, { marginHorizontal: S.screenPadding, marginTop: S.lg }]}>
+              <Ionicons name="hammer-outline" size={32} color={C.textMuted} />
+              <Text style={vh.emptyTitle}>
+                {auctionFilter === "all" ? "No auctions yet" : `No ${auctionFilter} auctions`}
+              </Text>
+              <Text style={vh.emptySub}>Create an auction to start selling via bidding</Text>
+            </View>
+          ) : (
+            <FlatList
+              data={filteredAuctions}
+              keyExtractor={(item) => item.id}
+              contentContainerStyle={{ paddingHorizontal: S.screenPadding, paddingBottom: 40 }}
+              renderItem={({ item: auction }) => {
+                const imgs = normalizeImages(auction.images);
+                const isActive = auction.status === "active";
+                const isEnded = auction.status === "ended";
+                const diff = new Date(auction.ends_at).getTime() - Date.now();
+                const timeStr =
+                  !isActive
+                    ? auction.status.charAt(0).toUpperCase() + auction.status.slice(1)
+                    : diff <= 0
+                      ? "Ending..."
+                      : diff < 3600000
+                        ? `${Math.floor(diff / 60000)}m left`
+                        : diff < 86400000
+                          ? `${Math.floor(diff / 3600000)}h left`
+                          : `${Math.floor(diff / 86400000)}d left`;
+
+                return (
+                  <Pressable
+                    style={vh.orderCard}
+                    onPress={() => push({ type: "AUCTION_DETAIL", auctionId: auction.id })}
+                  >
+                    <View style={vh.orderCardBody}>
+                      <View style={vh.orderItemThumb}>
+                        {imgs[0] ? (
+                          <Image source={{ uri: imgs[0] }} style={vh.orderItemThumbImg} />
+                        ) : (
+                          <Ionicons name="image-outline" size={18} color={C.textMuted} />
+                        )}
+                      </View>
+                      <View style={vh.orderItemInfo}>
+                        <Text style={vh.orderItemName} numberOfLines={1}>{auction.card_name}</Text>
+                        <Text style={vh.orderItemMeta}>
+                          {auction.edition ?? ""}
+                          {auction.grade ? ` · ${auction.grade}` : ""}
+                        </Text>
+                        <Text style={vh.orderItemMeta}>
+                          {auction.bid_count ?? 0} bid{(auction.bid_count ?? 0) !== 1 ? "s" : ""}
+                          {" · "}{timeStr}
+                        </Text>
+                      </View>
+                      <View style={vh.orderItemRight}>
+                        <Text style={vh.orderItemPrice}>
+                          {auction.current_bid
+                            ? formatCurrency(auction.current_bid)
+                            : formatCurrency(auction.starting_price)}
+                        </Text>
+                        <View
+                          style={[
+                            vh.fulfillmentChip,
+                            {
+                              backgroundColor: isActive
+                                ? C.successBg
+                                : isEnded
+                                  ? C.accentGlow
+                                  : "rgba(239,68,68,0.08)",
+                              borderColor: isActive
+                                ? "rgba(34,197,94,0.3)"
+                                : isEnded
+                                  ? C.borderStream
+                                  : "rgba(239,68,68,0.25)",
+                            },
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              vh.fulfillmentChipText,
+                              {
+                                color: isActive
+                                  ? C.success
+                                  : isEnded
+                                    ? C.textAccent
+                                    : C.danger,
+                              },
+                            ]}
+                          >
+                            {auction.status.charAt(0).toUpperCase() + auction.status.slice(1)}
+                          </Text>
+                        </View>
+                      </View>
+                    </View>
+
+                    {isEnded && auction.winner && (
+                      <View style={[vh.orderCardFooter, { gap: 6, paddingTop: 8 }]}>
+                        <Ionicons name="trophy" size={13} color="#F59E0B" />
+                        <Text style={[vh.fulfillmentChipText, { color: "#F59E0B" }]}>
+                          Winner: {auction.winner.display_name ?? auction.winner.username ?? "—"}
+                        </Text>
+                      </View>
+                    )}
+
+                    {isActive && (auction.bid_count ?? 0) === 0 && (
+                      <View style={vh.orderCardFooter}>
+                        <View style={{ flex: 1 }} />
+                        <Pressable
+                          style={[vh.fulfillmentBtn, { backgroundColor: C.danger }]}
+                          onPress={() => cancelAuction(auction)}
+                        >
+                          <Feather name="x" size={14} color="#fff" />
+                          <Text style={vh.fulfillmentBtnText}>Cancel</Text>
+                        </Pressable>
+                      </View>
+                    )}
+                  </Pressable>
                 );
               }}
             />
@@ -1270,7 +1510,7 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
                     {item.listing?.grade ? `· ${item.listing.grade}` : ""}
                   </Text>
                   <Text style={vh.displayPrice}>
-                    {item.listing ? `$${Number(item.listing.price).toLocaleString()}` : "—"}
+                    {item.listing ? `RM${Number(item.listing.price).toLocaleString("en-MY", { maximumFractionDigits: 0 })}` : "—"}
                   </Text>
                 </View>
                 <View style={vh.displayActions}>

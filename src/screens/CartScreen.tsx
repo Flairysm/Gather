@@ -6,6 +6,8 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { C, S } from "../theme";
 import { useCart, parsePrice, formatPrice } from "../data/cart";
 import { useAppNavigation } from "../navigation/NavigationContext";
+import { useEffect, useState } from "react";
+import { supabase } from "../lib/supabase";
 
 type Props = { onBack: () => void };
 
@@ -13,6 +15,39 @@ export default function CartScreen({ onBack }: Props) {
   const { items, setQuantity, removeItem, clearCart, total } = useCart();
   const { push } = useAppNavigation();
   const insets = useSafeAreaInsets();
+  const [vendorStoreNames, setVendorStoreNames] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      const sellerIds = Array.from(
+        new Set(items.map((ci) => ci.listing.seller_id).filter(Boolean)),
+      );
+      if (sellerIds.length === 0) {
+        if (mounted) setVendorStoreNames({});
+        return;
+      }
+      const { data } = await supabase
+        .from("vendor_stores")
+        .select("profile_id, store_name")
+        .in("profile_id", sellerIds)
+        .eq("is_active", true);
+      if (!mounted) return;
+      if (data) {
+        const map: Record<string, string> = {};
+        for (const s of data as any[]) {
+          if (s.profile_id && s.store_name) map[s.profile_id] = s.store_name;
+        }
+        setVendorStoreNames(map);
+      } else {
+        setVendorStoreNames({});
+      }
+    })().catch(() => {});
+
+    return () => {
+      mounted = false;
+    };
+  }, [items]);
 
   return (
     <SafeAreaView style={st.safe}>
@@ -55,7 +90,11 @@ export default function CartScreen({ onBack }: Props) {
                   <Text style={st.cardGrade}>{ci.listing.grade ?? "Ungraded"}</Text>
                   <View style={st.sellerRow}>
                     <View style={st.sellerDot} />
-                    <Text style={st.sellerName}>@{ci.listing.seller?.username ?? "user"}</Text>
+                    <Text style={st.sellerName} numberOfLines={1}>
+                      {vendorStoreNames[ci.listing.seller_id] ??
+                        ci.listing.seller?.display_name ??
+                        (ci.listing.seller?.username ? `@${ci.listing.seller.username}` : "Vendor")}
+                    </Text>
                   </View>
                 </View>
                 <View style={st.cardRight}>

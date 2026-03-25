@@ -47,7 +47,7 @@ export type WantedPost = {
 export const MARKET_FILTERS = ["All", "Pokémon", "MTG", "Sports", "YGO"];
 
 export function formatListingPrice(price: number): string {
-  return `$${price.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+  return `RM${price.toLocaleString("en-MY", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
 }
 
 export function timeAgo(dateStr: string): string {

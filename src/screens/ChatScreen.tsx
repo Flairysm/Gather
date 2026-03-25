@@ -137,7 +137,10 @@ function OfferBubble({
           </Text>
           {listing && (
             <Text style={st.offerItemPrice}>
-              Asking: ${Number(listing.price).toLocaleString()}
+              Asking: RM
+              {Number(listing.price).toLocaleString("en-MY", {
+                maximumFractionDigits: 0,
+              })}
             </Text>
           )}
         </View>
@@ -371,7 +374,7 @@ export default function ChatScreen({
   }
 
   async function handleSendOffer() {
-    const raw = offerAmount.trim().replace(/[$,]/g, "");
+    const raw = offerAmount.trim().replace(/(RM|\$|,)/gi, "");
     const amount = parseFloat(raw);
     if (!amount || !convId || !myId || sending) return;
     setSending(true);
@@ -503,7 +506,7 @@ export default function ChatScreen({
                 {listing.card_name}
               </Text>
               <Text style={st.itemContextMeta}>
-                ${Number(listing.price).toLocaleString()}
+                RM{Number(listing.price).toLocaleString("en-MY", { maximumFractionDigits: 0 })}
                 {listing.grade ? `  ·  ${listing.grade}` : ""}
               </Text>
             </View>
@@ -621,7 +624,10 @@ export default function ChatScreen({
                     {listing.card_name}
                   </Text>
                   <Text style={st.offerPanelItemPrice}>
-                    Asking: ${Number(listing.price).toLocaleString()}
+                    Asking: RM
+                    {Number(listing.price).toLocaleString("en-MY", {
+                      maximumFractionDigits: 0,
+                    })}
                   </Text>
                 </View>
               </Pressable>
@@ -652,7 +658,7 @@ export default function ChatScreen({
             )}
 
             <View style={st.offerPanelRow}>
-              <Text style={st.dollarSign}>$</Text>
+              <Text style={st.dollarSign}>RM</Text>
               <TextInput
                 style={st.offerInput}
                 value={offerAmount}

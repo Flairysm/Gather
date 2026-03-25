@@ -99,7 +99,7 @@ function dbRowToMessage(row: any, myId: string): Message {
     return {
       ...base,
       kind: "offer",
-      amount: `$${Number(row.offer_amount).toLocaleString()}`,
+      amount: `RM${Number(row.offer_amount).toLocaleString("en-MY", { maximumFractionDigits: 0 })}`,
       cardName: row.offer_card_name ?? "Card",
       status: row.offer_status ?? "pending",
     };
@@ -284,7 +284,7 @@ export async function sendOfferMessage(
   await supabase
     .from("conversations")
     .update({
-      last_message_text: `Offer: $${amount.toLocaleString()}`,
+      last_message_text: `Offer: RM${amount.toLocaleString("en-MY", { maximumFractionDigits: 0 })}`,
       last_message_at: new Date().toISOString(),
     })
     .eq("id", conversationId);

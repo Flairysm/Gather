@@ -27,7 +27,18 @@ import VendorStorePageScreen from "../screens/VendorStorePageScreen";
 import MyListingsScreen from "../screens/MyListingsScreen";
 import MyOrdersScreen from "../screens/MyOrdersScreen";
 import EditProfileScreen from "../screens/EditProfileScreen";
+import CategoryBrowseScreen from "../screens/CategoryBrowseScreen";
+import CategoryListingsScreen from "../screens/CategoryListingsScreen";
+import FeedPreferencesScreen from "../screens/FeedPreferencesScreen";
+import AuctionDetailScreen from "../screens/AuctionDetailScreen";
+import CreateAuctionScreen from "../screens/CreateAuctionScreen";
+import PhoneVerifyScreen from "../screens/PhoneVerifyScreen";
+import AddressBookScreen from "../screens/AddressBookScreen";
+import AddAddressScreen from "../screens/AddAddressScreen";
+import MyBookmarksScreen from "../screens/MyBookmarksScreen";
+import OrderReviewScreen from "../screens/OrderReviewScreen";
 import { UserContext, fetchVendorStatus, type VendorStatus } from "../data/user";
+import { FeedPrefsProvider } from "../data/feedPreferences";
 import { supabase } from "../lib/supabase";
 
 type TabId = "HOME" | "MARKET" | "LIVE" | "AUCTION" | "SETTINGS";
@@ -103,6 +114,26 @@ function renderOverlay(screen: AppScreen, pop: () => void) {
       return <MyOrdersScreen onBack={pop} />;
     case "EDIT_PROFILE":
       return <EditProfileScreen onBack={pop} />;
+    case "FEED_PREFERENCES":
+      return <FeedPreferencesScreen onBack={pop} />;
+    case "BROWSE_CATEGORIES":
+      return <CategoryBrowseScreen onBack={pop} />;
+    case "CATEGORY_LISTINGS":
+      return <CategoryListingsScreen category={screen.category} onBack={pop} />;
+    case "AUCTION_DETAIL":
+      return <AuctionDetailScreen auctionId={screen.auctionId} onBack={pop} />;
+    case "CREATE_AUCTION":
+      return <CreateAuctionScreen onBack={pop} />;
+    case "PHONE_VERIFY":
+      return <PhoneVerifyScreen onBack={pop} />;
+    case "ADDRESS_BOOK":
+      return <AddressBookScreen onBack={pop} />;
+    case "ADD_ADDRESS":
+      return <AddAddressScreen editId={screen.editId} onBack={pop} />;
+    case "MY_BOOKMARKS":
+      return <MyBookmarksScreen onBack={pop} />;
+    case "ORDER_REVIEW":
+      return <OrderReviewScreen orderId={screen.orderId} sellerId={screen.sellerId} onBack={pop} />;
   }
 }
 
@@ -215,6 +246,7 @@ export default function TabNavigator() {
 
   return (
     <UserContext.Provider value={userValue}>
+    <FeedPrefsProvider>
     <CartContext.Provider value={cart}>
       <NavigationProvider renderOverlay={renderOverlay}>
         <View style={{ flex: 1, backgroundColor: C.bg }}>
@@ -250,6 +282,7 @@ export default function TabNavigator() {
         </View>
       </NavigationProvider>
     </CartContext.Provider>
+    </FeedPrefsProvider>
     </UserContext.Provider>
   );
 }

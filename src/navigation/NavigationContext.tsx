@@ -23,7 +23,17 @@ export type AppScreen =
   | { type: "VENDOR_STORE_PAGE"; storeId: string }
   | { type: "MY_LISTINGS" }
   | { type: "MY_ORDERS" }
-  | { type: "EDIT_PROFILE" };
+  | { type: "EDIT_PROFILE" }
+  | { type: "FEED_PREFERENCES" }
+  | { type: "BROWSE_CATEGORIES" }
+  | { type: "CATEGORY_LISTINGS"; category: string }
+  | { type: "AUCTION_DETAIL"; auctionId: string }
+  | { type: "CREATE_AUCTION" }
+  | { type: "PHONE_VERIFY" }
+  | { type: "ADDRESS_BOOK" }
+  | { type: "ADD_ADDRESS"; editId?: string }
+  | { type: "MY_BOOKMARKS" }
+  | { type: "ORDER_REVIEW"; orderId: string; sellerId: string };
 
 type StackItem = { id: number; screen: AppScreen };
 

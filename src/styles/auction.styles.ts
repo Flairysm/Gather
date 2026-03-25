@@ -19,7 +19,6 @@ export const auction = StyleSheet.create({
     paddingBottom: S.scrollPaddingBottom,
   },
 
-  // ── Header ──
   header: {
     flexDirection: "row",
     alignItems: "center",
@@ -55,11 +54,51 @@ export const auction = StyleSheet.create({
     justifyContent: "center",
   },
 
-  // ── Filter Pills ──
   filterScroll: {
     gap: S.pillGap,
-    marginBottom: S.xl,
+    marginBottom: S.md,
   },
+  sortScroll: {
+    gap: 8,
+    marginBottom: S.xl,
+    paddingLeft: 2,
+  },
+  sortChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: C.elevated,
+    borderRadius: S.radiusPill,
+    borderWidth: 1,
+    borderColor: C.border,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  sortChipActive: {
+    backgroundColor: C.accentGlow,
+    borderColor: C.accent,
+  },
+  sortChipText: {
+    color: C.textSecondary,
+    fontSize: 11,
+    fontWeight: "700",
+  },
+  sortChipTextActive: {
+    color: C.textAccent,
+  },
+
+  emptyWrap: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 60,
+    gap: 12,
+  },
+  emptyText: {
+    color: C.textMuted,
+    fontSize: 14,
+    fontWeight: "600",
+  },
+
   refreshSkeletonWrap: {
     gap: S.md,
     marginBottom: S.lg,
@@ -93,14 +132,12 @@ export const auction = StyleSheet.create({
     borderColor: C.border,
   },
 
-  // ── Grid ──
   grid: {
     flexDirection: "row",
     flexWrap: "wrap",
     gap: GRID_GAP,
   },
 
-  // ── Auction Card ──
   card: {
     width: CARD_W,
     backgroundColor: C.surface,
@@ -120,6 +157,11 @@ export const auction = StyleSheet.create({
     marginBottom: S.md,
     overflow: "hidden",
   },
+  artImage: {
+    width: "100%",
+    height: "100%",
+    borderRadius: S.radiusCardInner,
+  },
   timerBadge: {
     position: "absolute",
     top: S.sm,
@@ -127,7 +169,7 @@ export const auction = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 4,
-    backgroundColor: "rgba(234,61,94,0.85)",
+    backgroundColor: "rgba(44,128,255,0.85)",
     borderRadius: S.radiusBadge,
     paddingHorizontal: 7,
     paddingVertical: 3,
@@ -136,9 +178,52 @@ export const auction = StyleSheet.create({
   timerUrgent: {
     backgroundColor: C.live,
   },
+  timerEnded: {
+    backgroundColor: C.muted,
+  },
   timerText: {
     ...T.badge,
     color: C.textHero,
+  },
+  hotBadge: {
+    position: "absolute",
+    bottom: S.sm,
+    left: S.sm,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 3,
+    backgroundColor: "rgba(234,61,94,0.9)",
+    borderRadius: S.radiusBadge,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    zIndex: 1,
+  },
+  hotText: {
+    color: C.textHero,
+    fontSize: 8,
+    fontWeight: "900",
+    textTransform: "uppercase",
+    letterSpacing: 0.4,
+  },
+  snipeBadge: {
+    position: "absolute",
+    bottom: S.sm,
+    right: S.sm,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 2,
+    backgroundColor: "rgba(245,158,11,0.85)",
+    borderRadius: S.radiusBadge,
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+    zIndex: 1,
+  },
+  snipeText: {
+    color: C.textHero,
+    fontSize: 7,
+    fontWeight: "900",
+    textTransform: "uppercase",
+    letterSpacing: 0.3,
   },
   gradeBadge: {
     position: "absolute",
@@ -157,7 +242,6 @@ export const auction = StyleSheet.create({
     color: C.textAccent,
   },
 
-  // ── Card Info ──
   cardInfo: {
     gap: S.xs,
   },
@@ -196,7 +280,6 @@ export const auction = StyleSheet.create({
     letterSpacing: 0.5,
   },
 
-  // ── Stats row (bids + watchers) ──
   statsRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -214,7 +297,6 @@ export const auction = StyleSheet.create({
     fontWeight: "600",
   },
 
-  // ── Seller row ──
   sellerRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -228,10 +310,31 @@ export const auction = StyleSheet.create({
     backgroundColor: C.muted,
     borderWidth: 1,
     borderColor: C.borderAvatar,
+    overflow: "hidden",
   },
   sellerName: {
     color: C.textSecondary,
     fontSize: 10,
     fontWeight: "600",
   },
+
+  fab: {
+    position: "absolute",
+    bottom: S.scrollPaddingBottom + 10,
+    right: S.screenPadding,
+    width: 54,
+    height: 54,
+    borderRadius: 27,
+    backgroundColor: C.accent,
+    alignItems: "center",
+    justifyContent: "center",
+    shadowColor: C.accent,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 12,
+    elevation: 6,
+    zIndex: 10,
+  },
 });
+
+export const AUCTION_CARD_W = CARD_W;

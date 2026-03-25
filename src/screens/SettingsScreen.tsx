@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Alert,
   Image,
+  Linking,
   Pressable,
   RefreshControl,
   SafeAreaView,
@@ -29,6 +30,10 @@ type Profile = {
   total_purchases: number;
   verified_seller: boolean;
   created_at: string;
+  phone_number: string | null;
+  phone_verified: boolean;
+  transaction_banned: boolean;
+  transaction_ban_reason: string | null;
 };
 
 
@@ -40,6 +45,8 @@ export default function SettingsScreen() {
   const [email, setEmail] = useState<string | null>(null);
   const [activeListingsCount, setActiveListingsCount] = useState(0);
   const [ordersCount, setOrdersCount] = useState(0);
+  const [addressCount, setAddressCount] = useState(0);
+  const [bookmarksCount, setBookmarksCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
 
@@ -54,14 +61,19 @@ export default function SettingsScreen() {
       const { data } = await supabase
         .from("profiles")
         .select(
-          "username, display_name, avatar_url, bio, rating, total_sales, total_purchases, verified_seller, created_at",
+          "username, display_name, avatar_url, bio, rating, total_sales, total_purchases, verified_seller, created_at, phone_number, phone_verified, transaction_banned, transaction_ban_reason",
         )
         .eq("id", user.id)
         .maybeSingle();
 
       if (data) setProfile(data as Profile);
 
-      const [{ count: listCount }, { count: orderCount }] = await Promise.all([
+      const [
+        { count: listCount },
+        { count: orderCount },
+        { count: addrCount },
+        { count: savedCount },
+      ] = await Promise.all([
         supabase
           .from("listings")
           .select("id", { count: "exact", head: true })
@@ -71,10 +83,20 @@ export default function SettingsScreen() {
           .from("orders")
           .select("id", { count: "exact", head: true })
           .eq("buyer_id", user.id),
+        supabase
+          .from("user_addresses")
+          .select("id", { count: "exact", head: true })
+          .eq("user_id", user.id),
+        supabase
+          .from("saved_items")
+          .select("id", { count: "exact", head: true })
+          .eq("user_id", user.id),
       ]);
 
       setActiveListingsCount(listCount ?? 0);
       setOrdersCount(orderCount ?? 0);
+      setAddressCount(addrCount ?? 0);
+      setBookmarksCount(savedCount ?? 0);
     } catch {
       /* silent */
     } finally {
@@ -278,6 +300,13 @@ export default function SettingsScreen() {
           />
           <View style={st.divider} />
           <SettingsRow
+            icon="bookmark-outline"
+            label="My Bookmarks"
+            value={bookmarksCount > 0 ? `${bookmarksCount}` : undefined}
+            onPress={() => push({ type: "MY_BOOKMARKS" })}
+          />
+          <View style={st.divider} />
+          <SettingsRow
             icon="chatbubbles-outline"
             label="Messages"
             onPress={() => push({ type: "MESSAGES" })}
@@ -316,18 +345,67 @@ export default function SettingsScreen() {
           <SettingsRow
             icon="lock-closed-outline"
             label="Change Password"
+            onPress={() => {
+              if (!email) return;
+              Alert.alert(
+                "Reset Password",
+                `We'll send a password reset link to ${email}.`,
+                [
+                  { text: "Cancel", style: "cancel" },
+                  {
+                    text: "Send Link",
+                    onPress: async () => {
+                      const { error } = await supabase.auth.resetPasswordForEmail(email);
+                      if (error) Alert.alert("Error", error.message);
+                      else Alert.alert("Email Sent", "Check your inbox for the reset link.");
+                    },
+                  },
+                ],
+              );
+            }}
           />
         </View>
 
         {/* ── Trading Section ── */}
         <Text style={st.sectionTitle}>Trading</Text>
         <View style={st.sectionCard}>
-          <SettingsRow icon="cube-outline" label="Shipping Address" />
+          <SettingsRow
+            icon="call-outline"
+            label="Phone Verification"
+            value={profile?.phone_verified ? "Verified" : "Not verified"}
+            onPress={() => push({ type: "PHONE_VERIFY" })}
+          />
+          <View style={st.divider} />
+          <SettingsRow
+            icon="location-outline"
+            label="Address Book"
+            value={addressCount > 0 ? `${addressCount} saved` : "No addresses"}
+            onPress={() => push({ type: "ADDRESS_BOOK" })}
+          />
           <View style={st.divider} />
           <SettingsRow icon="card-outline" label="Payment Methods" />
           <View style={st.divider} />
-          <SettingsRow icon="cash-outline" label="Currency" value="USD" />
+          <SettingsRow icon="cash-outline" label="Currency" value="MYR" />
         </View>
+
+        {profile?.transaction_banned && (
+          <>
+            <Text style={st.sectionTitle}>Account Status</Text>
+            <View style={[st.sectionCard, { borderColor: "rgba(239,68,68,0.25)" }]}>
+              <View style={st.row}>
+                <View style={[st.rowIcon, st.rowIconDanger]}>
+                  <Ionicons name="ban" size={18} color={C.danger} />
+                </View>
+                <View style={{ flex: 1, gap: 2 }}>
+                  <Text style={[st.rowLabel, { color: C.danger }]}>Transaction Banned</Text>
+                  <Text style={{ color: C.textSecondary, fontSize: 11, fontWeight: "500" }}>
+                    {profile.transaction_ban_reason ?? "Contact support for details"}
+                  </Text>
+                </View>
+              </View>
+            </View>
+          </>
+        )}
 
         {/* ── Preferences Section ── */}
         <Text style={st.sectionTitle}>Preferences</Text>
@@ -345,18 +423,40 @@ export default function SettingsScreen() {
               ios_backgroundColor={C.muted}
             />
           </View>
+          <View style={st.divider} />
+          <SettingsRow
+            icon="options-outline"
+            label="My Feed Categories"
+            onPress={() => push({ type: "FEED_PREFERENCES" })}
+          />
         </View>
 
         {/* ── Support Section ── */}
         <Text style={st.sectionTitle}>Support</Text>
         <View style={st.sectionCard}>
-          <SettingsRow icon="help-circle-outline" label="Help Centre" />
+          <SettingsRow
+            icon="help-circle-outline"
+            label="Help Centre"
+            onPress={() => Linking.openURL("https://gather.gg/help")}
+          />
           <View style={st.divider} />
-          <SettingsRow icon="chatbubble-outline" label="Send Feedback" />
+          <SettingsRow
+            icon="chatbubble-outline"
+            label="Send Feedback"
+            onPress={() => Linking.openURL("mailto:support@gather.gg?subject=App Feedback")}
+          />
           <View style={st.divider} />
-          <SettingsRow icon="document-text-outline" label="Terms of Service" />
+          <SettingsRow
+            icon="document-text-outline"
+            label="Terms of Service"
+            onPress={() => Linking.openURL("https://gather.gg/terms")}
+          />
           <View style={st.divider} />
-          <SettingsRow icon="shield-outline" label="Privacy Policy" />
+          <SettingsRow
+            icon="shield-outline"
+            label="Privacy Policy"
+            onPress={() => Linking.openURL("https://gather.gg/privacy")}
+          />
         </View>
 
         {/* ── Danger Zone ── */}
@@ -604,6 +704,13 @@ const st = StyleSheet.create({
     letterSpacing: 0.8,
     textTransform: "uppercase",
     marginBottom: S.sm,
+    marginLeft: 4,
+  },
+  sectionHint: {
+    color: C.textMuted,
+    fontSize: 11,
+    fontWeight: "500",
+    marginBottom: S.sm + 2,
     marginLeft: 4,
   },
   sectionCard: {
