@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
-  Image,
   Pressable,
   RefreshControl,
   SafeAreaView,
@@ -10,6 +9,7 @@ import {
   TextInput,
   View,
 } from "react-native";
+import CachedImage from "../components/CachedImage";
 import { StatusBar } from "expo-status-bar";
 import { Feather, Ionicons } from "@expo/vector-icons";
 
@@ -20,6 +20,7 @@ import { AUCTION_FILTERS } from "../data/auction";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import { UserContext } from "../data/user";
 import { supabase } from "../lib/supabase";
+import { useReconnect } from "../hooks/useReconnect";
 import { useContext } from "react";
 
 type AuctionRow = {
@@ -107,8 +108,11 @@ export default function AuctionScreen() {
   const [activeFilter, setActiveFilter] = useState("All");
   const [sortKey, setSortKey] = useState<SortKey>("ending");
   const [searchQuery, setSearchQuery] = useState("");
+  const [watchedIds, setWatchedIds] = useState<string[]>([]);
   const [, setTick] = useState(0);
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const watchedSet = useMemo(() => new Set(watchedIds), [watchedIds]);
 
   useEffect(() => {
     tickRef.current = setInterval(() => setTick((t) => t + 1), 1000);
@@ -128,7 +132,8 @@ export default function AuctionScreen() {
         seller:profiles!seller_id(username, display_name, avatar_url)
       `)
       .in("status", ["active", "ended"])
-      .order("ends_at", { ascending: true });
+      .order("ends_at", { ascending: true })
+      .limit(200);
 
     if (data) {
       const mapped: AuctionRow[] = (data as any[]).map((r) => ({
@@ -136,6 +141,17 @@ export default function AuctionScreen() {
         seller: Array.isArray(r.seller) ? r.seller[0] : r.seller,
       }));
       setAuctions(mapped);
+
+      const { data: auth } = await supabase.auth.getUser();
+      if (auth.user) {
+        const { data: watchRows } = await supabase
+          .from("auction_watchers")
+          .select("auction_id")
+          .eq("user_id", auth.user.id);
+        setWatchedIds((watchRows ?? []).map((w: { auction_id: string }) => w.auction_id));
+      } else {
+        setWatchedIds([]);
+      }
 
       const sellerIds = [...new Set(mapped.map((a) => a.seller_id))];
       if (sellerIds.length > 0) {
@@ -166,6 +182,8 @@ export default function AuctionScreen() {
   useEffect(() => {
     load().finally(() => setLoading(false));
   }, [load]);
+
+  useReconnect(load);
 
   async function onRefresh() {
     setRefreshing(true);
@@ -209,8 +227,10 @@ export default function AuctionScreen() {
         break;
     }
 
-    return sorted;
-  }, [auctions, activeFilter, searchQuery, sortKey]);
+    const watched = sorted.filter((i) => watchedSet.has(i.id));
+    const rest = sorted.filter((i) => !watchedSet.has(i.id));
+    return [...watched, ...rest];
+  }, [auctions, activeFilter, searchQuery, sortKey, watchedSet]);
 
   function getSellerLabel(item: AuctionRow): string {
     return (
@@ -311,6 +331,7 @@ export default function AuctionScreen() {
                   item.original_ends_at &&
                   new Date(item.ends_at).getTime() > new Date(item.original_ends_at).getTime();
                 const isHot = !timer.ended && timer.urgent;
+                const isWatching = watchedSet.has(item.id);
 
                 return (
                   <Pressable
@@ -320,21 +341,26 @@ export default function AuctionScreen() {
                   >
                     <View style={a.artArea}>
                       {images[0] ? (
-                        <Image source={{ uri: images[0] }} style={a.artImage} />
+                        <CachedImage source={{ uri: images[0] }} style={a.artImage} />
                       ) : null}
                       <View style={[a.timerBadge, timer.urgent && a.timerUrgent, timer.ended && a.timerEnded]}>
                         <Ionicons name="time-outline" size={10} color={C.textHero} />
                         <Text style={a.timerText}>{timer.text}</Text>
                       </View>
-                      {item.grade ? (
-                        <View style={a.gradeBadge}>
-                          <Text style={a.gradeBadgeText}>{item.grade}</Text>
-                        </View>
-                      ) : null}
-                      {isHot && (
-                        <View style={a.hotBadge}>
-                          <Ionicons name="flame" size={8} color={C.textHero} />
-                          <Text style={a.hotText}>Hot</Text>
+                      {(isWatching || isHot) && (
+                        <View style={a.bottomLeftBadgeRow} pointerEvents="none">
+                          {isWatching && (
+                            <View style={a.watchingTag}>
+                              <Ionicons name="eye" size={10} color={C.textHero} />
+                              <Text style={a.watchingTagText}>Watching</Text>
+                            </View>
+                          )}
+                          {isHot && (
+                            <View style={a.hotBadge}>
+                              <Ionicons name="flame" size={8} color={C.textHero} />
+                              <Text style={a.hotText}>Hot</Text>
+                            </View>
+                          )}
                         </View>
                       )}
                       {isExtended && !timer.ended && (
@@ -350,6 +376,11 @@ export default function AuctionScreen() {
                         {item.card_name}
                       </Text>
                       <Text style={a.cardEdition}>{item.edition ?? ""}</Text>
+                      {!!(item.grade ?? item.condition) && (
+                        <Text style={a.cardSubMeta} numberOfLines={1}>
+                          {item.grade ?? item.condition}
+                        </Text>
+                      )}
                       <Text style={a.currentBid}>{formatPrice(price)}</Text>
                       <View style={a.statsRow}>
                         <View style={a.statItem}>
@@ -366,12 +397,12 @@ export default function AuctionScreen() {
                       <View style={a.sellerRow}>
                         <View style={a.sellerAvatar}>
                           {vendorStores[item.seller_id]?.logo_url ? (
-                            <Image
+                            <CachedImage
                               source={{ uri: vendorStores[item.seller_id]!.logo_url! }}
                               style={{ width: 14, height: 14, borderRadius: 7 }}
                             />
                           ) : item.seller?.avatar_url ? (
-                            <Image
+                            <CachedImage
                               source={{ uri: item.seller.avatar_url }}
                               style={{ width: 14, height: 14, borderRadius: 7 }}
                             />

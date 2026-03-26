@@ -27,6 +27,8 @@ import {
   type OfferStatus,
 } from "../data/messages";
 import { useAppNavigation } from "../navigation/NavigationContext";
+import { useCart } from "../data/cart";
+import type { Listing } from "../data/market";
 import { supabase } from "../lib/supabase";
 
 type Props = {
@@ -104,20 +106,25 @@ const STATUS_CONFIG: Record<
 function OfferBubble({
   msg,
   listing,
+  inCart,
   onTapItem,
   onAccept,
   onDecline,
   onCounter,
+  onAddToCart,
 }: {
   msg: OfferMessage;
   listing: ListingContext | null;
+  inCart?: boolean;
   onTapItem?: () => void;
   onAccept?: () => void;
   onDecline?: () => void;
   onCounter?: () => void;
+  onAddToCart?: () => void;
 }) {
   const cfg = STATUS_CONFIG[msg.status];
   const showActions = !msg.isMe && msg.status === "pending";
+  const showAddToCart = msg.status === "accepted" && msg.isMe && !!onAddToCart;
   const imageUrl = listing?.images?.[0];
 
   return (
@@ -188,6 +195,23 @@ function OfferBubble({
         </View>
       )}
 
+      {showAddToCart && (
+        <Pressable
+          style={[st.addToCartBtn, inCart && st.addToCartBtnDone]}
+          onPress={inCart ? undefined : onAddToCart}
+          disabled={inCart}
+        >
+          <Ionicons
+            name={inCart ? "checkmark-circle" : "cart"}
+            size={16}
+            color={inCart ? C.success : C.textHero}
+          />
+          <Text style={[st.addToCartText, inCart && st.addToCartTextDone]}>
+            {inCart ? "Added to Cart" : `Add to Cart · ${msg.amount}`}
+          </Text>
+        </Pressable>
+      )}
+
       <Text style={st.offerTime}>{msg.timestamp}</Text>
     </View>
   );
@@ -202,6 +226,7 @@ export default function ChatScreen({
   onBack,
 }: Props) {
   const { push } = useAppNavigation();
+  const { addItem, isInCart } = useCart();
   const [myId, setMyId] = useState<string | null>(null);
   const [convId, setConvId] = useState<string | null>(initialConvId ?? null);
   const [resolvedListingId, setResolvedListingId] = useState<string | null>(
@@ -427,6 +452,32 @@ export default function ChatScreen({
     }
   }
 
+  function handleAddOfferToCart(offerMsg: OfferMessage) {
+    if (!listing) return;
+    const agreedPrice = parseFloat(
+      offerMsg.amount.replace(/(RM|\$|,)/gi, ""),
+    );
+    if (!agreedPrice || isNaN(agreedPrice)) return;
+
+    const cartListing: Listing = {
+      id: listing.id,
+      seller_id: listing.seller_id,
+      card_name: listing.card_name,
+      edition: listing.edition,
+      grade: listing.grade,
+      condition: null,
+      price: agreedPrice,
+      quantity: 1,
+      category: "",
+      description: null,
+      images: listing.images,
+      views: 0,
+      status: "active",
+      created_at: new Date().toISOString(),
+    };
+    addItem(cartListing, 1);
+  }
+
   if (loading) {
     return (
       <SafeAreaView style={st.safe}>
@@ -551,12 +602,14 @@ export default function ChatScreen({
                   <OfferBubble
                     msg={msg}
                     listing={listing}
+                    inCart={listing ? isInCart(listing.id) : false}
                     onTapItem={
                       resolvedListingId ? navigateToListing : undefined
                     }
                     onAccept={() => handleOfferAction(msg.id, "accepted")}
                     onDecline={() => handleOfferAction(msg.id, "declined")}
                     onCounter={() => handleCounter(msg.id)}
+                    onAddToCart={() => handleAddOfferToCart(msg)}
                   />
                 </View>
               );
@@ -1060,6 +1113,24 @@ const st = StyleSheet.create({
     paddingVertical: 9,
   },
   declineText: { color: C.danger, fontSize: 12, fontWeight: "800" },
+  addToCartBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    backgroundColor: C.accent,
+    borderRadius: 10,
+    paddingVertical: 10,
+    marginHorizontal: 12,
+    marginTop: 8,
+  },
+  addToCartBtnDone: {
+    backgroundColor: "rgba(34,197,94,0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(34,197,94,0.25)",
+  },
+  addToCartText: { color: C.textHero, fontSize: 12, fontWeight: "800" },
+  addToCartTextDone: { color: C.success },
   offerTime: {
     color: C.textMuted,
     fontSize: 10,

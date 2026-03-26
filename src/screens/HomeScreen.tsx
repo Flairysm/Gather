@@ -1,5 +1,4 @@
 import {
-  Image,
   ImageBackground,
   Linking,
   Pressable,
@@ -14,6 +13,7 @@ import { StatusBar } from "expo-status-bar";
 import { LinearGradient } from "expo-linear-gradient";
 import { Feather, Ionicons } from "@expo/vector-icons";
 
+import CachedImage from "../components/CachedImage";
 import { C, S } from "../theme";
 import { home as h } from "../styles/home.styles";
 import { shared as sh } from "../styles/shared.styles";
@@ -24,6 +24,7 @@ import { useFeedPreferences } from "../data/feedPreferences";
 import { ALL_CATEGORIES } from "../data/categories";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "../lib/supabase";
+import { fetchLiveStreams, type LiveStream } from "../data/live";
 
 type FeaturedBanner = {
   id: string;
@@ -58,6 +59,28 @@ type VendorStoreRow = {
   }[];
 };
 
+function formatViewers(n: number): string {
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
+  return String(n);
+}
+
+function timeSince(started: string): string {
+  const mins = Math.floor((Date.now() - new Date(started).getTime()) / 60000);
+  if (mins < 1) return "Just started";
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  return `${hrs}h ${mins % 60}m`;
+}
+
+function hashString(value: string): number {
+  let h = 0;
+  for (let i = 0; i < value.length; i += 1) {
+    h = (h << 5) - h + value.charCodeAt(i);
+    h |= 0;
+  }
+  return Math.abs(h);
+}
+
 function resolveConditionLabel(
   condition: string | null | undefined,
   grade: string | null | undefined,
@@ -79,6 +102,7 @@ export default function HomeScreen() {
   const { selectedCategories } = useFeedPreferences();
   const [banner, setBanner] = useState<FeaturedBanner | null>(null);
   const [vendorStores, setVendorStores] = useState<VendorStoreRow[]>([]);
+  const [liveStreams, setLiveStreams] = useState<LiveStream[]>([]);
   const [liveProfileIds, setLiveProfileIds] = useState<Set<string>>(new Set());
   const [searchQuery, setSearchQuery] = useState("");
   const [activeFilter, setActiveFilter] = useState("For You");
@@ -138,13 +162,9 @@ export default function HomeScreen() {
   }, []);
 
   const loadLiveStreams = useCallback(async () => {
-    const { data } = await supabase
-      .from("live_streams")
-      .select("streamer_id")
-      .eq("is_live", true);
-    if (data) {
-      setLiveProfileIds(new Set(data.map((s: any) => s.streamer_id)));
-    }
+    const streams = await fetchLiveStreams();
+    setLiveStreams(streams);
+    setLiveProfileIds(new Set(streams.map((s) => s.streamer_id)));
   }, []);
 
   useEffect(() => {
@@ -163,6 +183,12 @@ export default function HomeScreen() {
     await new Promise((resolve) => setTimeout(resolve, 700));
     setRefreshing(false);
   }
+
+  const liveStreamByProfileId = useMemo(() => {
+    const map = new Map<string, LiveStream>();
+    for (const s of liveStreams) map.set(s.streamer_id, s);
+    return map;
+  }, [liveStreams]);
 
   const normalizedQuery = searchQuery.trim().toLowerCase();
 
@@ -251,10 +277,9 @@ export default function HomeScreen() {
               <Pressable style={h.iconBtn} onPress={() => push({ type: "MESSAGES" })}>
                 <Feather name="message-circle" size={S.iconSize.lg} color={C.textSearch} />
               </Pressable>
-              <Image
-                source={require("../../assets/icon.png")}
-                style={h.avatar}
-              />
+              <Pressable style={h.iconBtn} onPress={() => push({ type: "NOTIFICATIONS_HUB" })}>
+                <Ionicons name="notifications-outline" size={S.iconSize.lg} color={C.textSearch} />
+              </Pressable>
             </View>
           </View>
 
@@ -340,7 +365,7 @@ export default function HomeScreen() {
                 <View style={sh.sectionLeft}>
                   <View style={sh.sectionIcon}>
                     {store.logo_url ? (
-                      <Image
+                      <CachedImage
                         source={{ uri: store.logo_url }}
                         style={h.sectionLogoImg}
                       />
@@ -367,70 +392,139 @@ export default function HomeScreen() {
                 </Pressable>
               </View>
 
-              {/* Display items — horizontal scroll like featured cards */}
-              {store.display_items.length > 0 ? (
-                <ScrollView
-                  horizontal
-                  showsHorizontalScrollIndicator={false}
-                  contentContainerStyle={h.vaultScroll}
-                >
-                  {store.display_items.map((di) => {
-                    if (!di.listing) return null;
-                    const label = resolveConditionLabel(
-                      di.listing.condition,
-                      di.listing.grade,
-                    );
+              {/* Display items — horizontal scroll; live card first if vendor is streaming */}
+              {(() => {
+                const vendorStream = liveStreamByProfileId.get(store.profile_id);
+                const hasItems = store.display_items.length > 0 || !!vendorStream;
+                const listingPreviewPool = store.display_items
+                  .flatMap((di) => di.listing?.images ?? [])
+                  .filter(Boolean);
 
-                    return (
+                if (!hasItems) {
+                  return (
+                    <View style={h.noDisplayItems}>
+                      <Text style={h.noDisplayItemsText}>No display items yet</Text>
+                    </View>
+                  );
+                }
+
+                return (
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={h.vaultScroll}
+                  >
+                    {/* Live stream card pinned first */}
+                    {vendorStream && (
+                      (() => {
+                        const randomIdx =
+                          listingPreviewPool.length > 0
+                            ? hashString(vendorStream.id) % listingPreviewPool.length
+                            : -1;
+                        const previewUri =
+                          vendorStream.thumbnail_url ??
+                          (randomIdx >= 0 ? listingPreviewPool[randomIdx] : null);
+
+                        return (
                       <Pressable
-                        key={di.listing_id}
-                        style={[h.vaultCard, { width: S.vaultCardW }]}
-                        onPress={() =>
-                          push({ type: "LISTING_DETAIL", listingId: di.listing!.id })
-                        }
+                        key={`live-${vendorStream.id}`}
+                        style={[h.vaultCard, h.liveInlineCard, { width: S.vaultCardW }]}
+                        onPress={() => push({ type: "LIVE_VIEWER", streamId: vendorStream.id })}
                       >
-                        <View style={h.vaultArt}>
-                          {di.listing.images?.[0] ? (
-                            <Image
-                              source={{ uri: di.listing.images[0] }}
-                              style={h.displayItemImg}
+                        <View style={h.liveInlineThumbnail}>
+                          {previewUri ? (
+                            <CachedImage
+                              source={{ uri: previewUri }}
+                              style={h.liveInlineThumbImg}
                             />
                           ) : (
-                            <View style={h.artPlaceholder} />
-                          )}
-                          {label ? (
-                            <View style={h.conditionBadge}>
-                              <Text numberOfLines={1} style={h.conditionBadgeText}>
-                                {label}
-                              </Text>
+                            <View style={h.liveInlineThumbPlaceholder}>
+                              <Feather name="play" size={20} color={C.accent} />
                             </View>
-                          ) : null}
+                          )}
+                          <View style={h.liveInlineBadge}>
+                            <View style={h.liveInlineDot} />
+                            <Text style={h.liveInlineBadgeText}>LIVE</Text>
+                          </View>
+                          <View style={h.liveInlineOverlay}>
+                            <Text style={h.liveInlineOverlayLive}>LIVE</Text>
+                            <Text style={h.liveInlineOverlayJoin}>JOIN NOW</Text>
+                          </View>
+                          <View style={h.liveInlineViewers}>
+                            <Ionicons name="eye-outline" size={9} color="#fff" />
+                            <Text style={h.liveInlineViewersText}>
+                              {formatViewers(vendorStream.viewer_count)}
+                            </Text>
+                          </View>
                         </View>
-                        <Text style={h.vaultEdition}>
-                          {di.listing.edition ?? "Listing"}
-                        </Text>
                         <Text style={h.vaultName} numberOfLines={1}>
-                          {di.listing.card_name}
+                          {vendorStream.title}
                         </Text>
-                        <View style={h.priceRow}>
-                          <Text style={h.vaultPrice}>
-                            RM
-                            {Number(di.listing.price).toLocaleString("en-MY", {
-                              maximumFractionDigits: 0,
-                            })}
-                          </Text>
+                        <Text style={h.vaultEdition} numberOfLines={1}>
+                          {vendorStream.category} · {timeSince(vendorStream.started_at)}
+                        </Text>
+                        <View style={h.liveInlineJoinBtn}>
+                          <Ionicons name="radio" size={11} color="#fff" />
+                          <Text style={h.liveInlineJoinText}>Join Live</Text>
                         </View>
                       </Pressable>
-                    );
-                  })}
-                </ScrollView>
-              ) : (
-                <View style={h.noDisplayItems}>
-                  <Text style={h.noDisplayItemsText}>
-                    No display items yet
-                  </Text>
-                </View>
-              )}
+                        );
+                      })()
+                    )}
+
+                    {/* Regular display items */}
+                    {store.display_items.map((di) => {
+                      if (!di.listing) return null;
+                      const label = resolveConditionLabel(
+                        di.listing.condition,
+                        di.listing.grade,
+                      );
+
+                      return (
+                        <Pressable
+                          key={di.listing_id}
+                          style={[h.vaultCard, { width: S.vaultCardW }]}
+                          onPress={() =>
+                            push({ type: "LISTING_DETAIL", listingId: di.listing!.id })
+                          }
+                        >
+                          <View style={h.vaultArt}>
+                            {di.listing.images?.[0] ? (
+                              <CachedImage
+                                source={{ uri: di.listing.images[0] }}
+                                style={h.displayItemImg}
+                              />
+                            ) : (
+                              <View style={h.artPlaceholder} />
+                            )}
+                            {label ? (
+                              <View style={h.conditionBadge}>
+                                <Text numberOfLines={1} style={h.conditionBadgeText}>
+                                  {label}
+                                </Text>
+                              </View>
+                            ) : null}
+                          </View>
+                          <Text style={h.vaultEdition}>
+                            {[di.listing.edition, di.listing.grade].filter(Boolean).join(" · ") || "Listing"}
+                          </Text>
+                          <Text style={h.vaultName} numberOfLines={1}>
+                            {di.listing.card_name}
+                          </Text>
+                          <View style={h.priceRow}>
+                            <Text style={h.vaultPrice}>
+                              RM
+                              {Number(di.listing.price).toLocaleString("en-MY", {
+                                maximumFractionDigits: 0,
+                              })}
+                            </Text>
+                          </View>
+                        </Pressable>
+                      );
+                    })}
+                  </ScrollView>
+                );
+              })()}
             </View>
           ))}
           {filteredVendorStores.length === 0 && (

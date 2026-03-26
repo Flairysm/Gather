@@ -12,6 +12,7 @@ import {
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { Feather, Ionicons } from "@expo/vector-icons";
+import CachedImage from "../components/CachedImage";
 import { C, S } from "../theme";
 import {
   loadConversations,
@@ -21,6 +22,7 @@ import {
 } from "../data/messages";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import { supabase } from "../lib/supabase";
+import { useReconnect } from "../hooks/useReconnect";
 
 type Props = { onBack: () => void };
 
@@ -65,6 +67,10 @@ export default function MessagesScreen({ onBack }: Props) {
       if (channel) supabase.removeChannel(channel);
     };
   }, [fetchConversations]);
+
+  useReconnect(() => {
+    if (userId) fetchConversations(userId);
+  });
 
   const filtered = search.trim()
     ? convos.filter(
@@ -140,7 +146,7 @@ export default function MessagesScreen({ onBack }: Props) {
               >
                 <View style={st.avatarWrap}>
                   {conv.listingImage ? (
-                    <Image
+                    <CachedImage
                       source={{ uri: conv.listingImage }}
                       style={st.avatarImg}
                     />

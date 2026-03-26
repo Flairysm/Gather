@@ -11,6 +11,7 @@ export type ChatScreenParams =
 
 export type AppScreen =
   | { type: "MESSAGES" }
+  | { type: "NOTIFICATIONS_HUB" }
   | ChatScreenParams
   | { type: "LISTING_DETAIL"; listingId: string }
   | { type: "WANTED_DETAIL"; wantedId: string }
@@ -22,7 +23,7 @@ export type AppScreen =
   | { type: "VENDOR_HUB" }
   | { type: "VENDOR_STORE_PAGE"; storeId: string }
   | { type: "MY_LISTINGS" }
-  | { type: "MY_ORDERS" }
+  | { type: "MY_ORDERS"; filter?: string }
   | { type: "EDIT_PROFILE" }
   | { type: "FEED_PREFERENCES" }
   | { type: "BROWSE_CATEGORIES" }
@@ -33,7 +34,10 @@ export type AppScreen =
   | { type: "ADDRESS_BOOK" }
   | { type: "ADD_ADDRESS"; editId?: string }
   | { type: "MY_BOOKMARKS" }
-  | { type: "ORDER_REVIEW"; orderId: string; sellerId: string };
+  | { type: "ORDER_REVIEW"; orderId: string; sellerId: string }
+  | { type: "MY_AUCTIONS" }
+  | { type: "LIVE_VIEWER"; streamId: string }
+  | { type: "GO_LIVE" };
 
 type StackItem = { id: number; screen: AppScreen };
 

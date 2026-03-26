@@ -115,9 +115,10 @@ export async function loadConversations(
 ): Promise<Conversation[]> {
   const { data, error } = await supabase
     .from("conversations")
-    .select("*")
+    .select("id, participant_ids, listing_id, wanted_id, topic, last_message_text, last_message_at, created_at")
     .contains("participant_ids", [userId])
-    .order("last_message_at", { ascending: false, nullsFirst: false });
+    .order("last_message_at", { ascending: false, nullsFirst: false })
+    .limit(100);
 
   if (error) throw error;
   if (!data || data.length === 0) return [];
@@ -235,9 +236,10 @@ export async function loadMessages(
 ): Promise<Message[]> {
   const { data, error } = await supabase
     .from("messages")
-    .select("*")
+    .select("id, conversation_id, sender_id, kind, text, offer_amount, offer_card_name, offer_status, created_at")
     .eq("conversation_id", conversationId)
-    .order("created_at", { ascending: true });
+    .order("created_at", { ascending: true })
+    .limit(200);
 
   if (error) throw error;
   return (data ?? []).map((row: any) => dbRowToMessage(row, myId));

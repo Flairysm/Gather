@@ -123,7 +123,8 @@ export default function VendorStorePageScreen({
           .select("id, card_name, edition, grade, condition, price, quantity, images, category")
           .eq("seller_id", (storeData as any).profile_id)
           .eq("status", "active")
-          .order("created_at", { ascending: false }),
+          .order("created_at", { ascending: false })
+          .limit(100),
       ]);
 
     if (profileData) setSeller(profileData as SellerProfile);
@@ -594,6 +595,10 @@ export default function VendorStorePageScreen({
         renderItem={renderItem}
         numColumns={2}
         columnWrapperStyle={st.row}
+        initialNumToRender={12}
+        maxToRenderPerBatch={8}
+        windowSize={5}
+        removeClippedSubviews
         ListHeaderComponent={ListHeader}
         ListEmptyComponent={
           <View style={st.emptyWrap}>

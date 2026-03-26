@@ -59,7 +59,7 @@ type VendorListing = {
   created_at: string;
 };
 
-type FulfillmentStatus = "pending" | "confirmed" | "shipped" | "delivered";
+type FulfillmentStatus = "pending" | "confirmed" | "shipped" | "delivered" | "cancelled" | "refunded";
 
 type SellerOrderItem = {
   id: string;
@@ -123,6 +123,8 @@ const ORDER_FILTERS: { id: FulfillmentStatus | "all"; label: string }[] = [
   { id: "confirmed", label: "Confirmed" },
   { id: "shipped", label: "Shipped" },
   { id: "delivered", label: "Delivered" },
+  { id: "cancelled", label: "Cancelled" },
+  { id: "refunded", label: "Refunded" },
 ];
 
 const FULFILLMENT_CONFIG: Record<
@@ -156,6 +158,20 @@ const FULFILLMENT_CONFIG: Record<
     bg: "rgba(34,197,94,0.08)",
     border: "rgba(34,197,94,0.25)",
     color: C.success,
+  },
+  cancelled: {
+    label: "Cancelled",
+    icon: "close-circle-outline",
+    bg: "rgba(239,68,68,0.08)",
+    border: "rgba(239,68,68,0.25)",
+    color: "#EF4444",
+  },
+  refunded: {
+    label: "Refunded",
+    icon: "receipt-outline",
+    bg: "rgba(107,114,128,0.08)",
+    border: "rgba(107,114,128,0.25)",
+    color: "#6B7280",
   },
 };
 
@@ -281,24 +297,24 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
 
   const loadStore = useCallback(async () => {
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
       setUserId(user.id);
 
       const { data, error } = await supabase
-        .from("vendor_stores")
-        .select("id, store_name, description, logo_url, banner_url, theme_color")
-        .eq("profile_id", user.id)
-        .maybeSingle();
+      .from("vendor_stores")
+      .select("id, store_name, description, logo_url, banner_url, theme_color")
+      .eq("profile_id", user.id)
+      .maybeSingle();
       if (error) throw error;
 
-      if (data) {
-        setStore(data as VendorStore);
-        setStoreName(data.store_name);
-        setStoreDesc(data.description ?? "");
-        setLogoUrl(data.logo_url ?? "");
-        setBannerUrl(data.banner_url ?? "");
-        setThemeColor(data.theme_color ?? "#2C80FF");
+    if (data) {
+      setStore(data as VendorStore);
+      setStoreName(data.store_name);
+      setStoreDesc(data.description ?? "");
+      setLogoUrl(data.logo_url ?? "");
+      setBannerUrl(data.banner_url ?? "");
+      setThemeColor(data.theme_color ?? "#2C80FF");
       }
     } catch (e) {
       showToast(errMsg(e, "Failed to load store"));
@@ -309,18 +325,18 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
     if (!store?.id) return;
     try {
       const { data, error } = await supabase
-        .from("vendor_display_items")
+      .from("vendor_display_items")
         .select(`id, listing_id, display_order, listing:listings(id, card_name, edition, grade, price, images)`)
-        .eq("store_id", store.id)
-        .order("display_order", { ascending: true });
+      .eq("store_id", store.id)
+      .order("display_order", { ascending: true });
       if (error) throw error;
-      if (data) {
-        setDisplayItems(
-          (data as any[]).map((d) => ({
-            ...d,
-            listing: Array.isArray(d.listing) ? d.listing[0] : d.listing,
-          })),
-        );
+    if (data) {
+      setDisplayItems(
+        (data as any[]).map((d) => ({
+          ...d,
+          listing: Array.isArray(d.listing) ? d.listing[0] : d.listing,
+        })),
+      );
       }
     } catch (e) {
       showToast(errMsg(e, "Failed to load display items"));
@@ -329,16 +345,17 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
 
   const loadMyListings = useCallback(async () => {
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
       const { data, error } = await supabase
-        .from("listings")
+      .from("listings")
         .select("id, card_name, edition, grade, condition, price, quantity, images, status, created_at")
-        .eq("seller_id", user.id)
+      .eq("seller_id", user.id)
         .neq("status", "removed")
-        .order("created_at", { ascending: false });
+        .order("created_at", { ascending: false })
+        .limit(200);
       if (error) throw error;
-      setMyListings((data ?? []) as VendorListing[]);
+    setMyListings((data ?? []) as VendorListing[]);
     } catch (e) {
       showToast(errMsg(e, "Failed to load listings"));
     }
@@ -357,7 +374,8 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
           )
         `)
         .eq("seller_id", userId)
-        .order("created_at", { ascending: false });
+        .order("created_at", { ascending: false })
+        .limit(500);
       if (error) throw error;
 
       const mapped: SellerOrderItem[] = (data ?? []).map((row: any) => ({
@@ -397,7 +415,8 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
             order:orders(id, buyer_id, created_at, buyer:profiles!buyer_id(username, display_name))
           `)
           .eq("seller_id", userId)
-          .order("created_at", { ascending: false }),
+          .order("created_at", { ascending: false })
+          .limit(500),
         supabase
           .from("listings")
           .select("id", { count: "exact", head: true })
@@ -451,7 +470,8 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
           winner:profiles!winner_id(username, display_name)
         `)
         .eq("seller_id", userId)
-        .order("created_at", { ascending: false });
+        .order("created_at", { ascending: false })
+        .limit(200);
       if (error) throw error;
       setMyAuctions(
         (data ?? []).map((r: any) => ({
@@ -925,7 +945,7 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
       {tab === "orders" && (
         <View style={{ flex: 1 }}>
           {/* Status Filters */}
-          <ScrollView
+        <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
             contentContainerStyle={vh.filterRow}
@@ -964,6 +984,10 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
               data={filteredOrders}
               keyExtractor={(item) => item.id}
               contentContainerStyle={{ paddingHorizontal: S.screenPadding, paddingBottom: 40 }}
+              initialNumToRender={10}
+              maxToRenderPerBatch={8}
+              windowSize={5}
+              removeClippedSubviews
               renderItem={({ item: oi }) => {
                 const cfg = FULFILLMENT_CONFIG[oi.fulfillment_status];
                 const nextStatus = nextFulfillmentStatus(oi.fulfillment_status);
@@ -1015,6 +1039,21 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
                         <Text style={[vh.fulfillmentChipText, { color: cfg.color }]}>{cfg.label}</Text>
                       </View>
                       <View style={{ flex: 1 }} />
+                      {oi.fulfillment_status === "pending" && (
+                        <Pressable
+                          style={[vh.fulfillmentBtn, { backgroundColor: "rgba(239,68,68,0.85)" }]}
+                          onPress={() => {
+                            Alert.alert("Cancel Order?", "This will cancel the order for the buyer.", [
+                              { text: "Keep", style: "cancel" },
+                              { text: "Cancel Order", style: "destructive", onPress: () => updateFulfillment(oi.id, "cancelled") },
+                            ]);
+                          }}
+                          disabled={updatingOrderId === oi.id}
+                        >
+                          <Feather name="x" size={14} color="#fff" />
+                          <Text style={vh.fulfillmentBtnText}>Cancel</Text>
+                        </Pressable>
+                      )}
                       {nextStatus && (
                         <Pressable
                           style={[vh.fulfillmentBtn, { backgroundColor: nextFulfillmentColor(oi.fulfillment_status) }]}
@@ -1079,6 +1118,10 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
               data={myListings}
               keyExtractor={(item) => item.id}
               contentContainerStyle={{ paddingHorizontal: S.screenPadding, paddingBottom: 40 }}
+              initialNumToRender={10}
+              maxToRenderPerBatch={8}
+              windowSize={5}
+              removeClippedSubviews
               renderItem={({ item }) => {
                 const isDisplayed = displayItems.some((d) => d.listing_id === item.id);
                 const isEditing = editingListingId === item.id;
@@ -1260,6 +1303,10 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
               data={filteredAuctions}
               keyExtractor={(item) => item.id}
               contentContainerStyle={{ paddingHorizontal: S.screenPadding, paddingBottom: 40 }}
+              initialNumToRender={10}
+              maxToRenderPerBatch={8}
+              windowSize={5}
+              removeClippedSubviews
               renderItem={({ item: auction }) => {
                 const imgs = normalizeImages(auction.images);
                 const isActive = auction.status === "active";

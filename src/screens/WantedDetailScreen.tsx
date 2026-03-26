@@ -31,6 +31,7 @@ export default function WantedDetailScreen({ wantedId, onBack }: Props) {
   const [similar, setSimilar] = useState<WantedPost[]>([]);
   const [loading, setLoading] = useState(true);
   const [isSaved, setIsSaved] = useState(false);
+  const [togglingSave, setTogglingSave] = useState(false);
 
   const loadPost = useCallback(async () => {
     setLoading(true);
@@ -101,10 +102,13 @@ export default function WantedDetailScreen({ wantedId, onBack }: Props) {
   }
 
   async function handleToggleSave() {
+    if (togglingSave) return;
+    setTogglingSave(true);
     const { data, error } = await supabase.rpc("toggle_save_item", {
       p_item_type: "wanted",
       p_item_id: wantedId,
     });
+    setTogglingSave(false);
     if (!error) setIsSaved((data as any).saved);
   }
 

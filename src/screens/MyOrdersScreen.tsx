@@ -15,9 +15,10 @@ import { Feather, Ionicons } from "@expo/vector-icons";
 import { C, S } from "../theme";
 import { supabase } from "../lib/supabase";
 import { useAppNavigation } from "../navigation/NavigationContext";
+import TruncationNotice from "../components/TruncationNotice";
 
-type FulfillmentStatus = "pending" | "confirmed" | "shipped" | "delivered";
-type FilterId = "all" | FulfillmentStatus;
+type FulfillmentStatus = "pending" | "confirmed" | "shipped" | "delivered" | "cancelled" | "refunded";
+type FilterId = "all" | FulfillmentStatus | "to_rate";
 
 type OrderItemRow = {
   id: string;
@@ -59,10 +60,13 @@ type GroupedOrder = {
 
 const FILTERS: { id: FilterId; label: string }[] = [
   { id: "all", label: "All" },
-  { id: "pending", label: "Pending" },
-  { id: "confirmed", label: "Confirmed" },
-  { id: "shipped", label: "Shipped" },
-  { id: "delivered", label: "Delivered" },
+  { id: "pending", label: "To Pay" },
+  { id: "confirmed", label: "To Ship" },
+  { id: "shipped", label: "To Receive" },
+  { id: "delivered", label: "Completed" },
+  { id: "to_rate", label: "To Rate" },
+  { id: "refunded", label: "Refunded" },
+  { id: "cancelled", label: "Cancelled" },
 ];
 
 const STATUS_CONFIG: Record<
@@ -96,6 +100,20 @@ const STATUS_CONFIG: Record<
     color: C.success,
     bg: "rgba(34,197,94,0.08)",
     border: "rgba(34,197,94,0.25)",
+  },
+  cancelled: {
+    label: "Cancelled",
+    icon: "close-circle-outline",
+    color: "#EF4444",
+    bg: "rgba(239,68,68,0.08)",
+    border: "rgba(239,68,68,0.25)",
+  },
+  refunded: {
+    label: "Refunded",
+    icon: "receipt-outline",
+    color: "#6B7280",
+    bg: "rgba(107,114,128,0.08)",
+    border: "rgba(107,114,128,0.25)",
   },
 };
 
@@ -134,14 +152,23 @@ function relativeTime(dateStr: string) {
   });
 }
 
-export default function MyOrdersScreen({ onBack }: { onBack: () => void }) {
+export default function MyOrdersScreen({
+  onBack,
+  initialFilter,
+}: {
+  onBack: () => void;
+  initialFilter?: string;
+}) {
   const { push } = useAppNavigation();
   const [rawItems, setRawItems] = useState<OrderItemRow[]>([]);
   const [reviewedOrders, setReviewedOrders] = useState<
     Record<string, { rating: number }>
   >({});
   const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState<FilterId>("all");
+  const validFilters: FilterId[] = ["all", "pending", "confirmed", "shipped", "delivered", "to_rate", "refunded", "cancelled"];
+  const [filter, setFilter] = useState<FilterId>(
+    validFilters.includes(initialFilter as FilterId) ? (initialFilter as FilterId) : "all",
+  );
   const [userId, setUserId] = useState<string | null>(null);
 
   const loadOrders = useCallback(async () => {
@@ -162,7 +189,8 @@ export default function MyOrdersScreen({ onBack }: { onBack: () => void }) {
         .from("order_items")
         .select(SELECT)
         .eq("order_id.buyer_id", user.id)
-        .order("created_at", { ascending: false });
+        .order("created_at", { ascending: false })
+        .limit(500);
 
       let rows: any[] = data ?? [];
 
@@ -182,7 +210,8 @@ export default function MyOrdersScreen({ onBack }: { onBack: () => void }) {
           .from("order_items")
           .select(SELECT)
           .in("order_id", orderIds)
-          .order("created_at", { ascending: false });
+          .order("created_at", { ascending: false })
+          .limit(500);
 
         rows = fallbackData ?? [];
       }
@@ -240,6 +269,8 @@ export default function MyOrdersScreen({ onBack }: { onBack: () => void }) {
       );
       const itemCount = items.reduce((s, i) => s + i.quantity, 0);
       const statusPriority: FulfillmentStatus[] = [
+        "cancelled",
+        "refunded",
         "pending",
         "confirmed",
         "shipped",
@@ -271,13 +302,12 @@ export default function MyOrdersScreen({ onBack }: { onBack: () => void }) {
     );
   }, [rawItems, reviewedOrders]);
 
-  const filtered = useMemo(
-    () =>
-      filter === "all"
-        ? grouped
-        : grouped.filter((g) => g.status === filter),
-    [grouped, filter],
-  );
+  const filtered = useMemo(() => {
+    if (filter === "all") return grouped;
+    if (filter === "to_rate")
+      return grouped.filter((g) => g.status === "delivered" && !g.hasReview);
+    return grouped.filter((g) => g.status === filter);
+  }, [grouped, filter]);
 
   const filterCounts = useMemo(() => {
     const counts: Record<FilterId, number> = {
@@ -286,8 +316,14 @@ export default function MyOrdersScreen({ onBack }: { onBack: () => void }) {
       confirmed: 0,
       shipped: 0,
       delivered: 0,
+      to_rate: 0,
+      cancelled: 0,
+      refunded: 0,
     };
-    for (const g of grouped) counts[g.status]++;
+    for (const g of grouped) {
+      counts[g.status]++;
+      if (g.status === "delivered" && !g.hasReview) counts.to_rate++;
+    }
     return counts;
   }, [grouped]);
 
@@ -359,6 +395,10 @@ export default function MyOrdersScreen({ onBack }: { onBack: () => void }) {
               data={filtered}
               keyExtractor={(item) => item.orderId}
               contentContainerStyle={st.list}
+              initialNumToRender={10}
+              maxToRenderPerBatch={8}
+              windowSize={5}
+              removeClippedSubviews
               renderItem={({ item: order }) => (
                 <OrderCard
                   order={order}
@@ -370,6 +410,7 @@ export default function MyOrdersScreen({ onBack }: { onBack: () => void }) {
                   }
                 />
               )}
+              ListFooterComponent={<TruncationNotice count={rawItems.length} limit={500} label="order items" />}
             />
           )}
         </>

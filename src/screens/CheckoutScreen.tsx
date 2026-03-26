@@ -7,6 +7,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { C, S } from "../theme";
 import { useCart, parsePrice, formatPrice } from "../data/cart";
 import { supabase } from "../lib/supabase";
+import { requireNetwork } from "../lib/network";
 
 type Props = { onBack: () => void };
 
@@ -19,6 +20,7 @@ export default function CheckoutScreen({ onBack }: Props) {
 
   async function handleConfirm() {
     if (processing || items.length === 0) return;
+    if (!(await requireNetwork())) return;
     setProcessing(true);
 
     try {
@@ -39,47 +41,16 @@ export default function CheckoutScreen({ onBack }: Props) {
         return;
       }
 
-      const orderTotal = items.reduce(
-        (acc, ci) => acc + parsePrice(ci.listing.price) * ci.quantity,
-        0,
-      );
-
-      const { data: order, error: orderErr } = await supabase
-        .from("orders")
-        .insert({ buyer_id: user.id, total: orderTotal })
-        .select("id")
-        .single();
-
-      if (orderErr || !order) {
-        throw new Error(orderErr?.message ?? "Failed to create order");
-      }
-
-      const orderItems = items.map((ci) => ({
-        order_id: order.id,
+      const payload = items.map((ci) => ({
         listing_id: ci.listing.id,
-        seller_id: ci.listing.seller_id,
         quantity: ci.quantity,
-        unit_price: parsePrice(ci.listing.price),
       }));
 
-      const { error: itemsErr } = await supabase
-        .from("order_items")
-        .insert(orderItems);
+      const { data, error } = await supabase.rpc("checkout_order", {
+        p_items: payload,
+      });
 
-      if (itemsErr) {
-        throw new Error(itemsErr.message);
-      }
-
-      for (const ci of items) {
-        const newQty = Math.max(0, (ci.listing.quantity ?? 1) - ci.quantity);
-        await supabase
-          .from("listings")
-          .update({
-            quantity: newQty,
-            ...(newQty <= 0 ? { status: "sold" } : {}),
-          })
-          .eq("id", ci.listing.id);
-      }
+      if (error) throw new Error(error.message);
 
       setConfirmed(true);
     } catch (err: any) {

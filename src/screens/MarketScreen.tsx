@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Animated,
   Dimensions,
-  Image,
   Pressable,
   RefreshControl,
   SafeAreaView,
@@ -11,8 +10,10 @@ import {
   TextInput,
   View,
 } from "react-native";
+import CachedImage from "../components/CachedImage";
 import { StatusBar } from "expo-status-bar";
 import { Feather, Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { C, S } from "../theme";
 import { market as m } from "../styles/market.styles";
@@ -29,6 +30,22 @@ import { useUser } from "../data/user";
 import { supabase } from "../lib/supabase";
 
 type Tab = "Listings" | "Wanted";
+type SortMode = "newest" | "price_low" | "price_high";
+
+/** Grade filter chips — match substring on listing `grade` / wanted `grade_wanted`. */
+const GRADE_FILTER_OPTIONS = [
+  "Any",
+  "PSA 10",
+  "PSA 9",
+  "PSA 8",
+  "BGS 10",
+  "BGS 9.5",
+  "CGC 10",
+  "CGC 9.5",
+  "SGC 10",
+  "Raw",
+  "Ungraded",
+] as const;
 
 const FAB_ACTIONS = [
   {
@@ -66,9 +83,16 @@ function formatGradeLabel(grade: string | null | undefined) {
 export default function MarketScreen() {
   const { push } = useAppNavigation();
   const { isVerifiedVendor } = useUser();
+  const insets = useSafeAreaInsets();
   const [activeTab, setActiveTab] = useState<Tab>("Listings");
   const [activeFilter, setActiveFilter] = useState("All");
   const [searchQuery, setSearchQuery] = useState("");
+  const [showFilterSheet, setShowFilterSheet] = useState(false);
+  const [sortMode, setSortMode] = useState<SortMode>("newest");
+  /** `null` = Any (no grade filter). */
+  const [selectedGrade, setSelectedGrade] = useState<string | null>(null);
+  const [minPriceText, setMinPriceText] = useState("");
+  const [maxPriceText, setMaxPriceText] = useState("");
   const [fabOpen, setFabOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const anim = useRef(new Animated.Value(0)).current;
@@ -170,19 +194,30 @@ export default function MarketScreen() {
   }, [loadListings, loadWanted]);
 
   const normalizedQuery = searchQuery.trim().toLowerCase();
+  const minPrice = Number(minPriceText.replace(/(RM|\$|,)/gi, ""));
+  const maxPrice = Number(maxPriceText.replace(/(RM|\$|,)/gi, ""));
+  const normalizedGradeFilter = (selectedGrade ?? "").trim().toLowerCase();
+  const hasMinPrice = Number.isFinite(minPrice) && minPrice > 0;
+  const hasMaxPrice = Number.isFinite(maxPrice) && maxPrice > 0;
+  const hasAdvancedFilters =
+    sortMode !== "newest" ||
+    normalizedGradeFilter.length > 0 ||
+    hasMinPrice ||
+    hasMaxPrice;
+  const activeFilterCount =
+    (sortMode !== "newest" ? 1 : 0) +
+    (normalizedGradeFilter.length > 0 ? 1 : 0) +
+    (hasMinPrice ? 1 : 0) +
+    (hasMaxPrice ? 1 : 0);
 
-  const filteredListings =
-    activeFilter === "All"
-      ? listings
-      : listings.filter((l) => l.category === activeFilter);
+  const searchedListings = useMemo(() => {
+    let next =
+      activeFilter === "All"
+        ? [...listings]
+        : listings.filter((l) => l.category === activeFilter);
 
-  const filteredWanted =
-    activeFilter === "All"
-      ? wantedPosts
-      : wantedPosts.filter((w) => w.category === activeFilter);
-
-  const searchedListings = normalizedQuery
-    ? filteredListings.filter((item) => {
+    if (normalizedQuery) {
+      next = next.filter((item) => {
         const haystack = [
           item.card_name,
           item.edition ?? "",
@@ -196,11 +231,48 @@ export default function MarketScreen() {
           .join(" ")
           .toLowerCase();
         return haystack.includes(normalizedQuery);
-      })
-    : filteredListings;
+      });
+    }
 
-  const searchedWanted = normalizedQuery
-    ? filteredWanted.filter((item) => {
+    if (normalizedGradeFilter) {
+      next = next.filter((item) =>
+        String(item.grade ?? "").toLowerCase().includes(normalizedGradeFilter),
+      );
+    }
+    if (hasMinPrice) next = next.filter((item) => Number(item.price) >= minPrice);
+    if (hasMaxPrice) next = next.filter((item) => Number(item.price) <= maxPrice);
+
+    if (sortMode === "price_low") {
+      next.sort((a, b) => Number(a.price) - Number(b.price));
+    } else if (sortMode === "price_high") {
+      next.sort((a, b) => Number(b.price) - Number(a.price));
+    } else {
+      next.sort(
+        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+      );
+    }
+    return next;
+  }, [
+    activeFilter,
+    listings,
+    normalizedQuery,
+    vendorStores,
+    normalizedGradeFilter,
+    hasMinPrice,
+    minPrice,
+    hasMaxPrice,
+    maxPrice,
+    sortMode,
+  ]);
+
+  const searchedWanted = useMemo(() => {
+    let next =
+      activeFilter === "All"
+        ? [...wantedPosts]
+        : wantedPosts.filter((w) => w.category === activeFilter);
+
+    if (normalizedQuery) {
+      next = next.filter((item) => {
         const haystack = [
           item.card_name,
           item.edition ?? "",
@@ -212,8 +284,38 @@ export default function MarketScreen() {
           .join(" ")
           .toLowerCase();
         return haystack.includes(normalizedQuery);
-      })
-    : filteredWanted;
+      });
+    }
+
+    if (normalizedGradeFilter) {
+      next = next.filter((item) =>
+        String(item.grade_wanted ?? "").toLowerCase().includes(normalizedGradeFilter),
+      );
+    }
+    if (hasMinPrice) next = next.filter((item) => Number(item.offer_price) >= minPrice);
+    if (hasMaxPrice) next = next.filter((item) => Number(item.offer_price) <= maxPrice);
+
+    if (sortMode === "price_low") {
+      next.sort((a, b) => Number(a.offer_price) - Number(b.offer_price));
+    } else if (sortMode === "price_high") {
+      next.sort((a, b) => Number(b.offer_price) - Number(a.offer_price));
+    } else {
+      next.sort(
+        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+      );
+    }
+    return next;
+  }, [
+    activeFilter,
+    wantedPosts,
+    normalizedQuery,
+    normalizedGradeFilter,
+    hasMinPrice,
+    minPrice,
+    hasMaxPrice,
+    maxPrice,
+    sortMode,
+  ]);
 
   function toggleFab() {
     Animated.spring(anim, {
@@ -255,6 +357,13 @@ export default function MarketScreen() {
     ]);
     await new Promise((resolve) => setTimeout(resolve, 500));
     setRefreshing(false);
+  }
+
+  function clearAdvancedFilters() {
+    setSortMode("newest");
+    setSelectedGrade(null);
+    setMinPriceText("");
+    setMaxPriceText("");
   }
 
   return (
@@ -327,8 +436,13 @@ export default function MarketScreen() {
                 </Pressable>
               )}
             </View>
-            <Pressable style={m.iconBtn}>
+            <Pressable style={[m.iconBtn, hasAdvancedFilters && (m as any).iconBtnActive]} onPress={() => setShowFilterSheet(true)}>
               <Feather name="sliders" size={S.iconSize.md} color={C.textSearch} />
+              {activeFilterCount > 0 && (
+                <View style={(m as any).filterCountBadge}>
+                  <Text style={(m as any).filterCountBadgeText}>{activeFilterCount}</Text>
+                </View>
+              )}
             </Pressable>
           </View>
 
@@ -404,7 +518,7 @@ export default function MarketScreen() {
                   >
                     <View style={m.listingArt}>
                       {item.images?.[0] ? (
-                        <Image
+                        <CachedImage
                           source={{ uri: item.images[0] }}
                           style={{ width: "100%", height: "100%", borderRadius: S.radiusCardInner }}
                         />
@@ -435,12 +549,12 @@ export default function MarketScreen() {
                       <View style={m.listingMeta}>
                         <View style={m.sellerRow}>
                           {vendorStores[item.seller_id]?.logo_url ? (
-                            <Image
+                            <CachedImage
                               source={{ uri: vendorStores[item.seller_id]!.logo_url! }}
                               style={{ width: 16, height: 16, borderRadius: 8 }}
                             />
                           ) : item.seller?.avatar_url ? (
-                            <Image
+                            <CachedImage
                               source={{ uri: item.seller.avatar_url }}
                               style={{ width: 16, height: 16, borderRadius: 8 }}
                             />
@@ -490,7 +604,7 @@ export default function MarketScreen() {
                   >
                     <View style={m.wantedArt}>
                       {item.image_url ? (
-                        <Image
+                        <CachedImage
                           source={{ uri: item.image_url }}
                           style={{ width: "100%", height: "100%", borderRadius: S.radiusCardInner }}
                         />
@@ -637,6 +751,113 @@ export default function MarketScreen() {
             <Feather name="plus" size={28} color="#fff" />
           </Animated.View>
         </Pressable>
+
+        {/* Filter Sheet */}
+        {showFilterSheet && (
+          <View style={(m as any).filterOverlay} pointerEvents="box-none">
+            <Pressable style={(m as any).filterBackdrop} onPress={() => setShowFilterSheet(false)} />
+            <View
+              style={[
+                (m as any).filterSheet,
+                {
+                  marginBottom: 72,
+                  paddingBottom: Math.max(insets.bottom, 14),
+                },
+              ]}
+            >
+              <View style={(m as any).filterSheetHeader}>
+                <Text style={(m as any).filterSheetTitle}>Filters</Text>
+                <Pressable onPress={() => setShowFilterSheet(false)} hitSlop={8}>
+                  <Feather name="x" size={18} color={C.textPrimary} />
+                </Pressable>
+              </View>
+
+              <Text style={(m as any).filterLabel}>Sort</Text>
+              <View style={(m as any).sortRow}>
+                <Pressable
+                  style={[(m as any).sortChip, sortMode === "newest" && (m as any).sortChipActive]}
+                  onPress={() => setSortMode("newest")}
+                >
+                  <Text style={[(m as any).sortChipText, sortMode === "newest" && (m as any).sortChipTextActive]}>Newest</Text>
+                </Pressable>
+                <Pressable
+                  style={[(m as any).sortChip, sortMode === "price_low" && (m as any).sortChipActive]}
+                  onPress={() => setSortMode("price_low")}
+                >
+                  <Text style={[(m as any).sortChipText, sortMode === "price_low" && (m as any).sortChipTextActive]}>Price: Low to High</Text>
+                </Pressable>
+                <Pressable
+                  style={[(m as any).sortChip, sortMode === "price_high" && (m as any).sortChipActive]}
+                  onPress={() => setSortMode("price_high")}
+                >
+                  <Text style={[(m as any).sortChipText, sortMode === "price_high" && (m as any).sortChipTextActive]}>Price: High to Low</Text>
+                </Pressable>
+              </View>
+
+              <Text style={(m as any).filterLabel}>Price Range (RM)</Text>
+              <View style={(m as any).priceRow}>
+                <TextInput
+                  style={(m as any).priceInput}
+                  placeholder="Min"
+                  placeholderTextColor={C.textMuted}
+                  keyboardType="number-pad"
+                  value={minPriceText}
+                  onChangeText={setMinPriceText}
+                />
+                <Text style={(m as any).priceDash}>-</Text>
+                <TextInput
+                  style={(m as any).priceInput}
+                  placeholder="Max"
+                  placeholderTextColor={C.textMuted}
+                  keyboardType="number-pad"
+                  value={maxPriceText}
+                  onChangeText={setMaxPriceText}
+                />
+              </View>
+
+              <Text style={(m as any).filterLabel}>Grade</Text>
+              <View style={(m as any).sortRow}>
+                {GRADE_FILTER_OPTIONS.map((opt) => {
+                  const isAny = opt === "Any";
+                  const selected =
+                    isAny
+                      ? selectedGrade === null
+                      : selectedGrade === opt;
+                  return (
+                    <Pressable
+                      key={opt}
+                      style={[
+                        (m as any).sortChip,
+                        selected && (m as any).sortChipActive,
+                      ]}
+                      onPress={() =>
+                        setSelectedGrade(isAny ? null : opt)
+                      }
+                    >
+                      <Text
+                        style={[
+                          (m as any).sortChipText,
+                          selected && (m as any).sortChipTextActive,
+                        ]}
+                      >
+                        {opt}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+
+              <View style={(m as any).filterActions}>
+                <Pressable style={(m as any).filterResetBtn} onPress={clearAdvancedFilters}>
+                  <Text style={(m as any).filterResetText}>Reset</Text>
+                </Pressable>
+                <Pressable style={(m as any).filterApplyBtn} onPress={() => setShowFilterSheet(false)}>
+                  <Text style={(m as any).filterApplyText}>Apply</Text>
+                </Pressable>
+              </View>
+            </View>
+          </View>
+        )}
       </View>
     </SafeAreaView>
   );

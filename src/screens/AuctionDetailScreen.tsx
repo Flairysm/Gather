@@ -5,9 +5,11 @@ import {
   Dimensions,
   Easing,
   Image,
+  Modal,
   Pressable,
   SafeAreaView,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   TextInput,
@@ -21,6 +23,8 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { C, S } from "../theme";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import { supabase } from "../lib/supabase";
+import { useReconnect } from "../hooks/useReconnect";
+import { requireNetwork } from "../lib/network";
 
 const SCREEN_W = Dimensions.get("window").width;
 const SCREEN_H = Dimensions.get("window").height;
@@ -132,8 +136,9 @@ type WinRecord = {
 };
 
 export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
-  const { push } = useAppNavigation();
+  const { push, stack } = useAppNavigation();
   const insets = useSafeAreaInsets();
+  const pendingBidAction = useRef(false);
   const [item, setItem] = useState<AuctionRow | null>(null);
   const [bids, setBids] = useState<BidRow[]>([]);
   const [vendorStore, setVendorStore] = useState<{ id: string; store_name: string; logo_url: string | null } | null>(null);
@@ -143,14 +148,19 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
   const [showBidSheet, setShowBidSheet] = useState(false);
   const [bidAmount, setBidAmount] = useState("");
   const [imageIndex, setImageIndex] = useState(0);
+  const [showImageViewer, setShowImageViewer] = useState(false);
   const [snipeToast, setSnipeToast] = useState(false);
   const [, setTick] = useState(0);
   const [isWatching, setIsWatching] = useState(false);
+  const [isSaved, setIsSaved] = useState(false);
+  const [togglingWatch, setTogglingWatch] = useState(false);
+  const [togglingSave, setTogglingSave] = useState(false);
   const [eligibility, setEligibility] = useState<BidEligibility>({
     phoneVerified: false, hasAddress: false, isBanned: false, banReason: null, loaded: false,
   });
   const [winRecord, setWinRecord] = useState<WinRecord | null>(null);
   const [paying, setPaying] = useState(false);
+  const [realtimeOk, setRealtimeOk] = useState(true);
 
   const sheetAnim = useRef(new Animated.Value(0)).current;
   const backdropAnim = useRef(new Animated.Value(0)).current;
@@ -262,15 +272,46 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
     setIsWatching(!!data);
   }, [auctionId]);
 
+  const loadSavedStatus = useCallback(async () => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      setIsSaved(false);
+      return;
+    }
+    const { data } = await supabase
+      .from("saved_items")
+      .select("id")
+      .eq("user_id", user.id)
+      .eq("item_type", "auction")
+      .eq("item_id", auctionId)
+      .maybeSingle();
+    setIsSaved(!!data);
+  }, [auctionId]);
+
   useEffect(() => {
     supabase.auth.getUser().then(({ data: { user } }) => {
       if (user) setCurrentUserId(user.id);
     });
     supabase.rpc("increment_auction_views", { p_auction_id: auctionId });
-    Promise.all([loadAuction(), loadBids(), loadEligibility(), loadWinRecord(), loadWatchStatus()]).finally(() => setLoading(false));
-  }, [loadAuction, loadBids, loadEligibility, loadWinRecord, loadWatchStatus]);
+    Promise.all([
+      loadAuction(),
+      loadBids(),
+      loadEligibility(),
+      loadWinRecord(),
+      loadWatchStatus(),
+      loadSavedStatus(),
+    ]).finally(() => setLoading(false));
+  }, [loadAuction, loadBids, loadEligibility, loadWinRecord, loadWatchStatus, loadSavedStatus]);
 
-  // Realtime subscriptions
+  useReconnect(() => {
+    loadAuction();
+    loadBids();
+    loadWatchStatus();
+    loadSavedStatus();
+    loadWinRecord();
+  });
+
+  // Realtime subscriptions with connection tracking
   useEffect(() => {
     const channel = supabase
       .channel(`auction-${auctionId}`)
@@ -299,21 +340,37 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
           loadBids();
         },
       )
-      .subscribe();
+      .subscribe((status) => {
+        if (status === "SUBSCRIBED") {
+          setRealtimeOk(true);
+          loadAuction();
+          loadBids();
+        } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+          setRealtimeOk(false);
+        }
+      });
 
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [auctionId, loadBids]);
+  }, [auctionId, loadBids, loadAuction]);
 
-  // Auto-end detection
+  // Auto-end detection + forced refetch on countdown expiry
   useEffect(() => {
     if (!item || item.status !== "active") return;
     const diff = new Date(item.ends_at).getTime() - Date.now();
-    if (diff > 0) return;
-    supabase.rpc("end_auction", { p_auction_id: auctionId }).then(() => {
+    if (diff <= 0) {
+      supabase.rpc("end_auction", { p_auction_id: auctionId }).then(() => {
+        loadAuction();
+        loadWinRecord();
+      });
+      return;
+    }
+    const timeout = setTimeout(() => {
       loadAuction();
-    });
+      loadBids();
+    }, diff + 500);
+    return () => clearTimeout(timeout);
   }, [item?.ends_at, item?.status]);
 
   function triggerSnipeToast() {
@@ -334,30 +391,20 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
       );
       return false;
     }
-    if (!eligibility.phoneVerified) {
-      Alert.alert(
-        "Phone Verification Required",
-        "You must verify your phone number before placing bids.",
-        [
-          { text: "Cancel", style: "cancel" },
-          { text: "Verify Now", onPress: () => push({ type: "PHONE_VERIFY" }) },
-        ],
-      );
-      return false;
-    }
-    if (!eligibility.hasAddress) {
-      Alert.alert(
-        "Shipping Address Required",
-        "You must add a shipping address before placing bids.",
-        [
-          { text: "Cancel", style: "cancel" },
-          { text: "Add Address", onPress: () => push({ type: "ADDRESS_BOOK" }) },
-        ],
-      );
-      return false;
-    }
     return true;
   }
+
+  // Re-check eligibility when returning from verify/address screens
+  const prevStackLen = useRef(stack.length);
+  useEffect(() => {
+    if (stack.length < prevStackLen.current && pendingBidAction.current) {
+      pendingBidAction.current = false;
+      loadEligibility().then(() => {
+        // eligibility state will update, user can retry bid
+      });
+    }
+    prevStackLen.current = stack.length;
+  }, [stack.length, loadEligibility]);
 
   function openBidSheet() {
     if (!item) return;
@@ -388,6 +435,7 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
 
   async function handlePlaceBid() {
     if (!item || bidding) return;
+    if (!(await requireNetwork())) return;
     const amount = parseFloat(bidAmount.replace(/(RM|\$|,)/gi, ""));
     if (isNaN(amount) || amount <= 0) {
       Alert.alert("Invalid Bid", "Please enter a valid amount.");
@@ -403,18 +451,10 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
     setBidding(false);
     if (error) {
       const msg = error.message ?? "";
-      if (msg.includes("PHONE_NOT_VERIFIED")) {
-        Alert.alert("Phone Verification Required", "Verify your phone number to bid.", [
-          { text: "Cancel", style: "cancel" },
-          { text: "Verify Now", onPress: () => push({ type: "PHONE_VERIFY" }) },
-        ]);
-      } else if (msg.includes("NO_ADDRESS")) {
-        Alert.alert("Shipping Address Required", "Add a shipping address to bid.", [
-          { text: "Cancel", style: "cancel" },
-          { text: "Add Address", onPress: () => push({ type: "ADDRESS_BOOK" }) },
-        ]);
-      } else if (msg.includes("BANNED")) {
+      if (msg.includes("BANNED")) {
         Alert.alert("Transaction Banned", msg.replace("BANNED: ", ""));
+      } else if (msg.includes("RATE_LIMITED")) {
+        Alert.alert("Too Fast", "Please wait a few seconds before bidding again.");
       } else {
         Alert.alert("Bid Failed", msg);
       }
@@ -467,8 +507,14 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
     setBidAmount(String(current + increment));
   }
 
+  function openImageViewer(index: number) {
+    setImageIndex(index);
+    setShowImageViewer(true);
+  }
+
   async function handlePayNow() {
     if (!winRecord || paying) return;
+    if (!(await requireNetwork())) return;
     setPaying(true);
     const { error } = await supabase.rpc("pay_auction_win", { p_win_id: winRecord.id });
     setPaying(false);
@@ -476,23 +522,67 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
       Alert.alert("Payment Failed", error.message);
       return;
     }
-    Alert.alert("Payment Confirmed", "Your payment has been recorded. The seller will ship your item.");
-    loadWinRecord();
+    Alert.alert(
+      "Payment Confirmed",
+      "Your payment has been recorded. The seller will ship your item shortly.",
+      [
+        { text: "Stay Here", style: "cancel", onPress: () => loadWinRecord() },
+        { text: "My Auctions", onPress: () => { loadWinRecord(); push({ type: "MY_AUCTIONS" }); } },
+      ],
+    );
   }
 
   async function handleToggleWatch() {
+    if (togglingWatch) return;
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      Alert.alert("Sign in required", "Please sign in to watch auctions.");
+      return;
+    }
+    setTogglingWatch(true);
     const { data, error } = await supabase.rpc("toggle_auction_watch", { p_auction_id: auctionId });
-    if (error) return;
+    setTogglingWatch(false);
+    if (error) {
+      Alert.alert("Error", error.message);
+      return;
+    }
     setIsWatching((data as any).watching);
     setItem((prev) => prev ? { ...prev, watchers: (data as any).watchers } : prev);
   }
 
+  async function handleToggleSave() {
+    if (togglingSave) return;
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      Alert.alert("Sign in required", "Please sign in to bookmark auctions.");
+      return;
+    }
+    setTogglingSave(true);
+    const { data, error } = await supabase.rpc("toggle_save_item", {
+      p_item_type: "auction",
+      p_item_id: auctionId,
+    });
+    setTogglingSave(false);
+    if (error) {
+      Alert.alert("Error", error.message);
+      return;
+    }
+    setIsSaved((data as any).saved);
+  }
+
   async function handleShare() {
     if (!item) return;
-    const { Share } = await import("react-native");
-    Share.share({
-      message: `Check out "${item.card_name}" on Gather Auctions!${item.current_bid ? ` Current bid: ${formatPrice(item.current_bid)}` : ""}`,
-    });
+    try {
+      const bidPart = item.current_bid
+        ? ` Current bid: ${formatPrice(item.current_bid)}.`
+        : ` Starting at ${formatPrice(item.starting_price)}.`;
+      await Share.share({
+        title: item.card_name,
+        message: `Check out "${item.card_name}" on Gather Auctions!${bidPart}`,
+      });
+    } catch {
+      /* user dismissed share sheet */
+    }
   }
 
   const images = useMemo(() => normalizeImages(item?.images), [item?.images]);
@@ -578,6 +668,17 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
           <Ionicons name="shield-checkmark" size={18} color={C.textHero} />
           <Text style={st.snipeToastText}>Anti-Snipe: Time Extended! +{item.snipe_extension_seconds}s</Text>
         </Animated.View>
+      )}
+
+      {/* Connection lost banner */}
+      {!realtimeOk && (
+        <Pressable
+          style={[st.desyncBanner, { top: Math.max(insets.top + 8, 16) }]}
+          onPress={() => { loadAuction(); loadBids(); }}
+        >
+          <Ionicons name="cloud-offline-outline" size={16} color="#fff" />
+          <Text style={st.desyncText}>Live updates paused. Tap to refresh.</Text>
+        </Pressable>
       )}
 
       {/* Bid bottom sheet */}
@@ -668,14 +769,45 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
         </Pressable>
         <Text style={st.headerTitle}>Auction</Text>
         <View style={st.headerActions}>
-          <Pressable style={st.headerIconBtn} onPress={handleShare}>
+          <Pressable style={st.headerIconBtn} onPress={handleShare} hitSlop={6}>
             <Feather name="share" size={16} color={C.textSearch} />
           </Pressable>
-          <Pressable style={st.headerIconBtn} onPress={handleToggleWatch}>
-            <Ionicons name={isWatching ? "bookmark" : "bookmark-outline"} size={16} color={isWatching ? C.accent : C.textSearch} />
+          <Pressable style={st.headerIconBtn} onPress={handleToggleWatch} hitSlop={6}>
+            <Ionicons
+              name={isWatching ? "eye" : "eye-outline"}
+              size={17}
+              color={isWatching ? C.accent : C.textSearch}
+            />
+          </Pressable>
+          <Pressable style={st.headerIconBtn} onPress={handleToggleSave} hitSlop={6}>
+            <Ionicons
+              name={isSaved ? "bookmark" : "bookmark-outline"}
+              size={16}
+              color={isSaved ? C.accent : C.textSearch}
+            />
           </Pressable>
         </View>
       </View>
+
+      {/* Full image viewer */}
+      <Modal
+        visible={showImageViewer}
+        animationType="fade"
+        transparent
+        onRequestClose={() => setShowImageViewer(false)}
+      >
+        <View style={st.imageViewerOverlay}>
+          <Pressable
+            style={st.imageViewerClose}
+            onPress={() => setShowImageViewer(false)}
+          >
+            <Ionicons name="close" size={22} color={C.textPrimary} />
+          </Pressable>
+          {images[imageIndex] ? (
+            <Image source={{ uri: images[imageIndex] }} style={st.imageViewerImage} />
+          ) : null}
+        </View>
+      </Modal>
 
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={st.scroll}>
         {/* Image carousel */}
@@ -688,7 +820,9 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
         >
           {images.length > 0 ? (
             images.map((uri, i) => (
-              <Image key={i} source={{ uri }} style={st.heroImage} />
+              <Pressable key={i} onPress={() => openImageViewer(i)}>
+                <Image source={{ uri }} style={st.heroImage} />
+              </Pressable>
             ))
           ) : (
             <View style={st.heroPlaceholder}>
@@ -697,6 +831,9 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
             </View>
           )}
         </ScrollView>
+        {images.length > 0 && (
+          <Text style={st.tapHint}>Tap image to view full size</Text>
+        )}
         {images.length > 1 && (
           <View style={st.dotRow}>
             {images.map((_, i) => (
@@ -830,27 +967,6 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
             <Text style={st.expiredBannerText}>
               Payment deadline expired. Your account has been restricted from transactions.
             </Text>
-          </View>
-        )}
-
-        {/* Eligibility requirement hints for non-owners on active auctions */}
-        {!isOwner && !isEnded && eligibility.loaded && (!eligibility.phoneVerified || !eligibility.hasAddress) && !eligibility.isBanned && (
-          <View style={st.eligibilityBanner}>
-            <Text style={st.eligibilityTitle}>Before you can bid:</Text>
-            {!eligibility.phoneVerified && (
-              <Pressable style={st.eligibilityRow} onPress={() => push({ type: "PHONE_VERIFY" })}>
-                <Ionicons name="call-outline" size={14} color={C.textAccent} />
-                <Text style={st.eligibilityText}>Verify your phone number</Text>
-                <Feather name="chevron-right" size={14} color={C.textMuted} />
-              </Pressable>
-            )}
-            {!eligibility.hasAddress && (
-              <Pressable style={st.eligibilityRow} onPress={() => push({ type: "ADDRESS_BOOK" })}>
-                <Ionicons name="location-outline" size={14} color={C.textAccent} />
-                <Text style={st.eligibilityText}>Add a shipping address</Text>
-                <Feather name="chevron-right" size={14} color={C.textMuted} />
-              </Pressable>
-            )}
           </View>
         )}
 
@@ -1031,6 +1147,21 @@ const st = StyleSheet.create({
     elevation: 8,
   },
   snipeToastText: { color: C.textHero, fontSize: 13, fontWeight: "800" },
+  desyncBanner: {
+    position: "absolute",
+    left: S.screenPadding,
+    right: S.screenPadding,
+    zIndex: 20,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    backgroundColor: "rgba(239,68,68,0.9)",
+    borderRadius: 14,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+  },
+  desyncText: { color: "#fff", fontSize: 12, fontWeight: "700" },
 
   sheetOverlay: { ...StyleSheet.absoluteFillObject, zIndex: 19, justifyContent: "flex-end" },
   sheetBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.55)" },
@@ -1148,9 +1279,39 @@ const st = StyleSheet.create({
 
   scroll: { paddingBottom: 100 },
 
+  imageViewerOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.95)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  imageViewerClose: {
+    position: "absolute",
+    top: 54,
+    right: 18,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: "rgba(255,255,255,0.12)",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 2,
+  },
+  imageViewerImage: {
+    width: SCREEN_W,
+    height: SCREEN_H * 0.78,
+    resizeMode: "contain",
+  },
   imageCarousel: { width: SCREEN_W, height: SCREEN_W * 1.0 },
   heroImage: { width: SCREEN_W, height: SCREEN_W * 1.0, resizeMode: "cover" },
   heroPlaceholder: { width: SCREEN_W, height: SCREEN_W * 1.0, backgroundColor: C.cardAlt, alignItems: "center", justifyContent: "center" },
+  tapHint: {
+    color: C.textMuted,
+    fontSize: 11,
+    fontWeight: "600",
+    textAlign: "center",
+    marginTop: 8,
+  },
   dotRow: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingVertical: 10 },
   dot: { width: 6, height: 6, borderRadius: 3, backgroundColor: C.muted },
   dotActive: { backgroundColor: C.accent, width: 18, borderRadius: 3 },

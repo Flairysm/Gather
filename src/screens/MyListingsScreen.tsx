@@ -77,7 +77,8 @@ export default function MyListingsScreen({ onBack }: Props) {
       )
       .eq("seller_id", user.id)
       .neq("status", "removed")
-      .order("created_at", { ascending: false });
+      .order("created_at", { ascending: false })
+      .limit(200);
 
     const { data: wantedData } = await supabase
       .from("wanted_posts")
@@ -85,7 +86,8 @@ export default function MyListingsScreen({ onBack }: Props) {
         "id, buyer_id, card_name, edition, grade_wanted, offer_price, category, description, image_url, views, status, created_at",
       )
       .eq("buyer_id", user.id)
-      .order("created_at", { ascending: false });
+      .order("created_at", { ascending: false })
+      .limit(200);
 
     setRows((data ?? []) as Listing[]);
     setWantedRows((wantedData ?? []) as WantedPost[]);
@@ -276,6 +278,10 @@ export default function MyListingsScreen({ onBack }: Props) {
           data={tab === "listings" ? rows : wantedRows}
           keyExtractor={(item) => item.id}
           contentContainerStyle={st.list}
+          initialNumToRender={10}
+          maxToRenderPerBatch={8}
+          windowSize={5}
+          removeClippedSubviews
           renderItem={({ item }) => (
             <View style={st.row}>
               <View style={st.thumb}>

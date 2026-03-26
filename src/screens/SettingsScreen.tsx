@@ -20,6 +20,16 @@ import { useAppNavigation } from "../navigation/NavigationContext";
 import { fetchVendorStatus, useUser } from "../data/user";
 import { supabase } from "../lib/supabase";
 
+const ORDER_SHORTCUTS = [
+  { label: "To Pay", filter: "pending", icon: "card-outline", color: "#F59E0B", bg: "rgba(245,158,11,0.10)" },
+  { label: "To Ship", filter: "confirmed", icon: "cube-outline", color: C.accent, bg: "rgba(44,128,255,0.10)" },
+  { label: "To Receive", filter: "shipped", icon: "car-outline", color: "#8B5CF6", bg: "rgba(139,92,246,0.10)" },
+  { label: "Completed", filter: "delivered", icon: "checkmark-done-circle-outline", color: C.success, bg: "rgba(34,197,94,0.10)" },
+  { label: "To Rate", filter: "to_rate", icon: "star-outline", color: "#F97316", bg: "rgba(249,115,22,0.10)" },
+  { label: "Refunded", filter: "refunded", icon: "receipt-outline", color: "#6B7280", bg: "rgba(107,114,128,0.10)" },
+  { label: "Cancelled", filter: "cancelled", icon: "close-circle-outline", color: C.danger, bg: "rgba(239,68,68,0.10)" },
+] as const;
+
 type Profile = {
   username: string | null;
   display_name: string | null;
@@ -282,16 +292,34 @@ export default function SettingsScreen() {
           </Pressable>
         )}
 
+        {/* ── My Orders Grid ── */}
+        <Pressable
+          style={st.ordersCard}
+          onPress={() => push({ type: "MY_ORDERS" })}
+        >
+          <View style={st.ordersHeader}>
+            <Text style={st.ordersHeaderTitle}>My Orders</Text>
+            <Feather name="chevron-right" size={18} color={C.textMuted} />
+          </View>
+          <View style={st.ordersGrid}>
+            {ORDER_SHORTCUTS.map((s) => (
+              <Pressable
+                key={s.filter}
+                style={st.ordersGridItem}
+                onPress={() => push({ type: "MY_ORDERS", filter: s.filter })}
+              >
+                <View style={[st.ordersIconWrap, { backgroundColor: s.bg }]}>
+                  <Ionicons name={s.icon as any} size={22} color={s.color} />
+                </View>
+                <Text style={st.ordersGridLabel}>{s.label}</Text>
+              </Pressable>
+            ))}
+          </View>
+        </Pressable>
+
         {/* ── Activity Section ── */}
         <Text style={st.sectionTitle}>Activity</Text>
         <View style={st.sectionCard}>
-          <SettingsRow
-            icon="receipt-outline"
-            label="My Orders"
-            value={ordersCount > 0 ? `${ordersCount}` : undefined}
-            onPress={() => push({ type: "MY_ORDERS" })}
-          />
-          <View style={st.divider} />
           <SettingsRow
             icon="pricetag-outline"
             label="My Listings"
@@ -304,6 +332,12 @@ export default function SettingsScreen() {
             label="My Bookmarks"
             value={bookmarksCount > 0 ? `${bookmarksCount}` : undefined}
             onPress={() => push({ type: "MY_BOOKMARKS" })}
+          />
+          <View style={st.divider} />
+          <SettingsRow
+            icon="hammer-outline"
+            label="My Auctions"
+            onPress={() => push({ type: "MY_AUCTIONS" })}
           />
           <View style={st.divider} />
           <SettingsRow
@@ -766,6 +800,54 @@ const st = StyleSheet.create({
     height: 1,
     backgroundColor: C.border,
     marginLeft: 56,
+  },
+
+  // My Orders grid
+  ordersCard: {
+    backgroundColor: C.surface,
+    borderRadius: S.radiusCard,
+    borderWidth: 1,
+    borderColor: C.border,
+    marginBottom: S.xl,
+    overflow: "hidden",
+  },
+  ordersHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: S.lg,
+    paddingTop: S.lg,
+    paddingBottom: S.sm,
+  },
+  ordersHeaderTitle: {
+    color: C.textPrimary,
+    fontSize: 15,
+    fontWeight: "800",
+  },
+  ordersGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    paddingHorizontal: 8,
+    paddingBottom: S.md,
+  },
+  ordersGridItem: {
+    width: "25%",
+    alignItems: "center",
+    paddingVertical: 10,
+    gap: 6,
+  },
+  ordersIconWrap: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  ordersGridLabel: {
+    color: C.textSecondary,
+    fontSize: 10,
+    fontWeight: "700",
+    textAlign: "center",
   },
 
   version: {

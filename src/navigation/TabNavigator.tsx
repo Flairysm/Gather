@@ -14,6 +14,7 @@ import LiveScreen from "../screens/LiveScreen";
 import AuctionScreen from "../screens/AuctionScreen";
 import SettingsScreen from "../screens/SettingsScreen";
 import MessagesScreen from "../screens/MessagesScreen";
+import NotificationHubScreen from "../screens/NotificationHubScreen";
 import ChatScreen from "../screens/ChatScreen";
 import ListingDetailScreen from "../screens/ListingDetailScreen";
 import WantedDetailScreen from "../screens/WantedDetailScreen";
@@ -37,6 +38,9 @@ import AddressBookScreen from "../screens/AddressBookScreen";
 import AddAddressScreen from "../screens/AddAddressScreen";
 import MyBookmarksScreen from "../screens/MyBookmarksScreen";
 import OrderReviewScreen from "../screens/OrderReviewScreen";
+import MyAuctionsScreen from "../screens/MyAuctionsScreen";
+import LiveViewerScreen from "../screens/LiveViewerScreen";
+import GoLiveScreen from "../screens/GoLiveScreen";
 import { UserContext, fetchVendorStatus, type VendorStatus } from "../data/user";
 import { FeedPrefsProvider } from "../data/feedPreferences";
 import { supabase } from "../lib/supabase";
@@ -80,6 +84,8 @@ function renderOverlay(screen: AppScreen, pop: () => void) {
   switch (screen.type) {
     case "MESSAGES":
       return <MessagesScreen onBack={pop} />;
+    case "NOTIFICATIONS_HUB":
+      return <NotificationHubScreen onBack={pop} />;
     case "CHAT":
       return (
         <ChatScreen
@@ -111,7 +117,7 @@ function renderOverlay(screen: AppScreen, pop: () => void) {
     case "MY_LISTINGS":
       return <MyListingsScreen onBack={pop} />;
     case "MY_ORDERS":
-      return <MyOrdersScreen onBack={pop} />;
+      return <MyOrdersScreen onBack={pop} initialFilter={screen.filter} />;
     case "EDIT_PROFILE":
       return <EditProfileScreen onBack={pop} />;
     case "FEED_PREFERENCES":
@@ -134,6 +140,12 @@ function renderOverlay(screen: AppScreen, pop: () => void) {
       return <MyBookmarksScreen onBack={pop} />;
     case "ORDER_REVIEW":
       return <OrderReviewScreen orderId={screen.orderId} sellerId={screen.sellerId} onBack={pop} />;
+    case "MY_AUCTIONS":
+      return <MyAuctionsScreen onBack={pop} />;
+    case "LIVE_VIEWER":
+      return <LiveViewerScreen streamId={screen.streamId} onBack={pop} />;
+    case "GO_LIVE":
+      return <GoLiveScreen onBack={pop} />;
   }
 }
 

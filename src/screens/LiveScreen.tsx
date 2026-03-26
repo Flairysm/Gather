@@ -1,248 +1,182 @@
-import { useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  Animated,
+  ActivityIndicator,
   FlatList,
   Pressable,
+  RefreshControl,
   Text,
   TextInput,
   View,
-  Dimensions,
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Feather, Ionicons } from "@expo/vector-icons";
-import { LinearGradient } from "expo-linear-gradient";
 
 import { C, S } from "../theme";
 import { live as l } from "../styles/live.styles";
-import { liveStreams, type LiveStream } from "../data/live";
+import { fetchLiveStreams, type LiveStream } from "../data/live";
+import { useAppNavigation } from "../navigation/NavigationContext";
+import CachedImage from "../components/CachedImage";
+import { useReconnect } from "../hooks/useReconnect";
 
-const { height: SCREEN_H } = Dimensions.get("window");
-const AnimatedFlatList = Animated.createAnimatedComponent(FlatList<LiveStream>);
+function formatViewers(n: number): string {
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
+  return String(n);
+}
 
-type ChatMsg = { user: string; text: string };
+function timeSince(started: string): string {
+  const mins = Math.floor((Date.now() - new Date(started).getTime()) / 60000);
+  if (mins < 1) return "Just started";
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  return `${hrs}h ${mins % 60}m`;
+}
 
-const MOCK_CHATS: ChatMsg[] = [
-  { user: "slab_hunter", text: "That centering is insane 🔥" },
-  { user: "poke_fan99", text: "PSA 10 for sure" },
-  { user: "grail_seeker", text: "What's the pop count on that?" },
-  { user: "rip_master", text: "💎💎💎" },
-];
-
-function StreamPage({
-  stream,
-  index,
-  scrollY,
-  insetTop,
-  insetBottom,
-}: {
-  stream: LiveStream;
-  index: number;
-  scrollY: Animated.Value;
-  insetTop: number;
-  insetBottom: number;
-}) {
-  const pageOffset = index * SCREEN_H;
-
-  const contentOpacity = scrollY.interpolate({
-    inputRange: [pageOffset - SCREEN_H, pageOffset, pageOffset + SCREEN_H],
-    outputRange: [0, 1, 0],
-    extrapolate: "clamp",
-  });
-
-  const contentTranslate = scrollY.interpolate({
-    inputRange: [pageOffset - SCREEN_H, pageOffset, pageOffset + SCREEN_H],
-    outputRange: [20, 0, -20],
-    extrapolate: "clamp",
-  });
-
-  const topBarTop = insetTop + 52;
-  const tagTop = topBarTop + 48;
-  const bottomBarBottom = Math.max(insetBottom, 14) + S.scrollPaddingBottom - 54;
-  const chatBottom = bottomBarBottom + 54;
+function StreamCard({ stream }: { stream: LiveStream }) {
+  const { push } = useAppNavigation();
+  const name = stream.streamer?.display_name || stream.streamer?.username || "Streamer";
 
   return (
-    <View style={[l.page, { backgroundColor: stream.bgColor }]}>
-      {/* Video placeholder */}
-      <View style={l.streamPlaceholder}>
-        <View style={l.streamPlaceholderIcon}>
-          <Feather name="play" size={32} color={C.accent} />
+    <Pressable
+      style={cardSt.card}
+      onPress={() => push({ type: "LIVE_VIEWER", streamId: stream.id })}
+    >
+      <View style={cardSt.thumbnail}>
+        {stream.thumbnail_url ? (
+          <CachedImage source={{ uri: stream.thumbnail_url }} style={cardSt.thumbImg} />
+        ) : (
+          <View style={cardSt.thumbPlaceholder}>
+            <Feather name="play" size={28} color={C.accent} />
+          </View>
+        )}
+        <View style={cardSt.overlay}>
+          <Text style={cardSt.overlayLive}>LIVE</Text>
+          <Text style={cardSt.overlayJoin}>JOIN NOW</Text>
+        </View>
+        <View style={cardSt.liveBadge}>
+          <View style={cardSt.liveDot} />
+          <Text style={cardSt.liveText}>LIVE</Text>
+        </View>
+        <View style={cardSt.viewerBadge}>
+          <Ionicons name="eye-outline" size={10} color={C.textPrimary} />
+          <Text style={cardSt.viewerText}>{formatViewers(stream.viewer_count)}</Text>
         </View>
       </View>
 
-      {/* Gradients */}
-      <LinearGradient
-        colors={["rgba(0,0,0,0.6)", "transparent"]}
-        style={l.topGradient}
-        pointerEvents="none"
-      />
-      <LinearGradient
-        colors={["transparent", "rgba(0,0,0,0.75)"]}
-        style={l.bottomGradient}
-        pointerEvents="none"
-      />
-
-      {/* ── Top: Profile pill + actions ── */}
-      <Animated.View
-        style={[
-          l.topBar,
-          { top: topBarTop, opacity: contentOpacity, transform: [{ translateY: contentTranslate }] },
-        ]}
-      >
-        <View style={l.profilePill}>
-          <View style={l.avatar}>
-            <Text style={l.avatarText}>
-              {stream.streamer.charAt(0).toUpperCase()}
-            </Text>
-          </View>
-          <View style={l.profileInfo}>
-            <Text style={l.streamerName}>@{stream.streamer}</Text>
-            <View style={l.viewerRow}>
-              <View style={l.liveDot} />
-              <Text style={l.viewerText}>{stream.viewers} watching</Text>
+      <View style={cardSt.info}>
+        <View style={cardSt.avatarWrap}>
+          {stream.streamer?.avatar_url ? (
+            <CachedImage source={{ uri: stream.streamer.avatar_url }} style={cardSt.avatar} />
+          ) : (
+            <View style={[cardSt.avatar, cardSt.avatarFallback]}>
+              <Text style={cardSt.avatarText}>{name.charAt(0).toUpperCase()}</Text>
             </View>
-          </View>
-          <Pressable style={l.followBtn}>
-            <Text style={l.followBtnText}>Follow</Text>
-          </Pressable>
+          )}
         </View>
-
-        <View style={l.topRight}>
-          <Pressable style={l.topIconBtn}>
-            <Ionicons name="people-outline" size={18} color={C.textPrimary} />
-          </Pressable>
-          <Pressable style={l.topIconBtn}>
-            <Feather name="more-horizontal" size={18} color={C.textPrimary} />
-          </Pressable>
-          <Pressable style={l.topIconBtn}>
-            <Feather name="x" size={18} color={C.textPrimary} />
-          </Pressable>
+        <View style={cardSt.meta}>
+          <Text style={cardSt.title} numberOfLines={1}>{stream.title}</Text>
+          <Text style={cardSt.sub} numberOfLines={1}>
+            {name} · {stream.category} · {timeSince(stream.started_at)}
+          </Text>
         </View>
-      </Animated.View>
+      </View>
 
-      {/* ── Tags below profile ── */}
-      <Animated.View
-        style={[
-          l.tagRow,
-          { top: tagTop, opacity: contentOpacity, transform: [{ translateY: contentTranslate }] },
-        ]}
-      >
-        <View style={l.categoryChip}>
-          <Text style={l.categoryText}>{stream.category}</Text>
+      {stream.tags.length > 0 && (
+        <View style={cardSt.tags}>
+          {stream.tags.slice(0, 3).map((t) => (
+            <View key={t} style={cardSt.tag}>
+              <Text style={cardSt.tagText}>{t}</Text>
+            </View>
+          ))}
         </View>
-        {stream.tags.map((tag) => (
-          <View key={tag} style={l.tag}>
-            <Text style={l.tagText}>{tag}</Text>
-          </View>
-        ))}
-      </Animated.View>
-
-      {/* ── Chat messages ── */}
-      <Animated.View
-        style={[
-          l.chatArea,
-          { bottom: chatBottom, opacity: contentOpacity, transform: [{ translateY: contentTranslate }] },
-        ]}
-      >
-        {MOCK_CHATS.map((msg, i) => (
-          <View key={i} style={l.chatBubble}>
-            <Text style={l.chatUser}>{msg.user}</Text>
-            <Text style={l.chatText}>{msg.text}</Text>
-          </View>
-        ))}
-      </Animated.View>
-
-      {/* ── Bottom bar: chat input + action buttons ── */}
-      <Animated.View
-        style={[
-          l.bottomBar,
-          { bottom: bottomBarBottom, opacity: contentOpacity, transform: [{ translateY: contentTranslate }] },
-        ]}
-      >
-        <Pressable style={l.chatInput}>
-          <Ionicons name="chatbubble-outline" size={16} color={C.textMuted} />
-          <Text style={l.chatInputText}>Say something...</Text>
-        </Pressable>
-        <Pressable style={l.actionBtn}>
-          <Ionicons name="heart-outline" size={20} color={C.textPrimary} />
-        </Pressable>
-        <Pressable style={l.actionBtn}>
-          <Ionicons name="share-outline" size={18} color={C.textPrimary} />
-        </Pressable>
-        <Pressable style={l.giftBtn}>
-          <Feather name="gift" size={18} color={C.live} />
-        </Pressable>
-      </Animated.View>
-    </View>
+      )}
+    </Pressable>
   );
 }
 
 export default function LiveScreen() {
   const insets = useSafeAreaInsets();
+  const { push, stack } = useAppNavigation();
+  const [streams, setStreams] = useState<LiveStream[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [search, setSearch] = useState("");
   const [searchVisible, setSearchVisible] = useState(false);
-  const scrollY = useRef(new Animated.Value(0)).current;
 
-  const onScroll = Animated.event(
-    [{ nativeEvent: { contentOffset: { y: scrollY } } }],
-    { useNativeDriver: true },
+  const load = useCallback(async () => {
+    const data = await fetchLiveStreams();
+    setStreams(data);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    load().catch(() => setLoading(false));
+  }, [load]);
+
+  useReconnect(load);
+
+  const hasOverlay = stack.some(
+    (s) => s.type === "LIVE_VIEWER" || s.type === "GO_LIVE",
   );
+  const prevOverlayRef = useRef(hasOverlay);
+  useEffect(() => {
+    if (prevOverlayRef.current && !hasOverlay) {
+      load().catch(() => {});
+    }
+    prevOverlayRef.current = hasOverlay;
+  }, [hasOverlay, load]);
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await load().catch(() => {});
+    setRefreshing(false);
+  }, [load]);
+
+  const filtered = search.trim()
+    ? streams.filter(
+        (s) =>
+          s.title.toLowerCase().includes(search.toLowerCase()) ||
+          s.category.toLowerCase().includes(search.toLowerCase()) ||
+          (s.streamer?.username ?? "").toLowerCase().includes(search.toLowerCase()),
+      )
+    : streams;
 
   return (
     <View style={l.root}>
       <StatusBar style="light" />
 
-      <AnimatedFlatList
-        data={liveStreams}
-        keyExtractor={(item) => item.id}
-        renderItem={({ item, index }) => (
-          <StreamPage
-            stream={item}
-            index={index}
-            scrollY={scrollY}
-            insetTop={insets.top}
-            insetBottom={insets.bottom}
-          />
-        )}
-        pagingEnabled
-        showsVerticalScrollIndicator={false}
-        onScroll={onScroll}
-        scrollEventThrottle={16}
-        getItemLayout={(_: any, index: number) => ({
-          length: SCREEN_H,
-          offset: SCREEN_H * index,
-          index,
-        })}
-      />
-
-      {/* Search overlay at top */}
-      <View style={[l.searchOverlay, { paddingTop: insets.top + 8 }]}>
-        <View style={l.searchRow}>
+      {/* Search / Go Live header */}
+      <View style={[headerSt.header, { paddingTop: insets.top + 8 }]}>
+        <View style={headerSt.row}>
           {searchVisible ? (
             <>
-              <View style={l.searchBar}>
+              <View style={headerSt.searchBar}>
                 <Feather name="search" size={16} color={C.textMuted} />
                 <TextInput
-                  style={l.searchInput}
+                  style={headerSt.searchInput}
                   placeholder="Search live streams"
                   placeholderTextColor={C.textMuted}
+                  value={search}
+                  onChangeText={setSearch}
                   autoFocus
                 />
               </View>
-              <Pressable onPress={() => setSearchVisible(false)}>
-                <Text style={{ color: C.textPrimary, fontSize: 14, fontWeight: "600" }}>
-                  Cancel
-                </Text>
+              <Pressable
+                onPress={() => {
+                  setSearchVisible(false);
+                  setSearch("");
+                }}
+              >
+                <Text style={headerSt.cancelText}>Cancel</Text>
               </Pressable>
             </>
           ) : (
             <>
-              <Pressable style={l.searchBar} onPress={() => setSearchVisible(true)}>
+              <Pressable style={headerSt.searchBar} onPress={() => setSearchVisible(true)}>
                 <Feather name="search" size={16} color={C.textMuted} />
-                <Text style={{ color: C.textMuted, fontSize: 14, fontWeight: "500" }}>
-                  Search live streams
-                </Text>
+                <Text style={headerSt.searchPlaceholder}>Search live streams</Text>
               </Pressable>
-              <Pressable style={l.goLiveBtn}>
+              <Pressable style={l.goLiveBtn} onPress={() => push({ type: "GO_LIVE" })}>
                 <Ionicons name="radio" size={14} color={C.textHero} />
                 <Text style={l.goLiveText}>GO LIVE</Text>
               </Pressable>
@@ -250,6 +184,187 @@ export default function LiveScreen() {
           )}
         </View>
       </View>
+
+      {loading ? (
+        <View style={emptySt.center}>
+          <ActivityIndicator color={C.accent} size="large" />
+        </View>
+      ) : filtered.length === 0 ? (
+        <View style={emptySt.center}>
+          <Ionicons name="radio-outline" size={48} color={C.textMuted} />
+          <Text style={emptySt.title}>
+            {search ? "No streams match your search" : "No one is live right now"}
+          </Text>
+          <Text style={emptySt.sub}>Be the first — tap GO LIVE above!</Text>
+        </View>
+      ) : (
+        <FlatList
+          data={filtered}
+          keyExtractor={(s) => s.id}
+          renderItem={({ item }) => <StreamCard stream={item} />}
+          contentContainerStyle={{
+            paddingTop: insets.top + 64,
+            paddingHorizontal: S.screenPadding,
+            paddingBottom: S.scrollPaddingBottom,
+            gap: 14,
+          }}
+          refreshControl={
+            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.accent} />
+          }
+          initialNumToRender={6}
+          maxToRenderPerBatch={8}
+          windowSize={5}
+          removeClippedSubviews
+        />
+      )}
     </View>
   );
 }
+
+/* ── Inline styles ── */
+import { StyleSheet } from "react-native";
+
+const headerSt = StyleSheet.create({
+  header: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 10,
+    paddingHorizontal: S.screenPadding,
+    paddingBottom: S.md,
+    backgroundColor: C.bg,
+  },
+  row: { flexDirection: "row", alignItems: "center", gap: S.md },
+  searchBar: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: C.surface,
+    borderRadius: S.radiusSmall,
+    borderWidth: 1,
+    borderColor: C.border,
+    paddingHorizontal: S.md,
+    gap: S.sm,
+    height: 40,
+  },
+  searchInput: {
+    flex: 1,
+    color: C.textPrimary,
+    fontSize: 14,
+    fontWeight: "500",
+  },
+  searchPlaceholder: { color: C.textMuted, fontSize: 14, fontWeight: "500" },
+  cancelText: { color: C.textPrimary, fontSize: 14, fontWeight: "600" },
+});
+
+const cardSt = StyleSheet.create({
+  card: {
+    backgroundColor: C.card,
+    borderRadius: S.radiusCard,
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: C.borderCard,
+  },
+  thumbnail: {
+    width: "100%",
+    aspectRatio: 16 / 9,
+    backgroundColor: C.surface,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  thumbImg: { width: "100%", height: "100%" },
+  overlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(0,0,0,0.28)",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 4,
+    zIndex: 1,
+  },
+  overlayLive: {
+    color: "#fff",
+    fontSize: 18,
+    fontWeight: "900",
+    letterSpacing: 2,
+  },
+  overlayJoin: {
+    color: "rgba(255,255,255,0.85)",
+    fontSize: 12,
+    fontWeight: "700",
+    letterSpacing: 1,
+  },
+  thumbPlaceholder: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: "rgba(44,128,255,0.12)",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  liveBadge: {
+    position: "absolute",
+    top: 10,
+    left: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: "rgba(234,61,94,0.9)",
+    borderRadius: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    zIndex: 2,
+  },
+  liveDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: "#fff" },
+  liveText: { color: "#fff", fontSize: 10, fontWeight: "800", letterSpacing: 0.5 },
+  viewerBadge: {
+    position: "absolute",
+    top: 10,
+    right: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: "rgba(0,0,0,0.6)",
+    borderRadius: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    zIndex: 2,
+  },
+  viewerText: { color: C.textPrimary, fontSize: 10, fontWeight: "700" },
+  info: {
+    flexDirection: "row",
+    alignItems: "center",
+    padding: 12,
+    gap: 10,
+  },
+  avatarWrap: {},
+  avatar: { width: 36, height: 36, borderRadius: 18 },
+  avatarFallback: {
+    backgroundColor: C.muted,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  avatarText: { color: C.textHero, fontSize: 14, fontWeight: "800" },
+  meta: { flex: 1 },
+  title: { color: C.textPrimary, fontSize: 14, fontWeight: "700" },
+  sub: { color: C.textSecondary, fontSize: 11, fontWeight: "600", marginTop: 2 },
+  tags: {
+    flexDirection: "row",
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingBottom: 12,
+  },
+  tag: {
+    backgroundColor: C.cardAlt,
+    borderRadius: S.radiusBadge,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  tagText: { color: C.textIcon, fontSize: 10, fontWeight: "700" },
+});
+
+const emptySt = StyleSheet.create({
+  center: { flex: 1, justifyContent: "center", alignItems: "center", gap: 10 },
+  title: { color: C.textPrimary, fontSize: 16, fontWeight: "700" },
+  sub: { color: C.textSecondary, fontSize: 13, fontWeight: "500" },
+});

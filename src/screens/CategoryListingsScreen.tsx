@@ -316,6 +316,10 @@ export default function CategoryListingsScreen({
           renderItem={renderItem}
           numColumns={2}
           columnWrapperStyle={st.row}
+          initialNumToRender={12}
+          maxToRenderPerBatch={8}
+          windowSize={5}
+          removeClippedSubviews
           ListHeaderComponent={ListHeader}
           ListEmptyComponent={
             <View style={st.emptyWrap}>

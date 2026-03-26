@@ -24,6 +24,7 @@ import { formatListingPrice, timeAgo, type Listing } from "../data/market";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import { useCart, parsePrice, formatPrice } from "../data/cart";
 import { supabase } from "../lib/supabase";
+import { useReconnect } from "../hooks/useReconnect";
 
 const SCREEN_H = Dimensions.get("window").height;
 const SPRING_CONFIG = { tension: 65, friction: 11, useNativeDriver: true };
@@ -46,6 +47,7 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
   const [showQtyPicker, setShowQtyPicker] = useState(false);
   const [qtyToAdd, setQtyToAdd] = useState(1);
   const [isSaved, setIsSaved] = useState(false);
+  const [togglingSave, setTogglingSave] = useState(false);
   const [heroIndex, setHeroIndex] = useState(0);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const toastAnim = useRef(new Animated.Value(0)).current;
@@ -166,6 +168,8 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
     };
   }, [loadListing]);
 
+  useReconnect(loadListing);
+
   useEffect(() => {
     setHeroIndex(0);
   }, [item?.id]);
@@ -178,10 +182,13 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
   }
 
   async function handleToggleSave() {
+    if (togglingSave) return;
+    setTogglingSave(true);
     const { data, error } = await supabase.rpc("toggle_save_item", {
       p_item_type: "listing",
       p_item_id: listingId,
     });
+    setTogglingSave(false);
     if (!error) setIsSaved((data as any).saved);
   }
 

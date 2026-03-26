@@ -185,10 +185,36 @@ export const auction = StyleSheet.create({
     ...T.badge,
     color: C.textHero,
   },
-  hotBadge: {
+  bottomLeftBadgeRow: {
     position: "absolute",
     bottom: S.sm,
     left: S.sm,
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: 6,
+    maxWidth: "88%",
+    zIndex: 2,
+  },
+  watchingTag: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: "rgba(44,128,255,0.95)",
+    borderRadius: S.radiusBadge,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.28)",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  watchingTagText: {
+    color: C.textHero,
+    fontSize: 9,
+    fontWeight: "900",
+    letterSpacing: 0.4,
+    textTransform: "uppercase",
+  },
+  hotBadge: {
     flexDirection: "row",
     alignItems: "center",
     gap: 3,
@@ -196,7 +222,6 @@ export const auction = StyleSheet.create({
     borderRadius: S.radiusBadge,
     paddingHorizontal: 6,
     paddingVertical: 2,
-    zIndex: 1,
   },
   hotText: {
     color: C.textHero,
@@ -250,6 +275,11 @@ export const auction = StyleSheet.create({
     fontSize: 13,
   },
   cardEdition: T.edition,
+  cardSubMeta: {
+    color: C.textSecondary,
+    fontSize: 11,
+    fontWeight: "700",
+  },
   bidRow: {
     flexDirection: "row",
     alignItems: "baseline",
