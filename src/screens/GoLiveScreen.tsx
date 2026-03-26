@@ -33,7 +33,6 @@ import {
   type IRtcEngineEventHandler,
 } from "react-native-agora";
 import * as ImagePicker from "expo-image-picker";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 
 import { C, S } from "../theme";
 import { supabase } from "../lib/supabase";
@@ -62,8 +61,6 @@ function formatViewers(n: number): string {
    Setup View — title, category, tags, camera preview
    ───────────────────────────────────────────── */
 
-const PRESETS_KEY = "gather:stream_presets";
-
 type StreamPreset = {
   id: string;
   name: string;
@@ -73,17 +70,66 @@ type StreamPreset = {
   thumbnailUrl: string | null;
 };
 
-async function loadPresetsLocal(): Promise<StreamPreset[]> {
-  try {
-    const raw = await AsyncStorage.getItem(PRESETS_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
+async function loadPresets(): Promise<StreamPreset[]> {
+  const { data: authData } = await supabase.auth.getUser();
+  const userId = authData.user?.id;
+  if (!userId) return [];
+
+  const { data, error } = await supabase
+    .from("stream_presets")
+    .select("id, name, title, category, tags, thumbnail_url")
+    .eq("user_id", userId)
+    .order("updated_at", { ascending: false })
+    .limit(20);
+  if (error) throw error;
+
+  return (data ?? []).map((p: any) => ({
+    id: p.id,
+    name: p.name ?? "",
+    title: p.title ?? "",
+    category: p.category ?? "General",
+    tags: Array.isArray(p.tags) ? p.tags.join(", ") : "",
+    thumbnailUrl: p.thumbnail_url ?? null,
+  }));
 }
 
-async function savePresetsLocal(presets: StreamPreset[]): Promise<void> {
-  await AsyncStorage.setItem(PRESETS_KEY, JSON.stringify(presets));
+async function savePreset(input: Omit<StreamPreset, "id">): Promise<StreamPreset> {
+  const { data: authData } = await supabase.auth.getUser();
+  const userId = authData.user?.id;
+  if (!userId) throw new Error("Not authenticated");
+
+  const payload = {
+    user_id: userId,
+    name: input.name,
+    title: input.title,
+    category: input.category,
+    tags: input.tags
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean),
+    thumbnail_url: input.thumbnailUrl,
+  };
+
+  const { data, error } = await supabase
+    .from("stream_presets")
+    .insert(payload)
+    .select("id, name, title, category, tags, thumbnail_url")
+    .single();
+  if (error) throw error;
+
+  return {
+    id: data.id,
+    name: data.name ?? "",
+    title: data.title ?? "",
+    category: data.category ?? "General",
+    tags: Array.isArray(data.tags) ? data.tags.join(", ") : "",
+    thumbnailUrl: data.thumbnail_url ?? null,
+  };
+}
+
+async function deletePresetById(id: string): Promise<void> {
+  const { error } = await supabase.from("stream_presets").delete().eq("id", id);
+  if (error) throw error;
 }
 
 async function uploadThumbnail(uri: string): Promise<string | null> {
@@ -137,7 +183,9 @@ function SetupView({
   }, []);
 
   useEffect(() => {
-    loadPresetsLocal().then(setPresets);
+    loadPresets()
+      .then(setPresets)
+      .catch(() => setPresets([]));
   }, []);
 
   const pickThumbnail = async () => {
@@ -167,20 +215,22 @@ function SetupView({
       Alert.alert("Name required", "Give your preset a name.");
       return;
     }
-    const newPreset: StreamPreset = {
-      id: Date.now().toString(),
+    const newPresetInput = {
       name,
       title: title.trim(),
       category,
       tags: tagInput,
       thumbnailUrl: thumbUrl,
     };
-    const updated = [...presets, newPreset];
-    setPresets(updated);
-    await savePresetsLocal(updated);
-    setPresetName("");
-    setShowPresetSave(false);
-    Alert.alert("Preset saved", `"${name}" has been saved.`);
+    try {
+      const created = await savePreset(newPresetInput);
+      setPresets((prev) => [created, ...prev.filter((p) => p.id !== created.id)]);
+      setPresetName("");
+      setShowPresetSave(false);
+      Alert.alert("Preset saved", `"${name}" has been saved.`);
+    } catch (e: any) {
+      Alert.alert("Save failed", e?.message ?? "Couldn't save preset.");
+    }
   };
 
   const applyPreset = (p: StreamPreset) => {
@@ -194,9 +244,12 @@ function SetupView({
   };
 
   const deletePreset = async (id: string) => {
-    const updated = presets.filter((p) => p.id !== id);
-    setPresets(updated);
-    await savePresetsLocal(updated);
+    try {
+      await deletePresetById(id);
+      setPresets((prev) => prev.filter((p) => p.id !== id));
+    } catch (e: any) {
+      Alert.alert("Delete failed", e?.message ?? "Couldn't delete preset.");
+    }
   };
 
   const handleStart = () => {
@@ -253,6 +306,18 @@ function SetupView({
         contentContainerStyle={{ paddingBottom: insets.bottom + 20 }}
         keyboardShouldPersistTaps="handled"
       >
+        <View style={st.field}>
+          <Text style={st.label}>Stream Title</Text>
+          <TextInput
+            style={st.input}
+            placeholder="What are you streaming today?"
+            placeholderTextColor={C.textMuted}
+            value={title}
+            onChangeText={setTitle}
+            maxLength={100}
+          />
+        </View>
+
         {/* Thumbnail */}
         <View style={st.field}>
           <Text style={st.label}>Stream Thumbnail</Text>
@@ -278,16 +343,57 @@ function SetupView({
           )}
         </View>
 
+        {/* Presets */}
         <View style={st.field}>
-          <Text style={st.label}>Stream Title</Text>
-          <TextInput
-            style={st.input}
-            placeholder="What are you streaming today?"
-            placeholderTextColor={C.textMuted}
-            value={title}
-            onChangeText={setTitle}
-            maxLength={100}
-          />
+          <Text style={st.label}>Preset</Text>
+          {presets.length > 0 && (
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={st.presetScroll}>
+              {presets.map((p) => (
+                <Pressable key={p.id} style={st.presetCard} onPress={() => applyPreset(p)}>
+                  {p.thumbnailUrl ? (
+                    <CachedImage source={{ uri: p.thumbnailUrl }} style={st.presetThumb} />
+                  ) : (
+                    <View style={[st.presetThumb, st.presetThumbFallback]}>
+                      <Ionicons name="radio-outline" size={16} color={C.textMuted} />
+                    </View>
+                  )}
+                  <Text style={st.presetName} numberOfLines={1}>
+                    {p.name}
+                  </Text>
+                  <Pressable
+                    style={st.presetDeleteBtn}
+                    onPress={() => deletePreset(p.id)}
+                    hitSlop={8}
+                  >
+                    <Ionicons name="trash-outline" size={12} color={C.textMuted} />
+                  </Pressable>
+                </Pressable>
+              ))}
+            </ScrollView>
+          )}
+          {!showPresetSave ? (
+            <Pressable style={st.savePresetToggle} onPress={() => setShowPresetSave(true)}>
+              <Feather name="bookmark" size={14} color={C.accent} />
+              <Text style={st.savePresetToggleText}>Save as Preset</Text>
+            </Pressable>
+          ) : (
+            <View style={st.savePresetRow}>
+              <TextInput
+                style={[st.input, { flex: 1 }]}
+                placeholder="Preset name"
+                placeholderTextColor={C.textMuted}
+                value={presetName}
+                onChangeText={setPresetName}
+                maxLength={40}
+              />
+              <Pressable style={st.savePresetBtn} onPress={handleSavePreset}>
+                <Text style={st.savePresetBtnText}>Save</Text>
+              </Pressable>
+              <Pressable onPress={() => setShowPresetSave(false)}>
+                <Ionicons name="close" size={22} color={C.textMuted} />
+              </Pressable>
+            </View>
+          )}
         </View>
 
         <View style={st.field}>
@@ -315,59 +421,6 @@ function SetupView({
             onChangeText={setTagInput}
           />
         </View>
-
-        {/* Presets */}
-        {presets.length > 0 && (
-          <View style={st.field}>
-            <Text style={st.label}>Saved Presets</Text>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={st.presetScroll}>
-              {presets.map((p) => (
-                <Pressable key={p.id} style={st.presetCard} onPress={() => applyPreset(p)}>
-                  {p.thumbnailUrl ? (
-                    <CachedImage source={{ uri: p.thumbnailUrl }} style={st.presetThumb} />
-                  ) : (
-                    <View style={[st.presetThumb, st.presetThumbFallback]}>
-                      <Ionicons name="radio-outline" size={16} color={C.textMuted} />
-                    </View>
-                  )}
-                  <Text style={st.presetName} numberOfLines={1}>{p.name}</Text>
-                  <Pressable
-                    style={st.presetDeleteBtn}
-                    onPress={() => deletePreset(p.id)}
-                    hitSlop={8}
-                  >
-                    <Ionicons name="trash-outline" size={12} color={C.textMuted} />
-                  </Pressable>
-                </Pressable>
-              ))}
-            </ScrollView>
-          </View>
-        )}
-
-        {/* Save preset toggle */}
-        {!showPresetSave ? (
-          <Pressable style={st.savePresetToggle} onPress={() => setShowPresetSave(true)}>
-            <Feather name="bookmark" size={14} color={C.accent} />
-            <Text style={st.savePresetToggleText}>Save as Preset</Text>
-          </Pressable>
-        ) : (
-          <View style={st.savePresetRow}>
-            <TextInput
-              style={[st.input, { flex: 1 }]}
-              placeholder="Preset name"
-              placeholderTextColor={C.textMuted}
-              value={presetName}
-              onChangeText={setPresetName}
-              maxLength={40}
-            />
-            <Pressable style={st.savePresetBtn} onPress={handleSavePreset}>
-              <Text style={st.savePresetBtnText}>Save</Text>
-            </Pressable>
-            <Pressable onPress={() => setShowPresetSave(false)}>
-              <Ionicons name="close" size={22} color={C.textMuted} />
-            </Pressable>
-          </View>
-        )}
 
         <Pressable
           style={[st.goLiveMainBtn, (starting || !camReady) && { opacity: 0.5 }]}
