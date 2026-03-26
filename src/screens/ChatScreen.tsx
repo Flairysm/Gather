@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Image,
@@ -22,6 +22,7 @@ import {
   sendOfferMessage,
   updateOfferStatus,
   subscribeToMessages,
+  markConversationRead,
   type Message,
   type OfferMessage,
   type OfferStatus,
@@ -48,6 +49,7 @@ type ListingContext = {
   images: string[];
   edition: string | null;
   grade: string | null;
+  quantity?: number;
 };
 
 function normalizeImages(value: unknown): string[] {
@@ -106,6 +108,7 @@ const STATUS_CONFIG: Record<
 function OfferBubble({
   msg,
   listing,
+  isBuyer,
   inCart,
   onTapItem,
   onAccept,
@@ -115,6 +118,7 @@ function OfferBubble({
 }: {
   msg: OfferMessage;
   listing: ListingContext | null;
+  isBuyer: boolean;
   inCart?: boolean;
   onTapItem?: () => void;
   onAccept?: () => void;
@@ -124,7 +128,7 @@ function OfferBubble({
 }) {
   const cfg = STATUS_CONFIG[msg.status];
   const showActions = !msg.isMe && msg.status === "pending";
-  const showAddToCart = msg.status === "accepted" && msg.isMe && !!onAddToCart;
+  const showAddToCart = msg.status === "accepted" && isBuyer && !!onAddToCart;
   const imageUrl = listing?.images?.[0];
 
   return (
@@ -239,7 +243,8 @@ export default function ChatScreen({
   const [convTopic, setConvTopic] = useState<string | null>(topic ?? null);
   const [loading, setLoading] = useState(true);
   const [draft, setDraft] = useState("");
-  const [showOfferInput, setShowOfferInput] = useState(openOffer ?? false);
+  const [showOfferInput, setShowOfferInput] = useState(false);
+  const openOfferRequested = useRef(openOffer ?? false);
   const [offerAmount, setOfferAmount] = useState("");
   const [counteringInfo, setCounteringInfo] = useState<{
     msgId: string;
@@ -249,6 +254,15 @@ export default function ChatScreen({
   const scrollRef = useRef<ScrollView>(null);
 
   const isListingSeller = !!(myId && listing?.seller_id && myId === listing.seller_id);
+
+  const hasPendingOffer = useMemo(() => {
+    return messages.some(
+      (m) => m.kind === "offer" && (m as OfferMessage).status === "pending",
+    );
+  }, [messages]);
+
+  const listingSoldOut = listing ? (listing.quantity ?? 1) <= 0 : false;
+  const canMakeOffer = !isListingSeller && !hasPendingOffer && !listingSoldOut;
 
   function scrollDown() {
     setTimeout(
@@ -304,7 +318,7 @@ export default function ChatScreen({
         setResolvedListingId(lid);
         const { data: listingData } = await supabase
           .from("listings")
-          .select("id, seller_id, card_name, price, images, edition, grade")
+          .select("id, seller_id, card_name, price, images, edition, grade, quantity")
           .eq("id", lid)
           .maybeSingle();
         if (listingData) {
@@ -317,7 +331,7 @@ export default function ChatScreen({
         // Fallback for older conversations that were created without listing_id.
         const { data: fallbackListing } = await supabase
           .from("listings")
-          .select("id, seller_id, card_name, price, images, edition, grade")
+          .select("id, seller_id, card_name, price, images, edition, grade, quantity")
           .eq("card_name", convData.topic)
           .order("created_at", { ascending: false })
           .limit(1)
@@ -350,6 +364,7 @@ export default function ChatScreen({
 
     const msgs = await loadMessages(resolvedConvId, user.id);
     setMessages(msgs);
+    await markConversationRead(resolvedConvId, user.id).catch(() => {});
     setLoading(false);
     scrollDown();
   }, [initialConvId, sellerId, listingIdProp, topic]);
@@ -357,6 +372,15 @@ export default function ChatScreen({
   useEffect(() => {
     initChat().catch(() => setLoading(false));
   }, [initChat]);
+
+  useEffect(() => {
+    if (!loading && openOfferRequested.current && canMakeOffer) {
+      openOfferRequested.current = false;
+      setShowOfferInput(true);
+    } else if (!loading && openOfferRequested.current && !canMakeOffer) {
+      openOfferRequested.current = false;
+    }
+  }, [loading, canMakeOffer]);
 
   useEffect(() => {
     if (!convId || !myId) return;
@@ -370,6 +394,9 @@ export default function ChatScreen({
           return [...prev, newMsg];
         });
         scrollDown();
+        if (!newMsg.isMe) {
+          markConversationRead(convId, myId).catch(() => {});
+        }
       },
       (updatedMsg) => {
         setMessages((prev) =>
@@ -399,6 +426,7 @@ export default function ChatScreen({
   }
 
   async function handleSendOffer() {
+    if (hasPendingOffer && !counteringInfo) return;
     const raw = offerAmount.trim().replace(/(RM|\$|,)/gi, "");
     const amount = parseFloat(raw);
     if (!amount || !convId || !myId || sending) return;
@@ -602,6 +630,7 @@ export default function ChatScreen({
                   <OfferBubble
                     msg={msg}
                     listing={listing}
+                    isBuyer={!isListingSeller}
                     inCart={listing ? isInCart(listing.id) : false}
                     onTapItem={
                       resolvedListingId ? navigateToListing : undefined
@@ -650,7 +679,7 @@ export default function ChatScreen({
         </ScrollView>
 
         {/* Offer input panel */}
-        {showOfferInput && (
+        {showOfferInput && (canMakeOffer || counteringInfo) && (
           <View style={st.offerPanel}>
             {/* Item context in offer panel */}
             {listing && (
@@ -742,17 +771,29 @@ export default function ChatScreen({
           </View>
         )}
 
+        {/* Pending offer notice */}
+        {!isListingSeller && hasPendingOffer && (
+          <View style={st.pendingOfferBanner}>
+            <Ionicons name="time" size={14} color="#F59E0B" />
+            <Text style={st.pendingOfferText}>
+              You have a pending offer. Wait for the seller to respond before sending another.
+            </Text>
+          </View>
+        )}
+
         {/* Input bar */}
         <View style={st.inputBar}>
           {!isListingSeller && (
             <Pressable
-              style={st.offerToggle}
+              style={[st.offerToggle, !canMakeOffer && { opacity: 0.35 }]}
               onPress={() => {
+                if (!canMakeOffer) return;
                 setCounteringInfo(null);
                 setShowOfferInput((prev) => !prev);
               }}
+              disabled={!canMakeOffer}
             >
-              <Ionicons name="pricetag" size={18} color={C.textAccent} />
+              <Ionicons name="pricetag" size={18} color={canMakeOffer ? C.textAccent : C.textMuted} />
             </Pressable>
           )}
           <View style={st.inputWrap}>
@@ -1251,6 +1292,23 @@ const st = StyleSheet.create({
     borderTopColor: C.border,
     gap: 8,
     backgroundColor: C.bg,
+  },
+  pendingOfferBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: S.screenPadding,
+    paddingVertical: 8,
+    backgroundColor: "rgba(245,158,11,0.08)",
+    borderTopWidth: 1,
+    borderTopColor: "rgba(245,158,11,0.2)",
+  },
+  pendingOfferText: {
+    flex: 1,
+    color: "#F59E0B",
+    fontSize: 11,
+    fontWeight: "600",
+    lineHeight: 15,
   },
   offerToggle: {
     width: 38,

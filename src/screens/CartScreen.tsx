@@ -1,4 +1,4 @@
-import { Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Image, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { Feather, Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -16,6 +16,7 @@ export default function CartScreen({ onBack }: Props) {
   const { push } = useAppNavigation();
   const insets = useSafeAreaInsets();
   const [vendorStoreNames, setVendorStoreNames] = useState<Record<string, string>>({});
+  const [vendorStoreLogos, setVendorStoreLogos] = useState<Record<string, string>>({});
 
   useEffect(() => {
     let mounted = true;
@@ -29,18 +30,22 @@ export default function CartScreen({ onBack }: Props) {
       }
       const { data } = await supabase
         .from("vendor_stores")
-        .select("profile_id, store_name")
+        .select("profile_id, store_name, logo_url")
         .in("profile_id", sellerIds)
         .eq("is_active", true);
       if (!mounted) return;
       if (data) {
         const map: Record<string, string> = {};
+        const logoMap: Record<string, string> = {};
         for (const s of data as any[]) {
           if (s.profile_id && s.store_name) map[s.profile_id] = s.store_name;
+          if (s.profile_id && s.logo_url) logoMap[s.profile_id] = s.logo_url;
         }
         setVendorStoreNames(map);
+        setVendorStoreLogos(logoMap);
       } else {
         setVendorStoreNames({});
+        setVendorStoreLogos({});
       }
     })().catch(() => {});
 
@@ -81,7 +86,13 @@ export default function CartScreen({ onBack }: Props) {
           >
             {items.map((ci) => (
               <View key={ci.listing.id} style={st.card}>
-                <View style={st.cardArt} />
+                <View style={st.cardArt}>
+                  {ci.listing.images?.[0] ? (
+                    <Image source={{ uri: ci.listing.images[0] }} style={st.cardArtImg} />
+                  ) : (
+                    <Ionicons name="image-outline" size={20} color={C.textMuted} />
+                  )}
+                </View>
                 <View style={st.cardInfo}>
                   <Text style={st.cardName} numberOfLines={1}>
                     {ci.listing.card_name}
@@ -89,7 +100,21 @@ export default function CartScreen({ onBack }: Props) {
                   <Text style={st.cardEdition}>{ci.listing.edition ?? "—"}</Text>
                   <Text style={st.cardGrade}>{ci.listing.grade ?? "Ungraded"}</Text>
                   <View style={st.sellerRow}>
-                    <View style={st.sellerDot} />
+                    <View style={st.sellerDot}>
+                      {vendorStoreLogos[ci.listing.seller_id] ? (
+                        <Image
+                          source={{ uri: vendorStoreLogos[ci.listing.seller_id] }}
+                          style={st.sellerDotImg}
+                        />
+                      ) : ci.listing.seller?.avatar_url ? (
+                        <Image
+                          source={{ uri: ci.listing.seller.avatar_url }}
+                          style={st.sellerDotImg}
+                        />
+                      ) : (
+                        <Ionicons name="person" size={8} color={C.textMuted} />
+                      )}
+                    </View>
                     <Text style={st.sellerName} numberOfLines={1}>
                       {vendorStoreNames[ci.listing.seller_id] ??
                         ci.listing.seller?.display_name ??
@@ -193,14 +218,29 @@ const st = StyleSheet.create({
   cardArt: {
     width: 64, height: 80, borderRadius: S.radiusSmall,
     backgroundColor: C.cardAlt, borderWidth: 1, borderColor: C.borderCard,
+    overflow: "hidden",
+    alignItems: "center",
+    justifyContent: "center",
   },
+  cardArtImg: { width: "100%", height: "100%" },
   cardInfo: { flex: 1, gap: 2 },
   cardName: { color: C.textPrimary, fontSize: 14, fontWeight: "800" },
   cardEdition: { color: C.textSecondary, fontSize: 10, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.5 },
   cardGrade: { color: C.textAccent, fontSize: 11, fontWeight: "700" },
   stockHint: { color: C.textSecondary, fontSize: 10, fontWeight: "600" },
   sellerRow: { flexDirection: "row", alignItems: "center", gap: 4, marginTop: 2 },
-  sellerDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: C.muted, borderWidth: 1, borderColor: C.borderAvatar },
+  sellerDot: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: C.muted,
+    borderWidth: 1,
+    borderColor: C.borderAvatar,
+    overflow: "hidden",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  sellerDotImg: { width: "100%", height: "100%" },
   sellerName: { color: C.textMuted, fontSize: 10, fontWeight: "600" },
 
   cardRight: { alignItems: "flex-end", gap: 6 },

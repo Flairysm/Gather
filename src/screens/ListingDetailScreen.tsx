@@ -673,7 +673,7 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
               </Text>
             </Pressable>
             <Pressable
-              style={ld.makeOfferBtn}
+              style={[ld.makeOfferBtn, item.quantity <= 0 && { opacity: 0.45 }]}
               onPress={() =>
                 push({
                   type: "CHAT",
@@ -683,6 +683,7 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
                   openOffer: true,
                 })
               }
+              disabled={item.quantity <= 0}
             >
               <Ionicons name="pricetag" size={18} color={C.textHero} />
               <Text style={ld.makeOfferText}>Make Offer</Text>

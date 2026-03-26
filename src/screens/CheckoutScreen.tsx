@@ -44,6 +44,7 @@ export default function CheckoutScreen({ onBack }: Props) {
       const payload = items.map((ci) => ({
         listing_id: ci.listing.id,
         quantity: ci.quantity,
+        unit_price: parsePrice(ci.listing.price),
       }));
 
       const { data, error } = await supabase.rpc("checkout_order", {

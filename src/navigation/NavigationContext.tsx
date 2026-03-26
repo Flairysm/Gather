@@ -37,7 +37,8 @@ export type AppScreen =
   | { type: "ORDER_REVIEW"; orderId: string; sellerId: string }
   | { type: "MY_AUCTIONS" }
   | { type: "LIVE_VIEWER"; streamId: string }
-  | { type: "GO_LIVE" };
+  | { type: "GO_LIVE" }
+  | { type: "AUCTION_CHECKOUT"; winId: string };
 
 type StackItem = { id: number; screen: AppScreen };
 

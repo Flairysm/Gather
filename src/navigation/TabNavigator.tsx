@@ -41,6 +41,7 @@ import OrderReviewScreen from "../screens/OrderReviewScreen";
 import MyAuctionsScreen from "../screens/MyAuctionsScreen";
 import LiveViewerScreen from "../screens/LiveViewerScreen";
 import GoLiveScreen from "../screens/GoLiveScreen";
+import AuctionCheckoutScreen from "../screens/AuctionCheckoutScreen";
 import { UserContext, fetchVendorStatus, type VendorStatus } from "../data/user";
 import { FeedPrefsProvider } from "../data/feedPreferences";
 import { supabase } from "../lib/supabase";
@@ -146,6 +147,8 @@ function renderOverlay(screen: AppScreen, pop: () => void) {
       return <LiveViewerScreen streamId={screen.streamId} onBack={pop} />;
     case "GO_LIVE":
       return <GoLiveScreen onBack={pop} />;
+    case "AUCTION_CHECKOUT":
+      return <AuctionCheckoutScreen winId={screen.winId} onBack={pop} />;
   }
 }
 

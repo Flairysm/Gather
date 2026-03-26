@@ -18,7 +18,6 @@ import TruncationNotice from "../components/TruncationNotice";
 import { C, S } from "../theme";
 import { supabase } from "../lib/supabase";
 import { useReconnect } from "../hooks/useReconnect";
-import { requireNetwork } from "../lib/network";
 import { useAppNavigation } from "../navigation/NavigationContext";
 
 type TabId = "won" | "active" | "lost" | "history" | "watching";
@@ -140,7 +139,7 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
   const [tab, setTab] = useState<TabId>("won");
   const [userId, setUserId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [paying, setPaying] = useState<string | null>(null);
+  
 
   const [wins, setWins] = useState<WinRow[]>([]);
   const [allBids, setAllBids] = useState<BidRow[]>([]);
@@ -285,18 +284,8 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
       });
   }, [watched]);
 
-  async function handlePayNow(win: WinRow) {
-    if (paying) return;
-    if (!(await requireNetwork())) return;
-    setPaying(win.id);
-    const { error } = await supabase.rpc("pay_auction_win", { p_win_id: win.id });
-    setPaying(null);
-    if (error) {
-      Alert.alert("Payment Failed", error.message);
-      return;
-    }
-    Alert.alert("Payment Confirmed", "Your payment has been recorded. The seller will ship your item shortly.");
-    load();
+  function handlePayNow(win: WinRow) {
+    push({ type: "AUCTION_CHECKOUT", winId: win.id });
   }
 
   function auctionThumb(auction: AuctionInfo | null): string | null {
@@ -398,13 +387,8 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
                     <Pressable
                       style={st.payNowBtn}
                       onPress={() => handlePayNow(win)}
-                      disabled={paying === win.id}
                     >
-                      {paying === win.id ? (
-                        <ActivityIndicator size="small" color={C.textHero} />
-                      ) : (
-                        <Text style={st.payNowText}>Pay Now</Text>
-                      )}
+                      <Text style={st.payNowText}>Pay Now</Text>
                     </Pressable>
                   )}
                 </View>

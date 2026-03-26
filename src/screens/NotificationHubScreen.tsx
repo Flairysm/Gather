@@ -51,6 +51,11 @@ export default function NotificationHubScreen({ onBack }: Props) {
       return;
     }
 
+    await supabase
+      .from("profiles")
+      .update({ notifications_last_seen_at: new Date().toISOString() })
+      .eq("id", user.id);
+
     const [winsRes, bidsRes, ordersRes] = await Promise.all([
       supabase
         .from("auction_wins")

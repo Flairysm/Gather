@@ -159,7 +159,7 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
     phoneVerified: false, hasAddress: false, isBanned: false, banReason: null, loaded: false,
   });
   const [winRecord, setWinRecord] = useState<WinRecord | null>(null);
-  const [paying, setPaying] = useState(false);
+  
   const [realtimeOk, setRealtimeOk] = useState(true);
 
   const sheetAnim = useRef(new Animated.Value(0)).current;
@@ -512,24 +512,9 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
     setShowImageViewer(true);
   }
 
-  async function handlePayNow() {
-    if (!winRecord || paying) return;
-    if (!(await requireNetwork())) return;
-    setPaying(true);
-    const { error } = await supabase.rpc("pay_auction_win", { p_win_id: winRecord.id });
-    setPaying(false);
-    if (error) {
-      Alert.alert("Payment Failed", error.message);
-      return;
-    }
-    Alert.alert(
-      "Payment Confirmed",
-      "Your payment has been recorded. The seller will ship your item shortly.",
-      [
-        { text: "Stay Here", style: "cancel", onPress: () => loadWinRecord() },
-        { text: "My Auctions", onPress: () => { loadWinRecord(); push({ type: "MY_AUCTIONS" }); } },
-      ],
-    );
+  function handlePayNow() {
+    if (!winRecord) return;
+    push({ type: "AUCTION_CHECKOUT", winId: winRecord.id });
   }
 
   async function handleToggleWatch() {
@@ -939,15 +924,9 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
                 month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit",
               })} or your account will be banned from transactions.
             </Text>
-            <Pressable style={st.payNowBtn} onPress={handlePayNow} disabled={paying}>
-              {paying ? (
-                <ActivityIndicator size="small" color={C.textHero} />
-              ) : (
-                <>
-                  <Ionicons name="card" size={16} color={C.textHero} />
-                  <Text style={st.payNowText}>Pay Now</Text>
-                </>
-              )}
+            <Pressable style={st.payNowBtn} onPress={handlePayNow}>
+              <Ionicons name="card" size={16} color={C.textHero} />
+              <Text style={st.payNowText}>Pay Now</Text>
             </Pressable>
           </View>
         )}

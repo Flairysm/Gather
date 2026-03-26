@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   Image,
   Pressable,
@@ -43,6 +44,12 @@ type OrderItemRow = {
     rating: number | null;
     review_count: number;
   } | null;
+  source?: "market" | "auction";
+  winId?: string;
+  tracking_number?: string | null;
+  delivered_at?: string | null;
+  received_at?: string | null;
+  dispute_deadline?: string | null;
 };
 
 type GroupedOrder = {
@@ -74,28 +81,28 @@ const STATUS_CONFIG: Record<
   { label: string; icon: string; color: string; bg: string; border: string }
 > = {
   pending: {
-    label: "Pending",
+    label: "To Pay",
     icon: "time-outline",
     color: "#F59E0B",
     bg: "rgba(245,158,11,0.08)",
     border: "rgba(245,158,11,0.25)",
   },
   confirmed: {
-    label: "Confirmed",
-    icon: "checkmark-circle-outline",
+    label: "To Ship",
+    icon: "cube-outline",
     color: C.accent,
     bg: "rgba(44,128,255,0.08)",
     border: "rgba(44,128,255,0.25)",
   },
   shipped: {
-    label: "Shipped",
+    label: "Shipping",
     icon: "airplane-outline",
     color: "#8B5CF6",
     bg: "rgba(139,92,246,0.08)",
     border: "rgba(139,92,246,0.25)",
   },
   delivered: {
-    label: "Delivered",
+    label: "Completed",
     icon: "checkmark-done-circle-outline",
     color: C.success,
     bg: "rgba(34,197,94,0.08)",
@@ -170,6 +177,9 @@ export default function MyOrdersScreen({
     validFilters.includes(initialFilter as FilterId) ? (initialFilter as FilterId) : "all",
   );
   const [userId, setUserId] = useState<string | null>(null);
+  const [vendorStoreLogos, setVendorStoreLogos] = useState<Record<string, string>>(
+    {},
+  );
 
   const loadOrders = useCallback(async () => {
     try {
@@ -181,6 +191,7 @@ export default function MyOrdersScreen({
 
       const SELECT = `
         id, order_id, listing_id, seller_id, quantity, unit_price, fulfillment_status, created_at,
+        tracking_number, delivered_at, received_at, dispute_deadline,
         listing:listings(id, card_name, edition, grade, images),
         seller:profiles!seller_id(username, display_name, avatar_url, rating, review_count)
       `;
@@ -216,19 +227,196 @@ export default function MyOrdersScreen({
         rows = fallbackData ?? [];
       }
 
+      // Shopee model: checkout = paid → market orders are at minimum "To Ship".
+      // If the DB still has fulfillment_status='pending' it means payment went
+      // through but seller hasn't acted yet, so bump to 'confirmed' (To Ship).
       const mapped: OrderItemRow[] = rows.map((row: any) => ({
         ...row,
+        fulfillment_status:
+          row.fulfillment_status === "pending" ? "confirmed" : row.fulfillment_status,
         listing: Array.isArray(row.listing) ? row.listing[0] : row.listing,
         seller: Array.isArray(row.seller) ? row.seller[0] : row.seller,
+        source: "market",
       }));
       for (const m of mapped) {
         if (m.listing)
           (m.listing as any).images = normalizeImages(m.listing.images);
       }
-      setRawItems(mapped);
+
+      // Some rows can come back without nested listing due relation/RLS mismatch.
+      // Hydrate those missing listing payloads directly by listing_id.
+      const missingMarketListingIds = [
+        ...new Set(
+          mapped
+            .filter((m) => !m.listing && !!m.listing_id)
+            .map((m) => m.listing_id),
+        ),
+      ];
+      const marketListingMap = new Map<string, any>();
+      if (missingMarketListingIds.length > 0) {
+        const { data: listingRows } = await supabase
+          .from("listings")
+          .select("id, card_name, edition, grade, images")
+          .in("id", missingMarketListingIds);
+        for (const l of listingRows ?? []) {
+          marketListingMap.set((l as any).id, {
+            id: (l as any).id,
+            card_name: (l as any).card_name,
+            edition: (l as any).edition ?? null,
+            grade: (l as any).grade ?? null,
+            images: normalizeImages((l as any).images),
+          });
+        }
+      }
+      const hydratedMapped: OrderItemRow[] = mapped.map((m) =>
+        !m.listing && m.listing_id && marketListingMap.has(m.listing_id)
+          ? { ...m, listing: marketListingMap.get(m.listing_id) }
+          : m,
+      );
+
+      // Unpaid auction wins show as "To Pay" virtual rows.
+      // Paid auction wins now create real order_items via the RPC, so they
+      // appear alongside market orders above — no synthetic rows needed.
+      const { data: wins } = await supabase
+        .from("auction_wins")
+        .select(`
+          id, auction_id, seller_id, winning_bid, payment_status, created_at,
+          auction:auction_items!auction_id(id, card_name, edition, grade, condition, images),
+          seller:profiles!seller_id(username, display_name, avatar_url, rating, review_count)
+        `)
+        .eq("winner_id", user.id)
+        .eq("payment_status", "pending")
+        .order("created_at", { ascending: false })
+        .limit(100);
+
+      const auctionRows: OrderItemRow[] = (wins ?? []).map((w: any) => {
+        const auction = Array.isArray(w.auction) ? w.auction[0] : w.auction;
+        const seller = Array.isArray(w.seller) ? w.seller[0] : w.seller;
+        return {
+          id: `auction-${w.id}`,
+          order_id: `auction-${w.id}`,
+          listing_id: auction?.id ?? "",
+          seller_id: w.seller_id,
+          quantity: 1,
+          unit_price: Number(w.winning_bid),
+          fulfillment_status: "pending" as FulfillmentStatus,
+          created_at: w.created_at,
+          listing: auction
+            ? {
+                id: auction.id,
+                card_name: auction.card_name,
+                edition: auction.edition,
+                grade: auction.grade ?? auction.condition ?? null,
+                images: normalizeImages(auction.images),
+              }
+            : null,
+          seller: seller ?? null,
+          source: "auction",
+          winId: w.id,
+        };
+      });
+
+      // Hydrate missing auction listing data for unpaid wins
+      const missingAuctionIds = [
+        ...new Set(
+          (wins ?? [])
+            .filter((w: any) => {
+              const auction = Array.isArray((w as any).auction)
+                ? (w as any).auction[0]
+                : (w as any).auction;
+              return !auction && !!(w as any).auction_id;
+            })
+            .map((w: any) => (w as any).auction_id),
+        ),
+      ];
+      const auctionMap = new Map<string, any>();
+      if (missingAuctionIds.length > 0) {
+        const { data: auctionItems } = await supabase
+          .from("auction_items")
+          .select("id, card_name, edition, grade, condition, images")
+          .in("id", missingAuctionIds);
+        for (const a of auctionItems ?? []) {
+          auctionMap.set((a as any).id, {
+            id: (a as any).id,
+            card_name: (a as any).card_name,
+            edition: (a as any).edition ?? null,
+            grade: (a as any).grade ?? (a as any).condition ?? null,
+            images: normalizeImages((a as any).images),
+          });
+        }
+      }
+      const hydratedAuctionRows = auctionRows.map((r, idx) => {
+        if (r.listing) return r;
+        const w = (wins ?? [])[idx] as any;
+        const fallbackId = w?.auction_id;
+        if (fallbackId && auctionMap.has(fallbackId)) {
+          return { ...r, listing_id: fallbackId, listing: auctionMap.get(fallbackId) };
+        }
+        return r;
+      });
+
+      // For real order_items that reference auction_items (listing_id points to
+      // auction_items.id), hydrate listing data from auction_items table.
+      const missingListingIds = [
+        ...new Set(
+          hydratedMapped
+            .filter((m) => !m.listing && !!m.listing_id)
+            .map((m) => m.listing_id),
+        ),
+      ];
+      if (missingListingIds.length > 0) {
+        const { data: aiRows } = await supabase
+          .from("auction_items")
+          .select("id, card_name, edition, grade, condition, images")
+          .in("id", missingListingIds);
+        for (const a of aiRows ?? []) {
+          if (!marketListingMap.has((a as any).id)) {
+            marketListingMap.set((a as any).id, {
+              id: (a as any).id,
+              card_name: (a as any).card_name,
+              edition: (a as any).edition ?? null,
+              grade: (a as any).grade ?? (a as any).condition ?? null,
+              images: normalizeImages((a as any).images),
+            });
+          }
+        }
+      }
+      const finalMapped: OrderItemRow[] = hydratedMapped.map((m) =>
+        !m.listing && m.listing_id && marketListingMap.has(m.listing_id)
+          ? { ...m, listing: marketListingMap.get(m.listing_id) }
+          : m,
+      );
+
+      setRawItems([...finalMapped, ...hydratedAuctionRows].sort(
+        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+      ));
+
+      const sellerIds = [
+        ...new Set(
+          [...finalMapped, ...auctionRows]
+            .map((r) => r.seller_id)
+            .filter((id): id is string => !!id),
+        ),
+      ];
+      if (sellerIds.length > 0) {
+        const { data: stores } = await supabase
+          .from("vendor_stores")
+          .select("profile_id, logo_url")
+          .in("profile_id", sellerIds)
+          .eq("is_active", true);
+        const logoMap: Record<string, string> = {};
+        for (const s of stores ?? []) {
+          if ((s as any).profile_id && (s as any).logo_url) {
+            logoMap[(s as any).profile_id] = (s as any).logo_url;
+          }
+        }
+        setVendorStoreLogos(logoMap);
+      } else {
+        setVendorStoreLogos({});
+      }
 
       // Bulk-load reviews for these orders
-      const uniqueOrderIds = [...new Set(mapped.map((m) => m.order_id))];
+      const uniqueOrderIds = [...new Set(mapped.map((m) => m.order_id).filter((id) => !id.startsWith("auction-")))];
       if (uniqueOrderIds.length > 0) {
         const { data: reviews } = await supabase
           .from("reviews")
@@ -331,6 +519,38 @@ export default function MyOrdersScreen({
     push({ type: "ORDER_REVIEW", orderId, sellerId });
   }
 
+  async function handleOrderReceived(orderItemId: string) {
+    const now = new Date();
+    const disputeDeadline = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000);
+    try {
+      const { error } = await supabase
+        .from("order_items")
+        .update({
+          fulfillment_status: "delivered",
+          delivered_at: now.toISOString(),
+          received_at: now.toISOString(),
+          dispute_deadline: disputeDeadline.toISOString(),
+        })
+        .eq("id", orderItemId);
+      if (error) throw error;
+      setRawItems((prev) =>
+        prev.map((item) =>
+          item.id === orderItemId
+            ? {
+                ...item,
+                fulfillment_status: "delivered" as FulfillmentStatus,
+                delivered_at: now.toISOString(),
+                received_at: now.toISOString(),
+                dispute_deadline: disputeDeadline.toISOString(),
+              }
+            : item,
+        ),
+      );
+    } catch {
+      Alert.alert("Error", "Failed to confirm receipt. Please try again.");
+    }
+  }
+
   return (
     <SafeAreaView style={st.safe}>
       <StatusBar style="light" />
@@ -402,12 +622,26 @@ export default function MyOrdersScreen({
               renderItem={({ item: order }) => (
                 <OrderCard
                   order={order}
+                  vendorLogoUrl={vendorStoreLogos[order.sellerId] ?? null}
                   onViewItem={(listingId) =>
                     push({ type: "LISTING_DETAIL", listingId })
                   }
                   onReview={() =>
                     handleReview(order.orderId, order.sellerId)
                   }
+                  onPayNow={(winId) =>
+                    push({ type: "AUCTION_CHECKOUT", winId })
+                  }
+                  onReceived={(itemId) => {
+                    Alert.alert(
+                      "Confirm Receipt",
+                      "By confirming, you acknowledge you've received the item. You'll have 3 days to file a dispute if there's an issue.",
+                      [
+                        { text: "Not Yet", style: "cancel" },
+                        { text: "I've Received It", onPress: () => handleOrderReceived(itemId) },
+                      ],
+                    );
+                  }}
                 />
               )}
               ListFooterComponent={<TruncationNotice count={rawItems.length} limit={500} label="order items" />}
@@ -421,18 +655,36 @@ export default function MyOrdersScreen({
 
 function OrderCard({
   order,
+  vendorLogoUrl,
   onViewItem,
   onReview,
+  onPayNow,
+  onReceived,
 }: {
   order: GroupedOrder;
+  vendorLogoUrl: string | null;
   onViewItem: (listingId: string) => void;
   onReview: () => void;
+  onPayNow?: (winId: string) => void;
+  onReceived?: (itemId: string) => void;
 }) {
   const cfg = STATUS_CONFIG[order.status];
   const sellerName =
     order.seller?.display_name ?? order.seller?.username ?? "Seller";
   const sellerInitial = sellerName.charAt(0).toUpperCase();
   const isDelivered = order.status === "delivered";
+  const isShipped = order.status === "shipped";
+  const isPendingAuction =
+    order.status === "pending" &&
+    order.items.some((i) => i.source === "auction");
+
+  const trackingNumber = order.items.find((i) => i.tracking_number)?.tracking_number;
+  const disputeDeadline = order.items.find((i) => i.dispute_deadline)?.dispute_deadline;
+  const disputeRemaining = disputeDeadline
+    ? Math.max(0, new Date(disputeDeadline).getTime() - Date.now())
+    : 0;
+  const disputeDays = Math.ceil(disputeRemaining / (24 * 60 * 60 * 1000));
+  const canRate = isDelivered;
 
   return (
     <View style={st.card}>
@@ -440,7 +692,9 @@ function OrderCard({
       <View style={st.cardHeader}>
         <View style={st.sellerRow}>
           <View style={st.sellerAvatar}>
-            {order.seller?.avatar_url ? (
+            {vendorLogoUrl ? (
+              <Image source={{ uri: vendorLogoUrl }} style={st.sellerAvatarImg} />
+            ) : order.seller?.avatar_url ? (
               <Image
                 source={{ uri: order.seller.avatar_url }}
                 style={st.sellerAvatarImg}
@@ -524,8 +778,55 @@ function OrderCard({
         <Text style={st.footerTotal}>{formatPrice(order.total)}</Text>
       </View>
 
+      {/* Tracking number */}
+      {trackingNumber && (isShipped || isDelivered) && (
+        <View style={st.trackingRow}>
+          <Ionicons name="locate-outline" size={14} color={C.textAccent} />
+          <Text style={st.trackingLabel}>Tracking:</Text>
+          <Text style={st.trackingNumber}>{trackingNumber}</Text>
+        </View>
+      )}
+
+      {/* Pay Now for pending auction wins */}
+      {isPendingAuction && onPayNow && (
+        <Pressable
+          style={st.payNowBtn}
+          onPress={() => {
+            const auctionItem = order.items.find((i) => i.source === "auction" && i.winId);
+            if (auctionItem?.winId) onPayNow(auctionItem.winId);
+          }}
+        >
+          <Ionicons name="card" size={16} color={C.textHero} />
+          <Text style={st.payNowText}>Pay Now</Text>
+        </Pressable>
+      )}
+
+      {/* Order Received button for shipped items */}
+      {isShipped && onReceived && (
+        <Pressable
+          style={st.receivedBtn}
+          onPress={() => {
+            const marketItem = order.items.find((i) => i.source !== "auction");
+            if (marketItem) onReceived(marketItem.id);
+          }}
+        >
+          <Ionicons name="checkmark-circle" size={16} color={C.textHero} />
+          <Text style={st.receivedBtnText}>Order Received</Text>
+        </Pressable>
+      )}
+
+      {/* Dispute window for delivered orders */}
+      {isDelivered && disputeRemaining > 0 && (
+        <View style={st.disputeRow}>
+          <Ionicons name="shield-checkmark" size={14} color={C.success} />
+          <Text style={st.disputeText}>
+            Buyer protection: {disputeDays} day{disputeDays !== 1 ? "s" : ""} left to file a dispute
+          </Text>
+        </View>
+      )}
+
       {/* Review action for delivered orders */}
-      {isDelivered && (
+      {canRate && (
         <Pressable style={st.reviewBtn} onPress={onReview}>
           {order.hasReview ? (
             <>
@@ -718,6 +1019,78 @@ const st = StyleSheet.create({
   footerLabel: { color: C.textSecondary, fontSize: 11, fontWeight: "700" },
   footerTime: { color: C.textMuted, fontSize: 10, fontWeight: "500" },
   footerTotal: { color: C.textPrimary, fontSize: 16, fontWeight: "900" },
+
+  // ── Tracking row ──
+  trackingRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: S.lg,
+    paddingVertical: 8,
+    borderTopWidth: 1,
+    borderTopColor: C.border,
+    backgroundColor: "rgba(44,128,255,0.04)",
+  },
+  trackingLabel: { color: C.textSecondary, fontSize: 11, fontWeight: "600" },
+  trackingNumber: {
+    color: C.textAccent,
+    fontSize: 11,
+    fontWeight: "800",
+    letterSpacing: 0.5,
+  },
+
+  // ── Order Received button ──
+  receivedBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    paddingVertical: 12,
+    borderTopWidth: 1,
+    borderTopColor: C.border,
+    backgroundColor: C.success,
+  },
+  receivedBtnText: {
+    color: C.textHero,
+    fontSize: 13,
+    fontWeight: "800",
+  },
+
+  // ── Dispute row ──
+  disputeRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: S.lg,
+    paddingVertical: 8,
+    borderTopWidth: 1,
+    borderTopColor: C.border,
+    backgroundColor: "rgba(34,197,94,0.05)",
+  },
+  disputeText: {
+    flex: 1,
+    color: C.success,
+    fontSize: 11,
+    fontWeight: "600",
+    lineHeight: 15,
+  },
+
+  // ── Pay Now button ──
+  payNowBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    paddingVertical: 12,
+    borderTopWidth: 1,
+    borderTopColor: C.border,
+    backgroundColor: C.success,
+  },
+  payNowText: {
+    color: C.textHero,
+    fontSize: 13,
+    fontWeight: "800",
+  },
 
   // ── Review button ──
   reviewBtn: {

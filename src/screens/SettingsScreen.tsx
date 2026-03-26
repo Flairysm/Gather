@@ -19,6 +19,7 @@ import { C, S } from "../theme";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import { fetchVendorStatus, useUser } from "../data/user";
 import { supabase } from "../lib/supabase";
+import { useBadgeCounts } from "../hooks/useBadgeCounts";
 
 const ORDER_SHORTCUTS = [
   { label: "To Pay", filter: "pending", icon: "card-outline", color: "#F59E0B", bg: "rgba(245,158,11,0.10)" },
@@ -50,6 +51,7 @@ type Profile = {
 export default function SettingsScreen() {
   const { push } = useAppNavigation();
   const { isVerifiedVendor, vendorStatus, setVendorStatus } = useUser();
+  const { counts, refresh: refreshBadges } = useBadgeCounts();
   const [refreshing, setRefreshing] = useState(false);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [email, setEmail] = useState<string | null>(null);
@@ -122,6 +124,7 @@ export default function SettingsScreen() {
     setRefreshing(true);
     await Promise.all([
       loadProfile(),
+      refreshBadges().catch(() => {}),
       fetchVendorStatus()
         .then(setVendorStatus)
         .catch(() => {}),
@@ -299,7 +302,9 @@ export default function SettingsScreen() {
         >
           <View style={st.ordersHeader}>
             <Text style={st.ordersHeaderTitle}>My Orders</Text>
-            <Feather name="chevron-right" size={18} color={C.textMuted} />
+            <View style={st.ordersHeaderRight}>
+              <Feather name="chevron-right" size={18} color={C.textMuted} />
+            </View>
           </View>
           <View style={st.ordersGrid}>
             {ORDER_SHORTCUTS.map((s) => (
@@ -310,6 +315,15 @@ export default function SettingsScreen() {
               >
                 <View style={[st.ordersIconWrap, { backgroundColor: s.bg }]}>
                   <Ionicons name={s.icon as any} size={22} color={s.color} />
+                  {((counts.myOrdersByCategory as any)[s.filter] ?? 0) > 0 && (
+                    <View style={st.ordersItemBadge}>
+                      <Text style={st.ordersItemBadgeText}>
+                        {((counts.myOrdersByCategory as any)[s.filter] ?? 0) > 99
+                          ? "99+"
+                          : (counts.myOrdersByCategory as any)[s.filter]}
+                      </Text>
+                    </View>
+                  )}
                 </View>
                 <Text style={st.ordersGridLabel}>{s.label}</Text>
               </Pressable>
@@ -343,7 +357,15 @@ export default function SettingsScreen() {
           <SettingsRow
             icon="chatbubbles-outline"
             label="Messages"
+            value={counts.unreadChats > 0 ? `${counts.unreadChats} unread` : undefined}
             onPress={() => push({ type: "MESSAGES" })}
+          />
+          <View style={st.divider} />
+          <SettingsRow
+            icon="notifications-outline"
+            label="Notifications"
+            value={counts.unreadNotifications > 0 ? `${counts.unreadNotifications} new` : undefined}
+            onPress={() => push({ type: "NOTIFICATIONS_HUB" })}
           />
           <View style={st.divider} />
           <SettingsRow
@@ -819,6 +841,11 @@ const st = StyleSheet.create({
     paddingTop: S.lg,
     paddingBottom: S.sm,
   },
+  ordersHeaderRight: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
   ordersHeaderTitle: {
     color: C.textPrimary,
     fontSize: 15,
@@ -842,12 +869,46 @@ const st = StyleSheet.create({
     borderRadius: 14,
     alignItems: "center",
     justifyContent: "center",
+    position: "relative",
+  },
+  ordersItemBadge: {
+    position: "absolute",
+    top: -5,
+    right: -5,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: C.live,
+    borderWidth: 2,
+    borderColor: C.surface,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 4,
+  },
+  ordersItemBadgeText: {
+    color: "#fff",
+    fontSize: 9,
+    fontWeight: "900",
   },
   ordersGridLabel: {
     color: C.textSecondary,
     fontSize: 10,
     fontWeight: "700",
     textAlign: "center",
+  },
+  badgeCount: {
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: C.live,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 5,
+  },
+  badgeCountText: {
+    color: "#fff",
+    fontSize: 10,
+    fontWeight: "800",
   },
 
   version: {

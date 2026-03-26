@@ -25,6 +25,7 @@ import { ALL_CATEGORIES } from "../data/categories";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "../lib/supabase";
 import { fetchLiveStreams, type LiveStream } from "../data/live";
+import { useBadgeCounts } from "../hooks/useBadgeCounts";
 
 type FeaturedBanner = {
   id: string;
@@ -99,6 +100,7 @@ function resolveConditionLabel(
 export default function HomeScreen() {
   const { push } = useAppNavigation();
   const { items } = useCart();
+  const { counts, refresh: refreshBadges } = useBadgeCounts();
   const { selectedCategories } = useFeedPreferences();
   const [banner, setBanner] = useState<FeaturedBanner | null>(null);
   const [vendorStores, setVendorStores] = useState<VendorStoreRow[]>([]);
@@ -179,6 +181,7 @@ export default function HomeScreen() {
       loadFeaturedBanner().catch(() => {}),
       loadVendorStores().catch(() => {}),
       loadLiveStreams().catch(() => {}),
+      refreshBadges().catch(() => {}),
     ]);
     await new Promise((resolve) => setTimeout(resolve, 700));
     setRefreshing(false);
@@ -276,9 +279,23 @@ export default function HomeScreen() {
               </Pressable>
               <Pressable style={h.iconBtn} onPress={() => push({ type: "MESSAGES" })}>
                 <Feather name="message-circle" size={S.iconSize.lg} color={C.textSearch} />
+                {counts.unreadChats > 0 && (
+                  <View style={h.cartBadge}>
+                    <Text style={h.cartBadgeText}>
+                      {counts.unreadChats > 99 ? "99+" : counts.unreadChats}
+                    </Text>
+                  </View>
+                )}
               </Pressable>
               <Pressable style={h.iconBtn} onPress={() => push({ type: "NOTIFICATIONS_HUB" })}>
                 <Ionicons name="notifications-outline" size={S.iconSize.lg} color={C.textSearch} />
+                {counts.unreadNotifications > 0 && (
+                  <View style={h.cartBadge}>
+                    <Text style={h.cartBadgeText}>
+                      {counts.unreadNotifications > 99 ? "99+" : counts.unreadNotifications}
+                    </Text>
+                  </View>
+                )}
               </Pressable>
             </View>
           </View>

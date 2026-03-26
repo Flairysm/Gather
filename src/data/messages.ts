@@ -41,12 +41,15 @@ export type Conversation = {
   wantedId: string | null;
   lastMessage: string | null;
   lastMessageAt: string | null;
+  lastSenderId: string | null;
   createdAt: string;
+  isFavorite: boolean;
+  isUnread: boolean;
 };
 
 // ── Helpers ──
 
-function formatTimestamp(isoStr: string): string {
+export function formatTimestamp(isoStr: string): string {
   const diff = Date.now() - new Date(isoStr).getTime();
   const mins = Math.floor(diff / 60000);
   if (mins < 1) return "Now";
@@ -115,13 +118,41 @@ export async function loadConversations(
 ): Promise<Conversation[]> {
   const { data, error } = await supabase
     .from("conversations")
-    .select("id, participant_ids, listing_id, wanted_id, topic, last_message_text, last_message_at, created_at")
+    .select("id, participant_ids, listing_id, wanted_id, topic, last_message_text, last_message_at, last_sender_id, created_at")
     .contains("participant_ids", [userId])
     .order("last_message_at", { ascending: false, nullsFirst: false })
     .limit(100);
 
   if (error) throw error;
   if (!data || data.length === 0) return [];
+
+  const conversationIds = data.map((c: any) => c.id);
+
+  const [{ data: metaRows }, { data: readRows }] = await Promise.all([
+    supabase
+      .from("conversation_user_meta")
+      .select("conversation_id, is_favorite, is_hidden")
+      .eq("user_id", userId)
+      .in("conversation_id", conversationIds),
+    supabase
+      .from("conversation_reads")
+      .select("conversation_id, last_read_at")
+      .eq("user_id", userId)
+      .in("conversation_id", conversationIds),
+  ]);
+
+  const metaMap = new Map<string, { is_favorite: boolean; is_hidden: boolean }>();
+  for (const row of metaRows ?? []) {
+    metaMap.set((row as any).conversation_id, {
+      is_favorite: !!(row as any).is_favorite,
+      is_hidden: !!(row as any).is_hidden,
+    });
+  }
+
+  const readMap = new Map<string, string>();
+  for (const row of readRows ?? []) {
+    readMap.set((row as any).conversation_id, (row as any).last_read_at);
+  }
 
   const otherIds = [
     ...new Set(
@@ -168,11 +199,21 @@ export async function loadConversations(
     }
   }
 
-  return data.map((c: any) => {
+  return data
+    .filter((c: any) => !metaMap.get(c.id)?.is_hidden)
+    .map((c: any) => {
     const otherId = (c.participant_ids as string[]).find(
       (pid: string) => pid !== userId,
     );
     const profile = otherId ? profileMap[otherId] : null;
+
+    const lastReadAt = readMap.get(c.id);
+    const fromOther = c.last_sender_id && c.last_sender_id !== userId;
+    const isUnread = !!(
+      fromOther &&
+      c.last_message_at &&
+      (!lastReadAt || new Date(lastReadAt).getTime() < new Date(c.last_message_at).getTime())
+    );
 
     return {
       id: c.id,
@@ -191,9 +232,52 @@ export async function loadConversations(
       wantedId: c.wanted_id,
       lastMessage: c.last_message_text,
       lastMessageAt: c.last_message_at,
+      lastSenderId: c.last_sender_id ?? null,
       createdAt: c.created_at,
+      isFavorite: metaMap.get(c.id)?.is_favorite ?? false,
+      isUnread,
     } satisfies Conversation;
-  });
+  })
+    .sort((a, b) => {
+      const fa = a.isFavorite ? 1 : 0;
+      const fb = b.isFavorite ? 1 : 0;
+      if (fa !== fb) return fb - fa;
+      return new Date(b.lastMessageAt ?? b.createdAt).getTime() - new Date(a.lastMessageAt ?? a.createdAt).getTime();
+    });
+}
+
+export async function setConversationFavorite(
+  userId: string,
+  conversationId: string,
+  isFavorite: boolean,
+): Promise<void> {
+  const { error } = await supabase.from("conversation_user_meta").upsert(
+    {
+      user_id: userId,
+      conversation_id: conversationId,
+      is_favorite: isFavorite,
+      is_hidden: false,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "user_id,conversation_id" },
+  );
+  if (error) throw error;
+}
+
+export async function hideConversationForUser(
+  userId: string,
+  conversationId: string,
+): Promise<void> {
+  const { error } = await supabase.from("conversation_user_meta").upsert(
+    {
+      user_id: userId,
+      conversation_id: conversationId,
+      is_hidden: true,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "user_id,conversation_id" },
+  );
+  if (error) throw error;
 }
 
 export async function findOrCreateConversation(
@@ -263,6 +347,7 @@ export async function sendTextMessage(
     .update({
       last_message_text: text,
       last_message_at: new Date().toISOString(),
+      last_sender_id: senderId,
     })
     .eq("id", conversationId);
 }
@@ -288,8 +373,58 @@ export async function sendOfferMessage(
     .update({
       last_message_text: `Offer: RM${amount.toLocaleString("en-MY", { maximumFractionDigits: 0 })}`,
       last_message_at: new Date().toISOString(),
+      last_sender_id: senderId,
     })
     .eq("id", conversationId);
+}
+
+export async function markConversationRead(
+  conversationId: string,
+  userId: string,
+): Promise<void> {
+  const { error } = await supabase.from("conversation_reads").upsert(
+    {
+      user_id: userId,
+      conversation_id: conversationId,
+      last_read_at: new Date().toISOString(),
+    },
+    { onConflict: "user_id,conversation_id" },
+  );
+  if (error) throw error;
+}
+
+export async function countUnreadConversations(userId: string): Promise<number> {
+  const { data: conversations, error } = await supabase
+    .from("conversations")
+    .select("id, last_message_at, last_sender_id")
+    .contains("participant_ids", [userId])
+    .not("last_message_at", "is", null)
+    .neq("last_sender_id", userId)
+    .limit(500);
+
+  if (error || !conversations || conversations.length === 0) return 0;
+
+  const conversationIds = conversations.map((c: any) => c.id);
+  const { data: readRows } = await supabase
+    .from("conversation_reads")
+    .select("conversation_id, last_read_at")
+    .eq("user_id", userId)
+    .in("conversation_id", conversationIds);
+
+  const readMap = new Map<string, string>();
+  for (const row of readRows ?? []) {
+    readMap.set((row as any).conversation_id, (row as any).last_read_at);
+  }
+
+  let unread = 0;
+  for (const c of conversations as any[]) {
+    const lastReadAt = readMap.get(c.id);
+    if (!lastReadAt || new Date(lastReadAt).getTime() < new Date(c.last_message_at).getTime()) {
+      unread += 1;
+    }
+  }
+
+  return unread;
 }
 
 export async function updateOfferStatus(
