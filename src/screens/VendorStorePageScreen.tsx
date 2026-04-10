@@ -17,6 +17,7 @@ import { LinearGradient } from "expo-linear-gradient";
 import { C, S } from "../theme";
 import { supabase } from "../lib/supabase";
 import { useAppNavigation } from "../navigation/NavigationContext";
+import ErrorState from "../components/ErrorState";
 import { StyleSheet } from "react-native";
 
 const SCREEN_W = Dimensions.get("window").width;
@@ -56,6 +57,15 @@ type StoreListing = {
   category: string;
 };
 
+type StoreReview = {
+  id: string;
+  rating: number;
+  comment: string | null;
+  created_at: string;
+  reviewer: { username: string | null; display_name: string | null; avatar_url: string | null } | null;
+};
+
+type StoreTab = "listings" | "reviews";
 type SortKey = "newest" | "price_asc" | "price_desc" | "name_asc";
 
 function normalizeImages(value: unknown): string[] {
@@ -86,19 +96,51 @@ export default function VendorStorePageScreen({
   const [listings, setListings] = useState<StoreListing[]>([]);
   const [featuredIds, setFeaturedIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [activeCategory, setActiveCategory] = useState("All");
   const [searchQuery, setSearchQuery] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("newest");
-  const [inStockOnly, setInStockOnly] = useState(false);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<StoreTab>("listings");
+  const [reviews, setReviews] = useState<StoreReview[]>([]);
+  const [loadingReviews, setLoadingReviews] = useState(false);
+
+  const loadReviews = useCallback(async (sellerId: string) => {
+    setLoadingReviews(true);
+    const { data } = await supabase
+      .from("reviews")
+      .select("id, rating, comment, created_at, reviewer:profiles!reviewer_id(username, display_name, avatar_url)")
+      .eq("seller_id", sellerId)
+      .order("created_at", { ascending: false })
+      .limit(100);
+
+    const mapped = (data ?? []).map((r: any) => ({
+      ...r,
+      reviewer: Array.isArray(r.reviewer) ? r.reviewer[0] : r.reviewer,
+    }));
+    setReviews(mapped as StoreReview[]);
+    setLoadingReviews(false);
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
+    setLoadError(false);
 
-    const { data: storeData } = await supabase
+    const { data: { user } } = await supabase.auth.getUser();
+    if (user) setCurrentUserId(user.id);
+
+    const { data: storeData, error: storeErr } = await supabase
       .from("vendor_stores")
       .select("id, profile_id, store_name, description, logo_url, banner_url, theme_color, created_at")
       .eq("id", storeId)
       .maybeSingle();
+
+    if (storeErr) {
+      console.warn("VendorStorePage load error:", storeErr.message);
+      setLoadError(true);
+      setLoading(false);
+      return;
+    }
 
     if (!storeData) {
       setLoading(false);
@@ -124,7 +166,7 @@ export default function VendorStorePageScreen({
           .eq("seller_id", (storeData as any).profile_id)
           .eq("status", "active")
           .order("created_at", { ascending: false })
-          .limit(100),
+          .limit(500),
       ]);
 
     if (profileData) setSeller(profileData as SellerProfile);
@@ -139,7 +181,8 @@ export default function VendorStorePageScreen({
 
     setListings(allListings);
     setLoading(false);
-  }, [storeId]);
+    loadReviews((storeData as any).profile_id);
+  }, [storeId, loadReviews]);
 
   useEffect(() => {
     load();
@@ -151,7 +194,7 @@ export default function VendorStorePageScreen({
   }, [listings]);
 
   const featured = useMemo(
-    () => listings.filter((l) => featuredIds.has(l.id)),
+    () => listings.filter((l) => featuredIds.has(l.id) && (l.quantity ?? 0) > 0),
     [listings, featuredIds],
   );
 
@@ -162,13 +205,9 @@ export default function VendorStorePageScreen({
         ? listings
         : listings.filter((l) => l.category === activeCategory);
 
-    const stockFiltered = inStockOnly
-      ? catFiltered.filter((l) => (l.quantity ?? 0) > 0)
-      : catFiltered;
-
     const searched = !q
-      ? stockFiltered
-      : stockFiltered.filter((l) => {
+      ? catFiltered
+      : catFiltered.filter((l) => {
       const hay = [
         l.card_name,
         l.edition ?? "",
@@ -187,7 +226,7 @@ export default function VendorStorePageScreen({
     if (sortKey === "name_asc")
       sorted.sort((a, b) => a.card_name.localeCompare(b.card_name));
     return sorted;
-  }, [listings, activeCategory, searchQuery, sortKey, inStockOnly]);
+  }, [listings, activeCategory, searchQuery, sortKey]);
 
   const memberSince = store?.created_at
     ? new Date(store.created_at).toLocaleDateString("en-US", {
@@ -195,6 +234,19 @@ export default function VendorStorePageScreen({
         year: "numeric",
       })
     : "";
+
+  const ratingBreakdown = useMemo(() => {
+    const counts = [0, 0, 0, 0, 0];
+    for (const r of reviews) {
+      if (r.rating >= 1 && r.rating <= 5) counts[r.rating - 1]++;
+    }
+    return counts;
+  }, [reviews]);
+
+  const avgRating = useMemo(() => {
+    if (reviews.length === 0) return 0;
+    return reviews.reduce((s, r) => s + r.rating, 0) / reviews.length;
+  }, [reviews]);
 
   if (loading) {
     return (
@@ -213,13 +265,20 @@ export default function VendorStorePageScreen({
           <Pressable onPress={onBack} style={st.backBtn}>
             <Feather name="arrow-left" size={22} color={C.textPrimary} />
           </Pressable>
-          <Text style={st.headerTitle}>Store Not Found</Text>
+          <Text style={st.headerTitle}>{loadError ? "Error" : "Store Not Found"}</Text>
           <View style={{ width: 36 }} />
         </View>
-        <View style={st.loadingWrap}>
-          <Ionicons name="storefront-outline" size={40} color={C.textMuted} />
-          <Text style={st.emptyTitle}>This store doesn't exist</Text>
-        </View>
+        {loadError ? (
+          <ErrorState
+            message="Failed to load store. Check your connection and try again."
+            onRetry={load}
+          />
+        ) : (
+          <View style={st.loadingWrap}>
+            <Ionicons name="storefront-outline" size={40} color={C.textMuted} />
+            <Text style={st.emptyTitle}>This store doesn't exist</Text>
+          </View>
+        )}
       </SafeAreaView>
     );
   }
@@ -230,7 +289,7 @@ export default function VendorStorePageScreen({
     push({
       type: "CHAT",
       sellerId: store!.profile_id,
-      listingId: listings[0]?.id ?? "",
+      listingId: "",
       topic: store!.store_name,
     });
   }
@@ -327,11 +386,13 @@ export default function VendorStorePageScreen({
 
         {/* ── Action Buttons ── */}
         <View style={st.actionRow}>
-          <Pressable style={[st.actionBtn, { backgroundColor: tc }]} onPress={handleMessage}>
-            <Ionicons name="chatbubble-outline" size={15} color="#fff" />
-            <Text style={st.actionBtnTextPrimary}>Message</Text>
-          </Pressable>
-          <Pressable style={st.actionBtnOutline} onPress={() => Share.share({ message: `Check out ${store?.store_name ?? "this store"} on Gather!` })}>
+          {currentUserId !== store.profile_id && (
+            <Pressable style={[st.actionBtn, { backgroundColor: tc }]} onPress={handleMessage}>
+              <Ionicons name="chatbubble-outline" size={15} color="#fff" />
+              <Text style={st.actionBtnTextPrimary}>Message</Text>
+            </Pressable>
+          )}
+          <Pressable style={st.actionBtnOutline} onPress={() => Share.share({ message: `Check out ${store?.store_name ?? "this store"} on Evend!` })}>
             <Ionicons name="share-outline" size={15} color={C.textPrimary} />
             <Text style={st.actionBtnText}>Share</Text>
           </Pressable>
@@ -343,7 +404,7 @@ export default function VendorStorePageScreen({
         <View style={st.statItem}>
           <Ionicons name="star" size={13} color="#F59E0B" />
           <Text style={st.statValue}>
-            {Number(seller?.rating ?? 5).toFixed(1)}
+            {Number(seller?.rating ?? 0).toFixed(1)}
           </Text>
           <Text style={st.statLabel}>
             {(seller?.review_count ?? 0) > 0
@@ -371,6 +432,30 @@ export default function VendorStorePageScreen({
         </View>
       </View>
 
+      {/* ── Tab Bar ── */}
+      <View style={st.tabBar}>
+        <Pressable
+          style={[st.tabItem, activeTab === "listings" && { borderBottomColor: tc }]}
+          onPress={() => setActiveTab("listings")}
+        >
+          <Ionicons name="grid-outline" size={15} color={activeTab === "listings" ? tc : C.textMuted} />
+          <Text style={[st.tabText, activeTab === "listings" && { color: tc }]}>
+            Listings ({listings.length})
+          </Text>
+        </Pressable>
+        <Pressable
+          style={[st.tabItem, activeTab === "reviews" && { borderBottomColor: tc }]}
+          onPress={() => setActiveTab("reviews")}
+        >
+          <Ionicons name="star-outline" size={15} color={activeTab === "reviews" ? tc : C.textMuted} />
+          <Text style={[st.tabText, activeTab === "reviews" && { color: tc }]}>
+            Reviews ({seller?.review_count ?? 0})
+          </Text>
+        </Pressable>
+      </View>
+
+      {activeTab === "reviews" ? null : (
+      <>
       {/* ── Featured Section ── */}
       {featured.length > 0 && (
         <View style={st.featuredSection}>
@@ -557,24 +642,6 @@ export default function VendorStorePageScreen({
           </Text>
         </Pressable>
 
-        <View style={st.sortDivider} />
-
-        <Pressable
-          onPress={() => setInStockOnly((v) => !v)}
-          style={[
-            st.sortChip,
-            inStockOnly && { backgroundColor: tc + "22", borderColor: tc + "55" },
-          ]}
-        >
-          <Ionicons
-            name={inStockOnly ? "checkbox-outline" : "square-outline"}
-            size={14}
-            color={inStockOnly ? tc : C.textMuted}
-          />
-          <Text style={[st.sortChipText, inStockOnly && { color: C.textPrimary }]}>
-            In stock
-          </Text>
-        </Pressable>
       </ScrollView>
 
       {/* ── Items Header ── */}
@@ -584,46 +651,150 @@ export default function VendorStorePageScreen({
         </Text>
         <Text style={st.itemsCount}>{filtered.length}</Text>
       </View>
+      </>
+      )}
     </>
+  );
+
+  const renderReview = ({ item }: { item: StoreReview }) => {
+    const reviewer = item.reviewer;
+    const displayName = reviewer?.display_name || reviewer?.username || "Anonymous";
+    const stars = Array.from({ length: 5 }, (_, i) => i < item.rating ? "star" : "star-outline");
+    const ago = timeAgoShort(item.created_at);
+
+    return (
+      <View style={st.reviewCard}>
+        <View style={st.reviewHeader}>
+          {reviewer?.avatar_url ? (
+            <Image source={{ uri: reviewer.avatar_url }} style={st.reviewAvatar} />
+          ) : (
+            <View style={[st.reviewAvatar, st.reviewAvatarPlaceholder]}>
+              <Ionicons name="person" size={14} color={C.textMuted} />
+            </View>
+          )}
+          <View style={st.reviewMeta}>
+            <Text style={st.reviewName}>{displayName}</Text>
+            <View style={st.reviewStarsRow}>
+              {stars.map((name, i) => (
+                <Ionicons key={i} name={name as any} size={12} color="#F59E0B" />
+              ))}
+              <Text style={st.reviewTime}>{ago}</Text>
+            </View>
+          </View>
+        </View>
+        {item.comment ? <Text style={st.reviewComment}>{item.comment}</Text> : null}
+      </View>
+    );
+  };
+
+  function timeAgoShort(dateStr: string): string {
+    const diff = Date.now() - new Date(dateStr).getTime();
+    const mins = Math.floor(diff / 60000);
+    if (mins < 1) return "Just now";
+    if (mins < 60) return `${mins}m`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `${hrs}h`;
+    const days = Math.floor(hrs / 24);
+    if (days < 30) return `${days}d`;
+    return `${Math.floor(days / 30)}mo`;
+  }
+
+  const ReviewsHeader = () => (
+    <View style={st.reviewsSummary}>
+      <View style={st.ratingBig}>
+        <Text style={st.ratingBigNumber}>{avgRating.toFixed(1)}</Text>
+        <View style={st.ratingBigStars}>
+          {Array.from({ length: 5 }, (_, i) => (
+            <Ionicons key={i} name={i < Math.round(avgRating) ? "star" : "star-outline"} size={16} color="#F59E0B" />
+          ))}
+        </View>
+        <Text style={st.ratingBigCount}>{reviews.length} review{reviews.length !== 1 ? "s" : ""}</Text>
+      </View>
+      <View style={st.ratingBars}>
+        {[5, 4, 3, 2, 1].map((star) => {
+          const count = ratingBreakdown[star - 1];
+          const pct = reviews.length > 0 ? (count / reviews.length) * 100 : 0;
+          return (
+            <View key={star} style={st.ratingBarRow}>
+              <Text style={st.ratingBarLabel}>{star}</Text>
+              <Ionicons name="star" size={10} color="#F59E0B" />
+              <View style={st.ratingBarTrack}>
+                <View style={[st.ratingBarFill, { width: `${pct}%`, backgroundColor: tc }]} />
+              </View>
+              <Text style={st.ratingBarCount}>{count}</Text>
+            </View>
+          );
+        })}
+      </View>
+    </View>
   );
 
   return (
     <SafeAreaView style={st.safe}>
-      <FlatList
-        data={filtered}
-        keyExtractor={(item) => item.id}
-        renderItem={renderItem}
-        numColumns={2}
-        columnWrapperStyle={st.row}
-        initialNumToRender={12}
-        maxToRenderPerBatch={8}
-        windowSize={5}
-        removeClippedSubviews
-        ListHeaderComponent={ListHeader}
-        ListEmptyComponent={
-          <View style={st.emptyWrap}>
-            <Ionicons
-              name={searchQuery.trim() ? "search-outline" : "cube-outline"}
-              size={32}
-              color={C.textMuted}
-            />
-            <Text style={st.emptyTitle}>
-              {searchQuery.trim() ? "No matching items" : "No items found"}
-            </Text>
-            <Text style={st.emptySub}>
-              {searchQuery.trim()
-                ? "Try a different search term."
-                : activeCategory !== "All"
-                  ? "Try another category"
-                  : inStockOnly
-                    ? "No items are currently in stock."
+      {activeTab === "reviews" ? (
+        <FlatList
+          key="reviews-list"
+          data={reviews}
+          keyExtractor={(item) => item.id}
+          renderItem={renderReview}
+          ListHeaderComponent={
+            <>
+              <ListHeader />
+              {loadingReviews ? (
+                <View style={st.emptyWrap}><ActivityIndicator size="large" color={C.accent} /></View>
+              ) : reviews.length > 0 ? (
+                <ReviewsHeader />
+              ) : null}
+            </>
+          }
+          ListEmptyComponent={
+            loadingReviews ? null : (
+              <View style={st.emptyWrap}>
+                <Ionicons name="chatbubble-outline" size={32} color={C.textMuted} />
+                <Text style={st.emptyTitle}>No reviews yet</Text>
+                <Text style={st.emptySub}>{"This seller hasn't received any reviews."}</Text>
+              </View>
+            )
+          }
+          contentContainerStyle={st.reviewsList}
+          showsVerticalScrollIndicator={false}
+        />
+      ) : (
+        <FlatList
+          key="listings-grid"
+          data={filtered}
+          keyExtractor={(item) => item.id}
+          renderItem={renderItem}
+          numColumns={2}
+          columnWrapperStyle={st.row}
+          initialNumToRender={12}
+          maxToRenderPerBatch={8}
+          windowSize={5}
+          removeClippedSubviews
+          ListHeaderComponent={ListHeader}
+          ListEmptyComponent={
+            <View style={st.emptyWrap}>
+              <Ionicons
+                name={searchQuery.trim() ? "search-outline" : "cube-outline"}
+                size={32}
+                color={C.textMuted}
+              />
+              <Text style={st.emptyTitle}>
+                {searchQuery.trim() ? "No matching items" : "No items found"}
+              </Text>
+              <Text style={st.emptySub}>
+                {searchQuery.trim()
+                  ? "Try a different search term."
+                  : activeCategory !== "All"
+                    ? "Try another category"
                     : "This vendor hasn't listed any cards yet."}
-            </Text>
-          </View>
-        }
-        contentContainerStyle={st.flatContent}
-        showsVerticalScrollIndicator={false}
-      />
+              </Text>
+            </View>
+          }
+          contentContainerStyle={st.flatContent}
+          showsVerticalScrollIndicator={false}
+        />
+      )}
     </SafeAreaView>
   );
 }
@@ -708,6 +879,7 @@ const st = StyleSheet.create({
     backgroundColor: C.bg,
     alignItems: "center",
     justifyContent: "center",
+    overflow: "hidden",
   },
   identityInfo: {
     flex: 1,
@@ -851,7 +1023,7 @@ const st = StyleSheet.create({
     padding: 8,
   },
   featArt: {
-    height: 120,
+    aspectRatio: 0.72,
     borderRadius: 10,
     backgroundColor: C.elevated,
     borderWidth: 1,
@@ -865,6 +1037,7 @@ const st = StyleSheet.create({
     width: "100%",
     height: "100%",
     borderRadius: 10,
+    resizeMode: "cover",
   },
   featName: {
     color: C.textPrimary,
@@ -1008,7 +1181,7 @@ const st = StyleSheet.create({
     padding: S.md,
   },
   cardArt: {
-    height: 130,
+    aspectRatio: 0.72,
     borderRadius: S.radiusCardInner,
     backgroundColor: C.elevated,
     borderWidth: 1,
@@ -1023,6 +1196,7 @@ const st = StyleSheet.create({
     width: "100%",
     height: "100%",
     borderRadius: S.radiusCardInner,
+    resizeMode: "cover",
   },
   conditionBadge: {
     position: "absolute",
@@ -1081,6 +1255,155 @@ const st = StyleSheet.create({
     color: C.textMuted,
     fontSize: 10,
     fontWeight: "600",
+  },
+
+  // ── Tabs ──
+  tabBar: {
+    flexDirection: "row",
+    marginHorizontal: S.screenPadding,
+    marginTop: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: C.border,
+  },
+  tabItem: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    paddingVertical: 12,
+    borderBottomWidth: 2,
+    borderBottomColor: "transparent",
+  },
+  tabText: {
+    color: C.textMuted,
+    fontSize: 13,
+    fontWeight: "700",
+  },
+
+  // ── Reviews ──
+  reviewsList: {
+    paddingBottom: 40,
+  },
+  reviewsSummary: {
+    flexDirection: "row",
+    marginHorizontal: S.screenPadding,
+    marginTop: 16,
+    marginBottom: 8,
+    padding: 16,
+    backgroundColor: C.surface,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: C.border,
+    gap: 16,
+  },
+  ratingBig: {
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 4,
+    minWidth: 80,
+  },
+  ratingBigNumber: {
+    color: C.textPrimary,
+    fontSize: 32,
+    fontWeight: "900",
+  },
+  ratingBigStars: {
+    flexDirection: "row",
+    gap: 2,
+  },
+  ratingBigCount: {
+    color: C.textMuted,
+    fontSize: 11,
+    fontWeight: "600",
+  },
+  ratingBars: {
+    flex: 1,
+    gap: 4,
+    justifyContent: "center",
+  },
+  ratingBarRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+  },
+  ratingBarLabel: {
+    color: C.textSecondary,
+    fontSize: 11,
+    fontWeight: "700",
+    width: 10,
+    textAlign: "right",
+  },
+  ratingBarTrack: {
+    flex: 1,
+    height: 6,
+    backgroundColor: C.elevated,
+    borderRadius: 3,
+    overflow: "hidden",
+  },
+  ratingBarFill: {
+    height: "100%",
+    borderRadius: 3,
+  },
+  ratingBarCount: {
+    color: C.textMuted,
+    fontSize: 10,
+    fontWeight: "600",
+    width: 20,
+  },
+  reviewCard: {
+    marginHorizontal: S.screenPadding,
+    marginTop: 10,
+    padding: 14,
+    backgroundColor: C.surface,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: C.border,
+  },
+  reviewHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  reviewAvatar: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    overflow: "hidden",
+  },
+  reviewAvatarPlaceholder: {
+    backgroundColor: C.elevated,
+    borderWidth: 1,
+    borderColor: C.border,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  reviewMeta: {
+    flex: 1,
+    gap: 2,
+  },
+  reviewName: {
+    color: C.textPrimary,
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  reviewStarsRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 2,
+  },
+  reviewTime: {
+    color: C.textMuted,
+    fontSize: 10,
+    fontWeight: "600",
+    marginLeft: 6,
+  },
+  reviewComment: {
+    color: C.textSecondary,
+    fontSize: 13,
+    fontWeight: "500",
+    lineHeight: 19,
+    marginTop: 8,
   },
 
   // ── Empty ──

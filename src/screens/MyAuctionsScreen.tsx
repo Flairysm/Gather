@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ActivityIndicator,
   Alert,
   FlatList,
   Pressable,
@@ -14,7 +13,9 @@ import { StatusBar } from "expo-status-bar";
 import { Feather, Ionicons } from "@expo/vector-icons";
 
 import CachedImage from "../components/CachedImage";
+import Shimmer, { ShimmerGroup, FadeIn } from "../components/Shimmer";
 import TruncationNotice from "../components/TruncationNotice";
+import ErrorState from "../components/ErrorState";
 import { C, S } from "../theme";
 import { supabase } from "../lib/supabase";
 import { useReconnect } from "../hooks/useReconnect";
@@ -139,7 +140,7 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
   const [tab, setTab] = useState<TabId>("won");
   const [userId, setUserId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  
+  const [loadError, setLoadError] = useState(false);
 
   const [wins, setWins] = useState<WinRow[]>([]);
   const [allBids, setAllBids] = useState<BidRow[]>([]);
@@ -156,6 +157,7 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
   }, []);
 
   const load = useCallback(async () => {
+    setLoadError(false);
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
     setUserId(user.id);
@@ -166,7 +168,7 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
       seller:profiles!seller_id(username, display_name, avatar_url)
     `;
 
-    const [{ data: winsData }, { data: bidsData }, { data: watchedData }] = await Promise.all([
+    const [winsResult, bidsResult, watchedResult] = await Promise.all([
       supabase
         .from("auction_wins")
         .select(`
@@ -196,18 +198,27 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
         .limit(300),
     ]);
 
+    if (winsResult.error || bidsResult.error || watchedResult.error) {
+      console.warn("MyAuctions load errors:",
+        winsResult.error?.message, bidsResult.error?.message, watchedResult.error?.message);
+      setLoadError(true);
+      return;
+    }
+
     const mapRow = (row: any) => ({
       ...row,
       auction: Array.isArray(row.auction) ? row.auction[0] : row.auction,
     });
 
-    setWins((winsData ?? []).map(mapRow));
-    setAllBids((bidsData ?? []).map(mapRow));
-    setWatched((watchedData ?? []).map(mapRow));
+    setWins((winsResult.data ?? []).map(mapRow));
+    setAllBids((bidsResult.data ?? []).map(mapRow));
+    setWatched((watchedResult.data ?? []).map(mapRow));
   }, []);
 
   useEffect(() => {
-    load().finally(() => setLoading(false));
+    load()
+      .catch(() => setLoadError(true))
+      .finally(() => setLoading(false));
   }, [load]);
 
   useReconnect(load);
@@ -727,17 +738,36 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
       </ScrollView>
 
       {loading ? (
-        <View style={st.loadingWrap}>
-          <ActivityIndicator color={C.accent} size="large" />
-        </View>
+        <ShimmerGroup>
+          <View style={st.skeletonList}>
+            {[0, 1, 2, 3, 4].map((i) => (
+              <View key={i} style={st.card}>
+                <View style={st.cardRow}>
+                  <Shimmer width={56} height={56} borderRadius={14} />
+                  <View style={{ flex: 1, gap: 6 }}>
+                    <Shimmer width="70%" height={14} borderRadius={6} />
+                    <Shimmer width="45%" height={11} borderRadius={5} />
+                    <Shimmer width="30%" height={10} borderRadius={5} />
+                  </View>
+                  <View style={{ alignItems: "flex-end", gap: 6 }}>
+                    <Shimmer width={60} height={16} borderRadius={6} />
+                    <Shimmer width={48} height={20} borderRadius={8} />
+                  </View>
+                </View>
+              </View>
+            ))}
+          </View>
+        </ShimmerGroup>
+      ) : loadError ? (
+        <ErrorState message="Could not load your auctions." onRetry={() => { setLoading(true); load().catch(() => setLoadError(true)).finally(() => setLoading(false)); }} />
       ) : (
-        <>
+        <FadeIn>
           {tab === "won" && renderWonTab()}
           {tab === "active" && renderActiveTab()}
           {tab === "lost" && renderLostTab()}
           {tab === "history" && renderHistoryTab()}
           {tab === "watching" && renderWatchingTab()}
-        </>
+        </FadeIn>
       )}
     </SafeAreaView>
   );
@@ -745,7 +775,10 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
 
 const st = StyleSheet.create({
   safe: { flex: 1, backgroundColor: C.bg },
-  loadingWrap: { flex: 1, alignItems: "center", justifyContent: "center" },
+  skeletonList: {
+    paddingHorizontal: S.screenPadding,
+    paddingTop: 4,
+  },
 
   header: {
     flexDirection: "row",

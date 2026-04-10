@@ -19,16 +19,13 @@ import { C, S } from "../theme";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import { fetchVendorStatus, useUser } from "../data/user";
 import { supabase } from "../lib/supabase";
-import { useBadgeCounts } from "../hooks/useBadgeCounts";
+import { useBadgeContext } from "../hooks/useBadgeCounts";
 
 const ORDER_SHORTCUTS = [
   { label: "To Pay", filter: "pending", icon: "card-outline", color: "#F59E0B", bg: "rgba(245,158,11,0.10)" },
   { label: "To Ship", filter: "confirmed", icon: "cube-outline", color: C.accent, bg: "rgba(44,128,255,0.10)" },
   { label: "To Receive", filter: "shipped", icon: "car-outline", color: "#8B5CF6", bg: "rgba(139,92,246,0.10)" },
-  { label: "Completed", filter: "delivered", icon: "checkmark-done-circle-outline", color: C.success, bg: "rgba(34,197,94,0.10)" },
   { label: "To Rate", filter: "to_rate", icon: "star-outline", color: "#F97316", bg: "rgba(249,115,22,0.10)" },
-  { label: "Refunded", filter: "refunded", icon: "receipt-outline", color: "#6B7280", bg: "rgba(107,114,128,0.10)" },
-  { label: "Cancelled", filter: "cancelled", icon: "close-circle-outline", color: C.danger, bg: "rgba(239,68,68,0.10)" },
 ] as const;
 
 type Profile = {
@@ -51,7 +48,7 @@ type Profile = {
 export default function SettingsScreen() {
   const { push } = useAppNavigation();
   const { isVerifiedVendor, vendorStatus, setVendorStatus } = useUser();
-  const { counts, refresh: refreshBadges } = useBadgeCounts();
+  const { counts, refresh: refreshBadges } = useBadgeContext();
   const [refreshing, setRefreshing] = useState(false);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [email, setEmail] = useState<string | null>(null);
@@ -70,7 +67,7 @@ export default function SettingsScreen() {
       if (!user) return;
       setEmail(user.email ?? null);
 
-      const { data } = await supabase
+      const { data, error: profileError } = await supabase
         .from("profiles")
         .select(
           "username, display_name, avatar_url, bio, rating, total_sales, total_purchases, verified_seller, created_at, phone_number, phone_verified, transaction_banned, transaction_ban_reason",
@@ -78,14 +75,13 @@ export default function SettingsScreen() {
         .eq("id", user.id)
         .maybeSingle();
 
-      if (data) setProfile(data as Profile);
+      if (profileError) {
+        console.warn("SettingsScreen loadProfile failed:", profileError.message);
+      } else if (data) {
+        setProfile(data as Profile);
+      }
 
-      const [
-        { count: listCount },
-        { count: orderCount },
-        { count: addrCount },
-        { count: savedCount },
-      ] = await Promise.all([
+      const [listResult, orderResult, addrResult, savedResult] = await Promise.all([
         supabase
           .from("listings")
           .select("id", { count: "exact", head: true })
@@ -105,12 +101,17 @@ export default function SettingsScreen() {
           .eq("user_id", user.id),
       ]);
 
-      setActiveListingsCount(listCount ?? 0);
-      setOrdersCount(orderCount ?? 0);
-      setAddressCount(addrCount ?? 0);
-      setBookmarksCount(savedCount ?? 0);
-    } catch {
-      /* silent */
+      if (listResult.error) console.warn("SettingsScreen listings count failed:", listResult.error.message);
+      if (orderResult.error) console.warn("SettingsScreen orders count failed:", orderResult.error.message);
+      if (addrResult.error) console.warn("SettingsScreen addresses count failed:", addrResult.error.message);
+      if (savedResult.error) console.warn("SettingsScreen saved count failed:", savedResult.error.message);
+
+      setActiveListingsCount(listResult.count ?? 0);
+      setOrdersCount(orderResult.count ?? 0);
+      setAddressCount(addrResult.count ?? 0);
+      setBookmarksCount(savedResult.count ?? 0);
+    } catch (e) {
+      console.warn("SettingsScreen loadProfile unexpected error:", e);
     } finally {
       setLoading(false);
     }
@@ -158,7 +159,7 @@ export default function SettingsScreen() {
           onPress: () =>
             Alert.alert(
               "Contact Support",
-              "Please email support@gather.gg to delete your account.",
+              "Please email support@evend.gg to delete your account.",
             ),
         },
       ],
@@ -258,11 +259,20 @@ export default function SettingsScreen() {
           >
             <View style={st.vendorIconWrap}>
               <Ionicons name="storefront" size={22} color={C.accent} />
+              {counts.pendingShipments > 0 && (
+                <View style={st.vendorIconBadge}>
+                  <Text style={st.vendorIconBadgeText}>
+                    {counts.pendingShipments > 99 ? "99+" : counts.pendingShipments}
+                  </Text>
+                </View>
+              )}
             </View>
             <View style={st.vendorCardInfo}>
               <Text style={st.vendorCardTitle}>Vendor Hub</Text>
               <Text style={st.vendorCardSub}>
-                Manage store, orders, listings &amp; shipments
+                {counts.pendingShipments > 0
+                  ? `${counts.pendingShipments} order${counts.pendingShipments === 1 ? "" : "s"} to ship`
+                  : "Manage store, orders, listings & shipments"}
               </Text>
             </View>
             <Feather name="chevron-right" size={18} color={C.textMuted} />
@@ -288,7 +298,7 @@ export default function SettingsScreen() {
                   ? "Your vendor application is under review"
                   : vendorStatus === "rejected"
                     ? "Your last application was rejected. Update and reapply."
-                    : "Apply to sell cards on the Gather marketplace"}
+                    : "Apply to sell cards on the Evend marketplace"}
               </Text>
             </View>
             <Feather name="chevron-right" size={18} color={C.textMuted} />
@@ -493,25 +503,25 @@ export default function SettingsScreen() {
           <SettingsRow
             icon="help-circle-outline"
             label="Help Centre"
-            onPress={() => Linking.openURL("https://gather.gg/help")}
+            onPress={() => Linking.openURL("https://evend.gg/help")}
           />
           <View style={st.divider} />
           <SettingsRow
             icon="chatbubble-outline"
             label="Send Feedback"
-            onPress={() => Linking.openURL("mailto:support@gather.gg?subject=App Feedback")}
+            onPress={() => Linking.openURL("mailto:support@evend.gg?subject=App Feedback")}
           />
           <View style={st.divider} />
           <SettingsRow
             icon="document-text-outline"
             label="Terms of Service"
-            onPress={() => Linking.openURL("https://gather.gg/terms")}
+            onPress={() => Linking.openURL("https://evend.gg/terms")}
           />
           <View style={st.divider} />
           <SettingsRow
             icon="shield-outline"
             label="Privacy Policy"
-            onPress={() => Linking.openURL("https://gather.gg/privacy")}
+            onPress={() => Linking.openURL("https://evend.gg/privacy")}
           />
         </View>
 
@@ -533,7 +543,7 @@ export default function SettingsScreen() {
           />
         </View>
 
-        <Text style={st.version}>Gather v1.0.0</Text>
+        <Text style={st.version}>Evend v1.0.0</Text>
       </ScrollView>
     </SafeAreaView>
   );
@@ -739,6 +749,23 @@ const st = StyleSheet.create({
     borderColor: C.border,
     alignItems: "center",
     justifyContent: "center",
+  },
+  vendorIconBadge: {
+    position: "absolute",
+    top: -5,
+    right: -5,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: C.live,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 4,
+  },
+  vendorIconBadgeText: {
+    color: "#fff",
+    fontSize: 9,
+    fontWeight: "900",
   },
   vendorCardInfo: { flex: 1, gap: 2 },
   vendorCardTitle: {

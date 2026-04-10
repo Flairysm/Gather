@@ -48,6 +48,7 @@ export const shared = StyleSheet.create({
     borderColor: C.borderIcon,
     alignItems: "center",
     justifyContent: "center",
+    overflow: "hidden",
   },
   sectionName: T.sectionName,
   liveTag: {

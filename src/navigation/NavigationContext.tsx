@@ -7,7 +7,7 @@ const IOS_EASE = Easing.bezier(0.25, 0.46, 0.45, 0.94);
 
 export type ChatScreenParams =
   | { type: "CHAT"; conversationId: string; openOffer?: boolean }
-  | { type: "CHAT"; sellerId: string; listingId: string; topic?: string; openOffer?: boolean };
+  | { type: "CHAT"; sellerId: string; listingId?: string; topic?: string; openOffer?: boolean };
 
 export type AppScreen =
   | { type: "MESSAGES" }
@@ -65,11 +65,13 @@ function StackScreen({
   isTop,
   onExited,
   renderOverlay,
+  popTopRef,
 }: {
   item: StackItem;
   isTop: boolean;
   onExited: (id: number) => void;
   renderOverlay: (screen: AppScreen, pop: () => void) => React.ReactNode;
+  popTopRef?: React.MutableRefObject<(() => void) | null>;
 }) {
   const translateX = useRef(new Animated.Value(SCREEN_W)).current;
   const exiting = useRef(false);
@@ -94,6 +96,11 @@ function StackScreen({
     }).start(() => onExited(item.id));
   }, [item.id, onExited, translateX]);
 
+  useEffect(() => {
+    if (popTopRef) popTopRef.current = pop;
+    return () => { if (popTopRef) popTopRef.current = null; };
+  }, [pop, popTopRef]);
+
   return (
     <Animated.View
       pointerEvents={isTop ? "auto" : "none"}
@@ -116,6 +123,7 @@ let nextId = 0;
 
 export function NavigationProvider({ children, renderOverlay }: Props) {
   const [stack, setStack] = useState<StackItem[]>([]);
+  const popTopRef = useRef<(() => void) | null>(null);
 
   const push = useCallback(
     (screen: AppScreen) => {
@@ -123,6 +131,10 @@ export function NavigationProvider({ children, renderOverlay }: Props) {
     },
     []
   );
+
+  const pop = useCallback(() => {
+    popTopRef.current?.();
+  }, []);
 
   const handleExited = useCallback(
     (id: number) => {
@@ -133,7 +145,7 @@ export function NavigationProvider({ children, renderOverlay }: Props) {
 
   return (
     <NavigationContext.Provider
-      value={{ push, pop: () => {}, stack: stack.map((s) => s.screen) }}
+      value={{ push, pop, stack: stack.map((s) => s.screen) }}
     >
       <View style={{ flex: 1, backgroundColor: C.bg }}>
         <View style={{ flex: 1 }}>{children}</View>
@@ -145,6 +157,7 @@ export function NavigationProvider({ children, renderOverlay }: Props) {
             isTop={index === stack.length - 1}
             onExited={handleExited}
             renderOverlay={renderOverlay}
+            popTopRef={index === stack.length - 1 ? popTopRef : undefined}
           />
         ))}
       </View>

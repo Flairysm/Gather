@@ -237,7 +237,7 @@ export default function LiveViewerScreen({ streamId, onBack }: Props) {
     const name = stream.streamer?.display_name || stream.streamer?.username || "someone";
     try {
       await Share.share({
-        message: `${name} is live on Gather: "${stream.title}" — Come watch!`,
+        message: `${name} is live on Evend: "${stream.title}" — Come watch!`,
       });
       await supabase
         .from("live_streams")

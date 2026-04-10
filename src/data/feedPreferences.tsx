@@ -51,12 +51,13 @@ export function FeedPrefsProvider({ children }: { children: React.ReactNode }) {
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
-      await supabase
+      const { error } = await supabase
         .from("profiles")
         .update({ feed_categories: cats })
         .eq("id", user.id);
-    } catch {
-      /* silent */
+      if (error) console.warn("Feed preferences save failed:", error.message);
+    } catch (e) {
+      console.warn("Feed preferences save error:", e);
     }
   }, []);
 

@@ -1,9 +1,8 @@
 import {
-  ActivityIndicator,
+  Alert,
   Animated,
   Dimensions,
   Easing,
-  Image,
   NativeScrollEvent,
   NativeSyntheticEvent,
   Pressable,
@@ -20,11 +19,15 @@ import { Share } from "react-native";
 
 import { C, S } from "../theme";
 import { ld } from "../styles/listingDetail.styles";
+import CachedImage from "../components/CachedImage";
+import Shimmer, { ShimmerGroup, FadeIn } from "../components/Shimmer";
 import { formatListingPrice, timeAgo, type Listing } from "../data/market";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import { useCart, parsePrice, formatPrice } from "../data/cart";
 import { supabase } from "../lib/supabase";
 import { useReconnect } from "../hooks/useReconnect";
+import { formatConditionLabel, getConditionColor } from "../data/grading";
+import ErrorState from "../components/ErrorState";
 
 const SCREEN_H = Dimensions.get("window").height;
 const SPRING_CONFIG = { tension: 65, friction: 11, useNativeDriver: true };
@@ -43,6 +46,7 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
   const [vendorStore, setVendorStore] = useState<{ id: string; store_name: string; logo_url: string | null } | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [showCartToast, setShowCartToast] = useState(false);
   const [showQtyPicker, setShowQtyPicker] = useState(false);
   const [qtyToAdd, setQtyToAdd] = useState(1);
@@ -94,55 +98,70 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
 
   const loadListing = useCallback(async () => {
     setLoading(true);
-    const { data } = await supabase
+    setLoadError(false);
+    const { data, error } = await supabase
       .from("listings")
       .select(`
-        id, seller_id, card_name, edition, grade, condition, price, quantity,
+        id, seller_id, card_name, edition, grade, grading_company, grade_value, condition, price, quantity,
         category, description, images, views, status, created_at,
         seller:profiles!seller_id(username, display_name, rating, total_sales, review_count, avatar_url)
       `)
       .eq("id", listingId)
       .maybeSingle();
 
-    if (data) {
-      const listing = {
-        ...data,
-        seller: Array.isArray(data.seller) ? data.seller[0] : data.seller,
-      } as Listing;
-      setItem(listing);
+    if (error) {
+      console.warn("ListingDetail load error:", error.message);
+      setLoadError(true);
+      setItem(null);
+      setLoading(false);
+      return;
+    }
+
+    if (!data) {
+      setItem(null);
+      setSimilar([]);
       setVendorStore(null);
+      setLoading(false);
+      return;
+    }
 
-      const { data: storeData } = await supabase
-        .from("vendor_stores")
-        .select("id, store_name, logo_url")
-        .eq("profile_id", listing.seller_id)
-        .eq("is_active", true)
-        .maybeSingle();
-      if (storeData?.id && storeData?.store_name) {
-        setVendorStore(storeData as any);
-      }
+    const listing = {
+      ...data,
+      seller: Array.isArray(data.seller) ? data.seller[0] : data.seller,
+    } as Listing;
+    setItem(listing);
+    setVendorStore(null);
 
-      const { data: sim } = await supabase
-        .from("listings")
-        .select(`
-          id, seller_id, card_name, edition, grade, condition, price, quantity,
-          category, description, images, views, status, created_at,
-          seller:profiles!seller_id(username, display_name, rating, total_sales, avatar_url)
-        `)
-        .eq("status", "active")
-        .eq("category", listing.category)
-        .neq("id", listingId)
-        .order("created_at", { ascending: false })
-        .limit(6);
+    const { data: storeData } = await supabase
+      .from("vendor_stores")
+      .select("id, store_name, logo_url")
+      .eq("profile_id", listing.seller_id)
+      .eq("is_active", true)
+      .maybeSingle();
+    if (storeData?.id && storeData?.store_name) {
+      setVendorStore(storeData as any);
+    }
 
-      if (sim) {
-        setSimilar(
-          (sim as any[]).map((r) => ({
-            ...r,
-            seller: Array.isArray(r.seller) ? r.seller[0] : r.seller,
-          })),
-        );
-      }
+    const { data: sim } = await supabase
+      .from("listings")
+      .select(`
+        id, seller_id, card_name, edition, grade, condition, price, quantity,
+        category, description, images, views, status, created_at,
+        seller:profiles!seller_id(username, display_name, rating, total_sales, avatar_url)
+      `)
+      .eq("status", "active")
+      .eq("category", listing.category)
+      .neq("id", listingId)
+      .order("created_at", { ascending: false })
+      .limit(6);
+
+    if (sim) {
+      setSimilar(
+        (sim as any[]).map((r) => ({
+          ...r,
+          seller: Array.isArray(r.seller) ? r.seller[0] : r.seller,
+        })),
+      );
     }
     setLoading(false);
   }, [listingId]);
@@ -177,7 +196,7 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
   async function handleShare() {
     if (!item) return;
     Share.share({
-      message: `Check out "${item.card_name}" on Gather for ${formatListingPrice(item.price)}!`,
+      message: `Check out "${item.card_name}" on Evend for ${formatListingPrice(item.price)}!`,
     });
   }
 
@@ -189,7 +208,12 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
       p_item_id: listingId,
     });
     setTogglingSave(false);
-    if (!error) setIsSaved((data as any).saved);
+    if (error) {
+      console.warn("ListingDetailScreen toggle save failed:", error.message);
+      Alert.alert("Error", "Failed to save item. Please try again.");
+      return;
+    }
+    setIsSaved((data as any).saved);
   }
 
   function handleHeroScroll(e: NativeSyntheticEvent<NativeScrollEvent>) {
@@ -228,9 +252,25 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
           <Text style={ld.headerTitle}>Listing</Text>
           <View style={{ width: 68 }} />
         </View>
-        <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
-          <ActivityIndicator size="large" color={C.accent} />
-        </View>
+        <ShimmerGroup>
+          <ScrollView contentContainerStyle={{ padding: S.screenPadding, gap: 14 }}>
+            <Shimmer width="100%" height={280} borderRadius={S.radiusCard} />
+            <Shimmer width="40%" height={12} borderRadius={6} />
+            <Shimmer width="80%" height={18} borderRadius={6} />
+            <Shimmer width="55%" height={13} borderRadius={6} />
+            <View style={{ height: 8 }} />
+            <Shimmer width="30%" height={10} borderRadius={5} />
+            <Shimmer width="45%" height={22} borderRadius={6} />
+            <View style={{ height: 12 }} />
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+              <Shimmer width={40} height={40} borderRadius={20} />
+              <View style={{ flex: 1, gap: 6 }}>
+                <Shimmer width="50%" height={13} borderRadius={5} />
+                <Shimmer width="35%" height={10} borderRadius={5} />
+              </View>
+            </View>
+          </ScrollView>
+        </ShimmerGroup>
       </SafeAreaView>
     );
   }
@@ -246,9 +286,16 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
           <Text style={ld.headerTitle}>Listing</Text>
           <View style={{ width: 68 }} />
         </View>
-        <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
-          <Text style={{ color: C.textMuted, fontSize: 14 }}>Listing not found</Text>
-        </View>
+        {loadError ? (
+          <ErrorState
+            message="Failed to load listing. Check your connection and try again."
+            onRetry={loadListing}
+          />
+        ) : (
+          <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
+            <Text style={{ color: C.textMuted, fontSize: 14 }}>Listing not found</Text>
+          </View>
+        )}
       </SafeAreaView>
     );
   }
@@ -321,7 +368,7 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
             <View style={ld.qtyItemPreview}>
               <View style={ld.qtyItemThumb}>
                 {item.images?.[0] ? (
-                  <Image
+                  <CachedImage
                     source={{ uri: item.images[0] }}
                     style={{ width: "100%", height: "100%", borderRadius: 10 }}
                   />
@@ -438,6 +485,7 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
         </View>
       </View>
 
+      <FadeIn>
       <ScrollView
         showsVerticalScrollIndicator={false}
         contentContainerStyle={ld.scroll}
@@ -454,7 +502,7 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
               >
                 {item.images.map((uri, idx) => (
                   <View key={`${item.id}-img-${idx}`} style={ld.heroSlide}>
-                    <Image
+                    <CachedImage
                       source={{ uri }}
                       style={{ width: "100%", height: "100%", borderRadius: S.radiusCard }}
                     />
@@ -509,9 +557,11 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
             </Text>
           </View>
           {item.condition && (
-            <View style={ld.conditionChip}>
-              <Ionicons name="shield-checkmark" size={13} color={C.success} />
-              <Text style={ld.conditionText}>{item.condition}</Text>
+            <View style={[ld.conditionChip, { borderColor: `${getConditionColor(item.condition)}40` }]}>
+              <Ionicons name="shield-checkmark" size={13} color={getConditionColor(item.condition)} />
+              <Text style={[ld.conditionText, { color: getConditionColor(item.condition) }]}>
+                {formatConditionLabel(item.condition)}
+              </Text>
             </View>
           )}
         </View>
@@ -522,12 +572,12 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
         <View style={ld.sellerSection}>
           <View style={ld.sellerAvatar}>
             {vendorStore?.logo_url ? (
-              <Image
+              <CachedImage
                 source={{ uri: vendorStore.logo_url }}
                 style={{ width: "100%", height: "100%", borderRadius: 20 }}
               />
             ) : item.seller?.avatar_url ? (
-              <Image
+              <CachedImage
                 source={{ uri: item.seller.avatar_url }}
                 style={{ width: "100%", height: "100%", borderRadius: 20 }}
               />
@@ -588,7 +638,9 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
                 {item.condition && (
                   <View style={ld.detailChip}>
                     <Text style={ld.detailChipLabel}>Condition</Text>
-                    <Text style={ld.detailChipValue}>{item.condition}</Text>
+                    <Text style={[ld.detailChipValue, { color: getConditionColor(item.condition) }]}>
+                      {formatConditionLabel(item.condition)}
+                    </Text>
                   </View>
                 )}
                 <View style={ld.detailChip}>
@@ -620,7 +672,7 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
                 >
                   <View style={ld.similarArt}>
                     {s.images?.[0] ? (
-                      <Image
+                      <CachedImage
                         source={{ uri: s.images[0] }}
                         style={{ width: "100%", height: "100%", borderRadius: 8 }}
                       />
@@ -639,6 +691,7 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
           </View>
         )}
       </ScrollView>
+      </FadeIn>
 
       {/* Bottom Bar */}
       <View style={[ld.bottomBar, { paddingBottom: Math.max(insets.bottom, 14) }]}>
@@ -655,7 +708,7 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
                 push({
                   type: "CHAT",
                   sellerId: item.seller_id,
-                  listingId: item.id,
+                  listingId: "",
                   topic: item.card_name,
                 })
               }

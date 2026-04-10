@@ -1,5 +1,6 @@
 import {
   ActivityIndicator,
+  Alert,
   Image,
   Pressable,
   SafeAreaView,
@@ -18,6 +19,7 @@ import { wd } from "../styles/wantedDetail.styles";
 import { formatListingPrice, timeAgo, type WantedPost } from "../data/market";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import { supabase } from "../lib/supabase";
+import ErrorState from "../components/ErrorState";
 
 type Props = {
   wantedId: string;
@@ -30,12 +32,14 @@ export default function WantedDetailScreen({ wantedId, onBack }: Props) {
   const [item, setItem] = useState<WantedPost | null>(null);
   const [similar, setSimilar] = useState<WantedPost[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [isSaved, setIsSaved] = useState(false);
   const [togglingSave, setTogglingSave] = useState(false);
 
   const loadPost = useCallback(async () => {
     setLoading(true);
-    const { data } = await supabase
+    setLoadError(false);
+    const { data, error } = await supabase
       .from("wanted_posts")
       .select(`
         id, buyer_id, card_name, edition, grade_wanted, offer_price,
@@ -45,7 +49,23 @@ export default function WantedDetailScreen({ wantedId, onBack }: Props) {
       .eq("id", wantedId)
       .maybeSingle();
 
-    if (data) {
+    if (error) {
+      console.warn("WantedDetail load error:", error.message);
+      setItem(null);
+      setLoadError(true);
+      setLoading(false);
+      return;
+    }
+
+    if (!data) {
+      setItem(null);
+      setSimilar([]);
+      setLoadError(false);
+      setLoading(false);
+      return;
+    }
+
+    {
       const post = {
         ...data,
         buyer: Array.isArray(data.buyer) ? data.buyer[0] : data.buyer,
@@ -97,7 +117,7 @@ export default function WantedDetailScreen({ wantedId, onBack }: Props) {
   function handleShare() {
     if (!item) return;
     Share.share({
-      message: `Looking for "${item.card_name}" on Gather — offering ${formatListingPrice(item.offer_price)}!`,
+      message: `Looking for "${item.card_name}" on Evend — offering ${formatListingPrice(item.offer_price)}!`,
     });
   }
 
@@ -109,7 +129,12 @@ export default function WantedDetailScreen({ wantedId, onBack }: Props) {
       p_item_id: wantedId,
     });
     setTogglingSave(false);
-    if (!error) setIsSaved((data as any).saved);
+    if (error) {
+      console.warn("WantedDetailScreen toggle save failed:", error.message);
+      Alert.alert("Error", "Failed to save item. Please try again.");
+      return;
+    }
+    setIsSaved((data as any).saved);
   }
 
   if (loading) {
@@ -141,9 +166,13 @@ export default function WantedDetailScreen({ wantedId, onBack }: Props) {
           <Text style={wd.headerTitle}>Wanted</Text>
           <View style={{ width: 68 }} />
         </View>
-        <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
-          <Text style={{ color: C.textMuted, fontSize: 14 }}>Post not found</Text>
-        </View>
+        {loadError ? (
+          <ErrorState message="Failed to load post. Check your connection and try again." onRetry={loadPost} />
+        ) : (
+          <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
+            <Text style={{ color: C.textMuted, fontSize: 14 }}>Post not found</Text>
+          </View>
+        )}
       </SafeAreaView>
     );
   }

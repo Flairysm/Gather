@@ -16,6 +16,8 @@ import { Feather, Ionicons } from "@expo/vector-icons";
 import { C, S } from "../theme";
 import { supabase } from "../lib/supabase";
 import type { Listing, WantedPost } from "../data/market";
+import Shimmer, { ShimmerGroup, FadeIn } from "../components/Shimmer";
+import ErrorState from "../components/ErrorState";
 
 type Props = { onBack: () => void };
 
@@ -51,13 +53,16 @@ export default function MyListingsScreen({ onBack }: Props) {
   const [rows, setRows] = useState<Listing[]>([]);
   const [wantedRows, setWantedRows] = useState<WantedPost[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [saving, setSaving] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [editing, setEditing] = useState<EditableListing | null>(null);
   const [editingWanted, setEditingWanted] = useState<EditableWanted | null>(null);
+  const [soldCounts, setSoldCounts] = useState<Record<string, number>>({});
 
   const load = useCallback(async () => {
     setLoading(true);
+    setLoadError(false);
     const {
       data: { user },
     } = await supabase.auth.getUser();
@@ -70,7 +75,7 @@ export default function MyListingsScreen({ onBack }: Props) {
     }
 
     setCurrentUserId(user.id);
-    const { data } = await supabase
+    const { data, error: listErr } = await supabase
       .from("listings")
       .select(
         "id, seller_id, card_name, edition, grade, condition, price, quantity, category, description, images, views, status, created_at",
@@ -79,6 +84,13 @@ export default function MyListingsScreen({ onBack }: Props) {
       .neq("status", "removed")
       .order("created_at", { ascending: false })
       .limit(200);
+
+    if (listErr) {
+      console.warn("MyListingsScreen load listings error:", listErr.message);
+      setLoadError(true);
+      setLoading(false);
+      return;
+    }
 
     const { data: wantedData } = await supabase
       .from("wanted_posts")
@@ -91,11 +103,26 @@ export default function MyListingsScreen({ onBack }: Props) {
 
     setRows((data ?? []) as Listing[]);
     setWantedRows((wantedData ?? []) as WantedPost[]);
+    const listingIds = (data ?? []).map((l: any) => l.id);
+    if (listingIds.length > 0) {
+      const { data: oiData } = await supabase
+        .from("order_items")
+        .select("listing_id, quantity")
+        .in("listing_id", listingIds);
+      const counts: Record<string, number> = {};
+      for (const row of oiData ?? []) {
+        const id = (row as any).listing_id as string;
+        counts[id] = (counts[id] ?? 0) + Number((row as any).quantity ?? 1);
+      }
+      setSoldCounts(counts);
+    } else {
+      setSoldCounts({});
+    }
     setLoading(false);
   }, []);
 
   useEffect(() => {
-    load().catch(() => setLoading(false));
+    load().catch(() => { setLoadError(true); setLoading(false); });
   }, [load]);
 
   const isEmpty = useMemo(
@@ -258,9 +285,28 @@ export default function MyListingsScreen({ onBack }: Props) {
       </View>
 
       {loading ? (
-        <View style={st.centerWrap}>
-          <ActivityIndicator size="large" color={C.accent} />
-        </View>
+        <ShimmerGroup>
+          <View style={st.list}>
+            {[0, 1, 2, 3, 4].map((i) => (
+              <View key={i} style={st.prodCard}>
+                <View style={st.prodCardRow}>
+                  <Shimmer width={56} height={56} borderRadius={12} />
+                  <View style={{ flex: 1, gap: 6 }}>
+                    <Shimmer width="75%" height={14} borderRadius={6} />
+                    <Shimmer width="50%" height={11} borderRadius={5} />
+                    <Shimmer width="35%" height={12} borderRadius={5} />
+                  </View>
+                </View>
+                <View style={{ flexDirection: "row", gap: 12, marginTop: 8 }}>
+                  <Shimmer width={70} height={10} borderRadius={4} />
+                  <Shimmer width={60} height={10} borderRadius={4} />
+                </View>
+              </View>
+            ))}
+          </View>
+        </ShimmerGroup>
+      ) : loadError ? (
+        <ErrorState message="Could not load your listings." onRetry={load} />
       ) : isEmpty ? (
         <View style={st.centerWrap}>
           <Ionicons name="pricetag-outline" size={30} color={C.textMuted} />
@@ -274,73 +320,112 @@ export default function MyListingsScreen({ onBack }: Props) {
           </Text>
         </View>
       ) : (
+        <FadeIn>
         <FlatList
-          data={tab === "listings" ? rows : wantedRows}
-          keyExtractor={(item) => item.id}
+          data={(tab === "listings" ? rows : wantedRows) as any[]}
+          keyExtractor={(item: any) => item.id}
           contentContainerStyle={st.list}
           initialNumToRender={10}
           maxToRenderPerBatch={8}
           windowSize={5}
           removeClippedSubviews
-          renderItem={({ item }) => (
-            <View style={st.row}>
-              <View style={st.thumb}>
-                {"images" in item && item.images?.[0] ? (
-                  <Image source={{ uri: item.images[0] }} style={st.thumbImg} />
-                ) : "image_url" in item && item.image_url ? (
-                  <Image source={{ uri: item.image_url }} style={st.thumbImg} />
-                ) : (
-                  <Ionicons name="image-outline" size={18} color={C.textMuted} />
-                )}
-              </View>
-              <View style={st.info}>
-                <Text style={st.name} numberOfLines={1}>
-                  {item.card_name}
-                </Text>
-                <Text style={st.meta} numberOfLines={1}>
-                  {item.edition ?? "—"}{" "}
-                  {"grade" in item && item.grade ? `• ${item.grade}` : ""}
-                  {"grade_wanted" in item && item.grade_wanted ? `• ${item.grade_wanted}` : ""}
-                </Text>
-                <Text style={st.price}>
-                  RM
-                  {Number(
-                    "price" in item ? item.price : item.offer_price,
-                  ).toLocaleString("en-MY", { maximumFractionDigits: 0 })}
-                </Text>
-              </View>
-              <View style={st.actions}>
-                <View
-                  style={[
-                    st.statusChip,
-                    item.status === "active" ? st.statusActive : st.statusInactive,
-                  ]}
-                >
-                  <Text
-                    style={[
-                      st.statusText,
-                      item.status === "active" ? st.statusTextActive : st.statusTextInactive,
-                    ]}
-                  >
-                    {item.status}
-                  </Text>
+          renderItem={({ item }: { item: any }) => {
+            if ("price" in item) {
+              const sold = soldCounts[item.id] ?? 0;
+              const qty = Number((item as any).quantity ?? 0);
+              return (
+                <View style={st.prodCard}>
+                  <View style={st.prodCardRow}>
+                    <View style={st.prodThumb}>
+                      {item.images?.[0] ? (
+                        <Image source={{ uri: item.images[0] }} style={st.prodThumbImg} />
+                      ) : (
+                        <Ionicons name="image-outline" size={20} color={C.textMuted} />
+                      )}
+                    </View>
+                    <View style={st.prodInfo}>
+                      <Text style={st.prodName} numberOfLines={2}>{item.card_name}</Text>
+                      <Text style={st.prodMeta} numberOfLines={1}>
+                        {[item.edition, item.grade].filter(Boolean).join(" · ")}
+                      </Text>
+                      <Text style={st.prodPrice}>
+                        RM{Number(item.price).toLocaleString("en-MY", { maximumFractionDigits: 0 })}
+                      </Text>
+                    </View>
+                  </View>
+                  <View style={st.prodStatsRow}>
+                    <View style={st.prodStat}>
+                      <Ionicons name="layers-outline" size={13} color={C.textMuted} />
+                      <Text style={st.prodStatText}>Stock {qty}</Text>
+                    </View>
+                    <View style={st.prodStat}>
+                      <Ionicons name="cart-outline" size={13} color={C.textMuted} />
+                      <Text style={st.prodStatText}>Sold {sold}</Text>
+                    </View>
+                  </View>
+                  <View style={st.prodActionsRow}>
+                    <Pressable style={st.prodActionBtn} onPress={() => handleDelete(item.id)}>
+                      <Text style={st.prodActionText}>Delist</Text>
+                    </Pressable>
+                    <Pressable
+                      style={[st.prodActionBtn, st.prodActionBtnEdit]}
+                      onPress={() =>
+                        setEditing({
+                          id: item.id,
+                          card_name: item.card_name,
+                          edition: item.edition,
+                          grade: item.grade,
+                          price: item.price,
+                          category: item.category,
+                          description: item.description,
+                          status: item.status,
+                          images: item.images ?? [],
+                        })
+                      }
+                    >
+                      <Text style={st.prodActionEditText}>Edit</Text>
+                    </Pressable>
+                  </View>
                 </View>
-                <Pressable
-                  style={st.actionBtn}
-                  onPress={() => {
-                    if ("price" in item) {
-                      setEditing({
-                        id: item.id,
-                        card_name: item.card_name,
-                        edition: item.edition,
-                        grade: item.grade,
-                        price: item.price,
-                        category: item.category,
-                        description: item.description,
-                        status: item.status,
-                        images: item.images ?? [],
-                      });
-                    } else {
+              );
+            }
+            return (
+              <View style={st.prodCard}>
+                <View style={st.prodCardRow}>
+                  <View style={st.prodThumb}>
+                    {"image_url" in item && item.image_url ? (
+                      <Image source={{ uri: item.image_url }} style={st.prodThumbImg} />
+                    ) : (
+                      <Ionicons name="image-outline" size={20} color={C.textMuted} />
+                    )}
+                  </View>
+                  <View style={st.prodInfo}>
+                    <Text style={st.prodName} numberOfLines={2}>{item.card_name}</Text>
+                    <Text style={st.prodMeta} numberOfLines={1}>
+                      {[item.edition, item.grade_wanted].filter(Boolean).join(" · ")}
+                    </Text>
+                    <Text style={st.prodPrice}>
+                      RM{Number(item.offer_price).toLocaleString("en-MY", { maximumFractionDigits: 0 })}
+                    </Text>
+                  </View>
+                </View>
+                <View style={st.prodStatsRow}>
+                  <View style={st.prodStat}>
+                    <Ionicons name="grid-outline" size={13} color={C.textMuted} />
+                    <Text style={st.prodStatText}>{item.category || "General"}</Text>
+                  </View>
+                  <View style={st.prodStat}>
+                    <Ionicons name="checkmark-circle-outline" size={13} color={C.textMuted} />
+                    <Text style={st.prodStatText}>{item.status}</Text>
+                  </View>
+                </View>
+                <View style={st.prodActionsRow}>
+                  <Pressable style={st.prodActionBtn} onPress={() => handleDeleteWanted(item.id)}>
+                    <Text style={st.prodActionText}>Delete</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[st.prodActionBtn, st.prodActionBtnEdit]}
+                    onPress={() =>
                       setEditingWanted({
                         id: item.id,
                         card_name: item.card_name,
@@ -350,26 +435,17 @@ export default function MyListingsScreen({ onBack }: Props) {
                         category: item.category,
                         description: item.description,
                         status: item.status,
-                      });
+                      })
                     }
-                  }}
-                >
-                  <Feather name="edit-2" size={13} color={C.textPrimary} />
-                  <Text style={st.actionText}>Edit</Text>
-                </Pressable>
-                <Pressable
-                  style={st.deleteBtn}
-                  onPress={() =>
-                    "price" in item ? handleDelete(item.id) : handleDeleteWanted(item.id)
-                  }
-                >
-                  <Feather name="trash-2" size={13} color={C.danger} />
-                  <Text style={st.deleteText}>Delete</Text>
-                </Pressable>
+                  >
+                    <Text style={st.prodActionEditText}>Edit</Text>
+                  </Pressable>
+                </View>
               </View>
-            </View>
-          )}
+            );
+          }}
         />
+        </FadeIn>
       )}
 
       {editing && (
@@ -738,5 +814,56 @@ const st = StyleSheet.create({
     backgroundColor: C.accent,
   },
   saveText: { color: C.textHero, fontSize: 13, fontWeight: "800" },
+  // My Product-style cards for listings tab
+  prodCard: {
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: C.border,
+    backgroundColor: C.surface,
+    marginBottom: 12,
+    overflow: "hidden",
+  },
+  prodCardRow: { flexDirection: "row", padding: 14, gap: 12 },
+  prodThumb: {
+    width: 72,
+    height: 72,
+    borderRadius: 10,
+    backgroundColor: C.elevated,
+    borderWidth: 1,
+    borderColor: C.border,
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "hidden",
+  },
+  prodThumbImg: { width: 72, height: 72, borderRadius: 10 },
+  prodInfo: { flex: 1, justifyContent: "center", gap: 2 },
+  prodName: { color: C.textPrimary, fontSize: 14, fontWeight: "700" },
+  prodMeta: { color: C.textSecondary, fontSize: 11, fontWeight: "500" },
+  prodPrice: { color: C.accent, fontSize: 15, fontWeight: "900", marginTop: 2 },
+  prodStatsRow: { flexDirection: "row", paddingHorizontal: 14, paddingBottom: 10, gap: 20 },
+  prodStat: { flexDirection: "row", alignItems: "center", gap: 5 },
+  prodStatText: { color: C.textSecondary, fontSize: 12, fontWeight: "600" },
+  prodActionsRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    borderTopWidth: 1,
+    borderTopColor: C.border,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  prodActionBtn: {
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: C.border,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: C.surface,
+  },
+  prodActionText: { color: C.textPrimary, fontSize: 12, fontWeight: "700" },
+  prodActionBtnEdit: { borderColor: C.accent },
+  prodActionEditText: { color: C.accent, fontSize: 12, fontWeight: "700" },
 });
 

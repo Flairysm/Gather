@@ -4,6 +4,8 @@ export type Listing = {
   card_name: string;
   edition: string | null;
   grade: string | null;
+  grading_company: string | null;
+  grade_value: string | null;
   condition: string | null;
   price: number;
   quantity: number;
@@ -28,6 +30,8 @@ export type WantedPost = {
   card_name: string;
   edition: string | null;
   grade_wanted: string | null;
+  grading_company_wanted: string | null;
+  grade_value_wanted: string | null;
   offer_price: number;
   category: string;
   description: string | null;

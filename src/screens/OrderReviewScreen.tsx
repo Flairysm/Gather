@@ -17,6 +17,7 @@ import { StatusBar } from "expo-status-bar";
 import { Feather, Ionicons } from "@expo/vector-icons";
 import { C, S } from "../theme";
 import { supabase } from "../lib/supabase";
+import { requireNetwork } from "../lib/network";
 
 type SellerProfile = {
   display_name: string | null;
@@ -50,7 +51,7 @@ export default function OrderReviewScreen({ orderId, sellerId, onBack }: Props) 
 
   const load = useCallback(async () => {
     setLoading(true);
-    const [{ data: sellerData }, { data: reviewData }] = await Promise.all([
+    const [sellerResult, reviewResult] = await Promise.all([
       supabase
         .from("profiles")
         .select("display_name, username, avatar_url, rating, review_count")
@@ -64,11 +65,14 @@ export default function OrderReviewScreen({ orderId, sellerId, onBack }: Props) 
         .maybeSingle(),
     ]);
 
-    if (sellerData) setSeller(sellerData as SellerProfile);
-    if (reviewData) {
-      setExisting(reviewData as ExistingReview);
-      setRating((reviewData as ExistingReview).rating);
-      setComment((reviewData as ExistingReview).comment ?? "");
+    if (sellerResult.error) console.warn("OrderReviewScreen seller load:", sellerResult.error.message);
+    if (reviewResult.error) console.warn("OrderReviewScreen review load:", reviewResult.error.message);
+
+    if (sellerResult.data) setSeller(sellerResult.data as SellerProfile);
+    if (reviewResult.data) {
+      setExisting(reviewResult.data as ExistingReview);
+      setRating((reviewResult.data as ExistingReview).rating);
+      setComment((reviewResult.data as ExistingReview).comment ?? "");
     }
     setLoading(false);
   }, [orderId, sellerId]);
@@ -78,6 +82,7 @@ export default function OrderReviewScreen({ orderId, sellerId, onBack }: Props) 
   }, [load]);
 
   async function handleSubmit() {
+    if (!(await requireNetwork())) return;
     if (rating < 1 || rating > 5) {
       Alert.alert("Rating required", "Please select a star rating.");
       return;
@@ -168,7 +173,7 @@ export default function OrderReviewScreen({ orderId, sellerId, onBack }: Props) 
               <View style={st.sellerStatsRow}>
                 <Ionicons name="star" size={12} color="#F59E0B" />
                 <Text style={st.sellerRating}>
-                  {Number(seller?.rating ?? 5).toFixed(1)}
+                  {Number(seller?.rating ?? 0).toFixed(1)}
                 </Text>
                 {(seller?.review_count ?? 0) > 0 && (
                   <Text style={st.sellerReviewCount}>

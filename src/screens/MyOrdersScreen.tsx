@@ -4,19 +4,23 @@ import {
   Alert,
   FlatList,
   Image,
+  Modal,
   Pressable,
   SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { Feather, Ionicons } from "@expo/vector-icons";
+import * as ImagePicker from "expo-image-picker";
 import { C, S } from "../theme";
 import { supabase } from "../lib/supabase";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import TruncationNotice from "../components/TruncationNotice";
+import ErrorState from "../components/ErrorState";
 
 type FulfillmentStatus = "pending" | "confirmed" | "shipped" | "delivered" | "cancelled" | "refunded";
 type FilterId = "all" | FulfillmentStatus | "to_rate";
@@ -172,6 +176,13 @@ export default function MyOrdersScreen({
     Record<string, { rating: number }>
   >({});
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [disputeModal, setDisputeModal] = useState<{ orderId: string; itemId: string; sellerId: string } | null>(null);
+  const [disputeReason, setDisputeReason] = useState("");
+  const [disputeDesc, setDisputeDesc] = useState("");
+  const [disputeImages, setDisputeImages] = useState<string[]>([]);
+  const [uploadingImages, setUploadingImages] = useState(false);
+  const [filingDispute, setFilingDispute] = useState(false);
   const validFilters: FilterId[] = ["all", "pending", "confirmed", "shipped", "delivered", "to_rate", "refunded", "cancelled"];
   const [filter, setFilter] = useState<FilterId>(
     validFilters.includes(initialFilter as FilterId) ? (initialFilter as FilterId) : "all",
@@ -431,7 +442,7 @@ export default function MyOrdersScreen({
         setReviewedOrders(reviewMap);
       }
     } catch {
-      /* silent */
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -519,7 +530,7 @@ export default function MyOrdersScreen({
     push({ type: "ORDER_REVIEW", orderId, sellerId });
   }
 
-  async function handleOrderReceived(orderItemId: string) {
+  async function handleOrderReceived(orderItemIds: string[]) {
     const now = new Date();
     const disputeDeadline = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000);
     try {
@@ -531,11 +542,12 @@ export default function MyOrdersScreen({
           received_at: now.toISOString(),
           dispute_deadline: disputeDeadline.toISOString(),
         })
-        .eq("id", orderItemId);
+        .in("id", orderItemIds);
       if (error) throw error;
+      const idSet = new Set(orderItemIds);
       setRawItems((prev) =>
         prev.map((item) =>
-          item.id === orderItemId
+          idSet.has(item.id)
             ? {
                 ...item,
                 fulfillment_status: "delivered" as FulfillmentStatus,
@@ -548,6 +560,78 @@ export default function MyOrdersScreen({
       );
     } catch {
       Alert.alert("Error", "Failed to confirm receipt. Please try again.");
+    }
+  }
+
+  const DISPUTE_REASONS = [
+    "Item not as described",
+    "Item damaged during shipping",
+    "Wrong item received",
+    "Item not authentic / counterfeit",
+    "Missing items",
+    "Other",
+  ];
+
+  async function pickDisputeImages() {
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ["images"],
+      allowsMultipleSelection: true,
+      selectionLimit: 5,
+      quality: 0.7,
+    });
+    if (result.canceled) return;
+    const uris = result.assets.map((a) => a.uri);
+    setDisputeImages((prev) => [...prev, ...uris].slice(0, 5));
+  }
+
+  async function handleFileDispute() {
+    if (!disputeModal || !disputeReason || !userId) return;
+    if (disputeImages.length < 3) {
+      Alert.alert("Photos Required", "Please attach at least 3 photos as evidence.");
+      return;
+    }
+    setFilingDispute(true);
+    try {
+      const uploadedUrls: string[] = [];
+      for (const uri of disputeImages) {
+        const ext = uri.split(".").pop() ?? "jpg";
+        const path = `${userId}/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
+        const resp = await fetch(uri);
+        const blob = await resp.blob();
+        const { error: upErr } = await supabase.storage
+          .from("dispute-evidence")
+          .upload(path, blob, { contentType: `image/${ext}` });
+        if (!upErr) {
+          const { data: pub } = supabase.storage.from("dispute-evidence").getPublicUrl(path);
+          uploadedUrls.push(pub.publicUrl);
+        }
+      }
+
+      if (uploadedUrls.length < 3) {
+        Alert.alert("Upload Failed", `Only ${uploadedUrls.length} of ${disputeImages.length} photos uploaded successfully. Please try again.`);
+        setFilingDispute(false);
+        return;
+      }
+
+      const { error } = await supabase.from("disputes").insert({
+        order_item_id: disputeModal.itemId,
+        order_id: disputeModal.orderId,
+        buyer_id: userId,
+        seller_id: disputeModal.sellerId,
+        reason: disputeReason,
+        description: disputeDesc.trim() || null,
+        evidence_urls: uploadedUrls,
+      });
+      if (error) throw error;
+      Alert.alert("Dispute Filed", "Your dispute has been submitted. We'll review it and get back to you within 24-48 hours.");
+      setDisputeModal(null);
+      setDisputeReason("");
+      setDisputeDesc("");
+      setDisputeImages([]);
+    } catch {
+      Alert.alert("Error", "Failed to file dispute. Please try again.");
+    } finally {
+      setFilingDispute(false);
     }
   }
 
@@ -598,7 +682,12 @@ export default function MyOrdersScreen({
             ))}
           </ScrollView>
 
-          {filtered.length === 0 ? (
+          {loadError && !loading ? (
+            <ErrorState
+              message="Failed to load orders. Check your connection and try again."
+              onRetry={() => { setLoadError(false); setLoading(true); loadOrders(); }}
+            />
+          ) : filtered.length === 0 ? (
             <View style={st.emptyState}>
               <Ionicons name="receipt-outline" size={48} color={C.textMuted} />
               <Text style={st.emptyTitle}>
@@ -632,16 +721,19 @@ export default function MyOrdersScreen({
                   onPayNow={(winId) =>
                     push({ type: "AUCTION_CHECKOUT", winId })
                   }
-                  onReceived={(itemId) => {
+                  onReceived={(itemIds) => {
                     Alert.alert(
                       "Confirm Receipt",
-                      "By confirming, you acknowledge you've received the item. You'll have 3 days to file a dispute if there's an issue.",
+                      `By confirming, you acknowledge you've received ${itemIds.length > 1 ? "all items" : "the item"}. You'll have 3 days to file a dispute if there's an issue.`,
                       [
                         { text: "Not Yet", style: "cancel" },
-                        { text: "I've Received It", onPress: () => handleOrderReceived(itemId) },
+                        { text: "I've Received It", onPress: () => handleOrderReceived(itemIds) },
                       ],
                     );
                   }}
+                  onDispute={(orderId, itemId, sellerId) =>
+                    setDisputeModal({ orderId, itemId, sellerId })
+                  }
                 />
               )}
               ListFooterComponent={<TruncationNotice count={rawItems.length} limit={500} label="order items" />}
@@ -649,6 +741,84 @@ export default function MyOrdersScreen({
           )}
         </>
       )}
+      {/* Dispute Modal */}
+      <Modal visible={!!disputeModal} transparent animationType="fade" onRequestClose={() => setDisputeModal(null)}>
+        <Pressable style={st.modalOverlay} onPress={() => setDisputeModal(null)}>
+          <Pressable style={st.modalSheet} onPress={() => {}}>
+            <View style={st.modalHandle} />
+            <Text style={st.modalTitle}>File a Dispute</Text>
+            <Text style={st.modalSubtitle}>Select a reason and provide details about the issue.</Text>
+
+            <Text style={st.modalLabel}>Reason</Text>
+            <View style={st.reasonList}>
+              {DISPUTE_REASONS.map((r) => (
+                <Pressable
+                  key={r}
+                  style={[st.reasonChip, disputeReason === r && st.reasonChipActive]}
+                  onPress={() => setDisputeReason(r)}
+                >
+                  <Text style={[st.reasonChipText, disputeReason === r && st.reasonChipTextActive]}>{r}</Text>
+                </Pressable>
+              ))}
+            </View>
+
+            <Text style={st.modalLabel}>Details (optional)</Text>
+            <TextInput
+              style={st.disputeInput}
+              placeholder="Describe the issue..."
+              placeholderTextColor={C.textMuted}
+              value={disputeDesc}
+              onChangeText={setDisputeDesc}
+              multiline
+              numberOfLines={4}
+              textAlignVertical="top"
+            />
+
+            <Text style={st.modalLabel}>Evidence Photos (min. 3)</Text>
+            <View style={st.evidenceRow}>
+              {disputeImages.map((uri, i) => (
+                <View key={i} style={st.evidenceThumbWrap}>
+                  <Image source={{ uri }} style={st.evidenceThumb} />
+                  <Pressable
+                    style={st.evidenceRemove}
+                    onPress={() => setDisputeImages((prev) => prev.filter((_, j) => j !== i))}
+                  >
+                    <Ionicons name="close" size={12} color="#fff" />
+                  </Pressable>
+                </View>
+              ))}
+              {disputeImages.length < 5 && (
+                <Pressable style={st.evidenceAdd} onPress={pickDisputeImages}>
+                  <Ionicons name="camera-outline" size={22} color={C.textMuted} />
+                  <Text style={st.evidenceAddText}>{disputeImages.length}/5</Text>
+                </Pressable>
+              )}
+            </View>
+            {disputeImages.length < 3 && disputeImages.length > 0 && (
+              <Text style={st.evidenceHint}>
+                {3 - disputeImages.length} more photo{3 - disputeImages.length > 1 ? "s" : ""} required
+              </Text>
+            )}
+
+            <View style={st.modalActions}>
+              <Pressable style={st.modalCancel} onPress={() => { setDisputeModal(null); setDisputeImages([]); }}>
+                <Text style={st.modalCancelText}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                style={[st.modalSubmit, (!disputeReason || disputeImages.length < 3 || filingDispute) && { opacity: 0.5 }]}
+                onPress={handleFileDispute}
+                disabled={!disputeReason || disputeImages.length < 3 || filingDispute}
+              >
+                {filingDispute ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <Text style={st.modalSubmitText}>Submit Dispute</Text>
+                )}
+              </Pressable>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -660,13 +830,15 @@ function OrderCard({
   onReview,
   onPayNow,
   onReceived,
+  onDispute,
 }: {
   order: GroupedOrder;
   vendorLogoUrl: string | null;
   onViewItem: (listingId: string) => void;
   onReview: () => void;
   onPayNow?: (winId: string) => void;
-  onReceived?: (itemId: string) => void;
+  onReceived?: (itemIds: string[]) => void;
+  onDispute?: (orderId: string, itemId: string, sellerId: string) => void;
 }) {
   const cfg = STATUS_CONFIG[order.status];
   const sellerName =
@@ -806,8 +978,10 @@ function OrderCard({
         <Pressable
           style={st.receivedBtn}
           onPress={() => {
-            const marketItem = order.items.find((i) => i.source !== "auction");
-            if (marketItem) onReceived(marketItem.id);
+            const shippedIds = order.items
+              .filter((i) => i.fulfillment_status === "shipped")
+              .map((i) => i.id);
+            if (shippedIds.length > 0) onReceived(shippedIds);
           }}
         >
           <Ionicons name="checkmark-circle" size={16} color={C.textHero} />
@@ -818,10 +992,24 @@ function OrderCard({
       {/* Dispute window for delivered orders */}
       {isDelivered && disputeRemaining > 0 && (
         <View style={st.disputeRow}>
-          <Ionicons name="shield-checkmark" size={14} color={C.success} />
-          <Text style={st.disputeText}>
-            Buyer protection: {disputeDays} day{disputeDays !== 1 ? "s" : ""} left to file a dispute
-          </Text>
+          <View style={st.disputeInfo}>
+            <Ionicons name="shield-checkmark" size={14} color={C.success} />
+            <Text style={st.disputeText}>
+              {disputeDays} day{disputeDays !== 1 ? "s" : ""} left to dispute
+            </Text>
+          </View>
+          {onDispute && order.items.filter((i) => i.fulfillment_status === "delivered").map((item) => (
+            <Pressable
+              key={item.id}
+              style={st.disputeBtn}
+              onPress={() => onDispute(order.orderId, item.id, order.sellerId)}
+            >
+              <Ionicons name="alert-circle-outline" size={14} color={C.danger} />
+              <Text style={st.disputeBtnText} numberOfLines={1}>
+                {order.items.length > 1 ? `Dispute: ${item.listing?.card_name ?? "Item"}` : "File Dispute"}
+              </Text>
+            </Pressable>
+          ))}
         </View>
       )}
 
@@ -922,6 +1110,7 @@ const st = StyleSheet.create({
 
   list: {
     paddingHorizontal: S.screenPadding,
+    paddingTop: 4,
     paddingBottom: 60,
   },
 
@@ -931,24 +1120,25 @@ const st = StyleSheet.create({
     borderRadius: 16,
     borderWidth: 1,
     borderColor: C.border,
-    marginBottom: 12,
+    marginBottom: 16,
     overflow: "hidden",
   },
 
   cardHeader: {
-    padding: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
     borderBottomWidth: 1,
     borderBottomColor: C.border,
   },
   sellerRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 10,
+    gap: 12,
   },
   sellerAvatar: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
     backgroundColor: C.elevated,
     borderWidth: 1,
     borderColor: C.border,
@@ -956,17 +1146,17 @@ const st = StyleSheet.create({
     justifyContent: "center",
     overflow: "hidden",
   },
-  sellerAvatarImg: { width: 36, height: 36, borderRadius: 18 },
-  sellerInitial: { color: C.accent, fontSize: 13, fontWeight: "900" },
-  sellerName: { color: C.textPrimary, fontSize: 13, fontWeight: "800" },
-  sellerHandle: { color: C.textSecondary, fontSize: 11, fontWeight: "600" },
+  sellerAvatarImg: { width: 38, height: 38, borderRadius: 19 },
+  sellerInitial: { color: C.accent, fontSize: 14, fontWeight: "900" },
+  sellerName: { color: C.textPrimary, fontSize: 14, fontWeight: "800" },
+  sellerHandle: { color: C.textSecondary, fontSize: 11, fontWeight: "600", marginTop: 1 },
 
   statusChip: {
     flexDirection: "row",
     alignItems: "center",
     gap: 4,
     paddingHorizontal: 10,
-    paddingVertical: 4,
+    paddingVertical: 5,
     borderRadius: 10,
     borderWidth: 1,
   },
@@ -977,18 +1167,18 @@ const st = StyleSheet.create({
 
   // ── Item rows ──
   itemList: {
-    paddingVertical: 4,
+    paddingVertical: 6,
   },
   itemRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
+    gap: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
   },
   itemThumb: {
-    width: 42,
-    height: 42,
+    width: 56,
+    height: 56,
     borderRadius: 10,
     backgroundColor: C.elevated,
     borderWidth: 1,
@@ -997,44 +1187,44 @@ const st = StyleSheet.create({
     justifyContent: "center",
     overflow: "hidden",
   },
-  itemThumbImg: { width: 42, height: 42, borderRadius: 10 },
-  itemInfo: { flex: 1, gap: 1 },
-  itemName: { color: C.textPrimary, fontSize: 13, fontWeight: "700" },
-  itemMeta: { color: C.textSecondary, fontSize: 11, fontWeight: "500" },
-  itemRight: { alignItems: "flex-end", gap: 1 },
-  itemPrice: { color: C.link, fontSize: 13, fontWeight: "900" },
-  itemQty: { color: C.textSecondary, fontSize: 10, fontWeight: "600" },
+  itemThumbImg: { width: 56, height: 56, borderRadius: 10 },
+  itemInfo: { flex: 1, gap: 3 },
+  itemName: { color: C.textPrimary, fontSize: 14, fontWeight: "700" },
+  itemMeta: { color: C.textSecondary, fontSize: 12, fontWeight: "500" },
+  itemRight: { alignItems: "flex-end", gap: 2 },
+  itemPrice: { color: C.link, fontSize: 14, fontWeight: "900" },
+  itemQty: { color: C.textSecondary, fontSize: 11, fontWeight: "600" },
 
   // ── Footer ──
   cardFooter: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    paddingHorizontal: 14,
-    paddingVertical: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
     borderTopWidth: 1,
     borderTopColor: C.border,
   },
-  footerLeft: { gap: 2 },
-  footerLabel: { color: C.textSecondary, fontSize: 11, fontWeight: "700" },
-  footerTime: { color: C.textMuted, fontSize: 10, fontWeight: "500" },
-  footerTotal: { color: C.textPrimary, fontSize: 16, fontWeight: "900" },
+  footerLeft: { gap: 3 },
+  footerLabel: { color: C.textSecondary, fontSize: 12, fontWeight: "700" },
+  footerTime: { color: C.textMuted, fontSize: 11, fontWeight: "500" },
+  footerTotal: { color: C.textPrimary, fontSize: 17, fontWeight: "900" },
 
   // ── Tracking row ──
   trackingRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
-    paddingHorizontal: S.lg,
-    paddingVertical: 8,
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
     borderTopWidth: 1,
     borderTopColor: C.border,
     backgroundColor: "rgba(44,128,255,0.04)",
   },
-  trackingLabel: { color: C.textSecondary, fontSize: 11, fontWeight: "600" },
+  trackingLabel: { color: C.textSecondary, fontSize: 12, fontWeight: "600" },
   trackingNumber: {
     color: C.textAccent,
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: "800",
     letterSpacing: 0.5,
   },
@@ -1045,14 +1235,14 @@ const st = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     gap: 8,
-    paddingVertical: 12,
+    paddingVertical: 14,
     borderTopWidth: 1,
     borderTopColor: C.border,
     backgroundColor: C.success,
   },
   receivedBtnText: {
     color: C.textHero,
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: "800",
   },
 
@@ -1060,19 +1250,24 @@ const st = StyleSheet.create({
   disputeRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
-    paddingHorizontal: S.lg,
-    paddingVertical: 8,
+    justifyContent: "space-between",
+    paddingHorizontal: 16,
+    paddingVertical: 10,
     borderTopWidth: 1,
     borderTopColor: C.border,
     backgroundColor: "rgba(34,197,94,0.05)",
   },
-  disputeText: {
+  disputeInfo: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
     flex: 1,
+  },
+  disputeText: {
     color: C.success,
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: "600",
-    lineHeight: 15,
+    lineHeight: 16,
   },
 
   // ── Pay Now button ──
@@ -1081,14 +1276,14 @@ const st = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     gap: 8,
-    paddingVertical: 12,
+    paddingVertical: 14,
     borderTopWidth: 1,
     borderTopColor: C.border,
     backgroundColor: C.success,
   },
   payNowText: {
     color: C.textHero,
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: "800",
   },
 
@@ -1098,14 +1293,14 @@ const st = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     gap: 8,
-    paddingVertical: 11,
+    paddingVertical: 13,
     borderTopWidth: 1,
     borderTopColor: C.border,
     backgroundColor: C.accentGlow,
   },
   reviewBtnText: {
     color: C.accent,
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: "800",
   },
   reviewBtnTextEdit: {
@@ -1138,4 +1333,141 @@ const st = StyleSheet.create({
     textAlign: "center",
     paddingHorizontal: 40,
   },
+
+  // ── Dispute button & modal ──
+  disputeBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: "rgba(239,68,68,0.08)",
+    borderWidth: 1,
+    borderColor: "rgba(239,68,68,0.25)",
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  disputeBtnText: { color: C.danger, fontSize: 11, fontWeight: "700" },
+
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.6)",
+    justifyContent: "center",
+    alignItems: "center",
+    paddingHorizontal: 20,
+  },
+  modalSheet: {
+    width: "100%",
+    backgroundColor: C.surface,
+    borderRadius: 16,
+    padding: 20,
+    gap: 14,
+  },
+  modalHandle: {
+    width: 36,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: C.border,
+    alignSelf: "center",
+    marginBottom: 4,
+  },
+  modalTitle: { color: C.textPrimary, fontSize: 18, fontWeight: "800" },
+  modalSubtitle: { color: C.textSecondary, fontSize: 13, fontWeight: "500", lineHeight: 18 },
+  modalLabel: { color: C.textPrimary, fontSize: 13, fontWeight: "700", marginTop: 4 },
+  reasonList: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  reasonChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: C.border,
+    backgroundColor: C.elevated,
+  },
+  reasonChipActive: {
+    borderColor: C.danger,
+    backgroundColor: "rgba(239,68,68,0.08)",
+  },
+  reasonChipText: { color: C.textSecondary, fontSize: 12, fontWeight: "600" },
+  reasonChipTextActive: { color: C.danger },
+  disputeInput: {
+    backgroundColor: C.elevated,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: C.border,
+    color: C.textPrimary,
+    fontSize: 13,
+    fontWeight: "500",
+    padding: 12,
+    minHeight: 80,
+  },
+  evidenceRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  evidenceThumbWrap: {
+    position: "relative",
+  },
+  evidenceThumb: {
+    width: 64,
+    height: 64,
+    borderRadius: 8,
+  },
+  evidenceRemove: {
+    position: "absolute",
+    top: -6,
+    right: -6,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: "#EF4444",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  evidenceAdd: {
+    width: 64,
+    height: 64,
+    borderRadius: 8,
+    borderWidth: 1.5,
+    borderColor: C.border,
+    borderStyle: "dashed",
+    backgroundColor: C.elevated,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 2,
+  },
+  evidenceAddText: {
+    color: C.textMuted,
+    fontSize: 9,
+    fontWeight: "700",
+  },
+  evidenceHint: {
+    color: "#EF4444",
+    fontSize: 11,
+    fontWeight: "600",
+    marginTop: -2,
+  },
+  modalActions: {
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 4,
+  },
+  modalCancel: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 14,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: C.border,
+  },
+  modalCancelText: { color: C.textSecondary, fontSize: 14, fontWeight: "700" },
+  modalSubmit: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 14,
+    borderRadius: 10,
+    backgroundColor: C.danger,
+  },
+  modalSubmitText: { color: "#fff", fontSize: 14, fontWeight: "800" },
 });

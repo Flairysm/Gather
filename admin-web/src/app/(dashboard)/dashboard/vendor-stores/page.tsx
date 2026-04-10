@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { useEffect, useState } from "react";
+import { adminAction } from "@/lib/adminAction";
+import { adminQuery } from "@/lib/adminQuery";
 
 type VendorStore = {
   id: string;
@@ -17,7 +18,6 @@ type VendorStore = {
 };
 
 export default function VendorStoresPage() {
-  const supabase = useMemo(() => createClient(), []);
   const [rows, setRows] = useState<VendorStore[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -31,32 +31,29 @@ export default function VendorStoresPage() {
     setLoading(true);
     setError(null);
 
-    const { data, error: queryError } = await supabase
-      .from("vendor_stores")
-      .select(
-        "id, profile_id, store_name, description, logo_url, theme_color, priority, is_active, created_at, profile:profiles(username, display_name)",
-      )
-      .order("priority", { ascending: true })
-      .order("created_at", { ascending: false });
+    const { data, error: queryError } = await adminQuery<Record<string, any>>({
+      table: "vendor_stores",
+      select: "id, profile_id, store_name, description, logo_url, theme_color, priority, is_active, created_at, profile:profiles(username, display_name)",
+      order: [{ column: "priority", ascending: true }, { column: "created_at", ascending: false }],
+    });
 
     if (queryError) {
-      setError(queryError.message);
+      setError(queryError);
       setLoading(false);
       return;
     }
 
     setRows(
-      (data ?? []).map((r: any) => ({
+      data.map((r) => ({
         ...r,
         profile: Array.isArray(r.profile) ? r.profile[0] : r.profile,
-      })),
+      })) as VendorStore[],
     );
     setLoading(false);
   }
 
   useEffect(() => {
     loadStores();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function handleSavePriority(id: string) {
@@ -67,15 +64,11 @@ export default function VendorStoresPage() {
     }
 
     setSaving(true);
-    const { error: updateError } = await supabase
-      .from("vendor_stores")
-      .update({ priority: parsed })
-      .eq("id", id);
-
+    const { ok, error: err } = await adminAction("store.updatePriority", { id, priority: parsed });
     setSaving(false);
 
-    if (updateError) {
-      setError(updateError.message);
+    if (!ok) {
+      setError(err ?? "Failed to update priority");
       return;
     }
 
@@ -85,16 +78,11 @@ export default function VendorStoresPage() {
   }
 
   async function toggleActive(id: string, active: boolean) {
-    const { error: updateError } = await supabase
-      .from("vendor_stores")
-      .update({ is_active: active })
-      .eq("id", id);
-
-    if (updateError) {
-      setError(updateError.message);
+    const { ok, error: err } = await adminAction("store.toggleActive", { id, active });
+    if (!ok) {
+      setError(err ?? "Failed to toggle store status");
       return;
     }
-
     await loadStores();
   }
 
@@ -102,39 +90,14 @@ export default function VendorStoresPage() {
     setDeleting(true);
     setError(null);
 
-    // 1) Remove seller access first (loses Vendor Hub access immediately).
-    const { error: profileErr } = await supabase
-      .from("profiles")
-      .update({ verified_seller: false })
-      .eq("id", row.profile_id);
+    const { ok, error: err } = await adminAction("store.delete", {
+      id: row.id,
+      profile_id: row.profile_id,
+    });
 
-    if (profileErr) {
+    if (!ok) {
       setDeleting(false);
-      setError(profileErr.message);
-      return;
-    }
-
-    // 2) Remove any vendor application so the user must reapply.
-    const { error: appErr } = await supabase
-      .from("vendor_applications")
-      .delete()
-      .eq("profile_id", row.profile_id);
-
-    if (appErr) {
-      setDeleting(false);
-      setError(appErr.message);
-      return;
-    }
-
-    // 3) Remove vendor store details (display items cascade-delete via FK).
-    const { error: deleteErr } = await supabase
-      .from("vendor_stores")
-      .delete()
-      .eq("id", row.id);
-
-    if (deleteErr) {
-      setDeleting(false);
-      setError(deleteErr.message);
+      setError(err ?? "Failed to delete store");
       return;
     }
 

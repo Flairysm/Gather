@@ -9,11 +9,15 @@ type AdminRole = "admin" | "user";
 
 const NAV_ITEMS = [
   { href: "/dashboard", label: "Overview" },
+  { href: "/dashboard/orders", label: "Orders" },
+  { href: "/dashboard/users", label: "Users" },
+  { href: "/dashboard/listings", label: "Listings" },
+  { href: "/dashboard/auctions", label: "Auctions" },
+  { href: "/dashboard/disputes", label: "Disputes" },
   { href: "/dashboard/featured-banners", label: "Featured Banners" },
   { href: "/dashboard/vendor-stores", label: "Vendor Stores" },
   { href: "/dashboard/vendor-applications", label: "Vendor Applications" },
-  { href: "/dashboard/listings", label: "Listings (soon)" },
-  { href: "/dashboard/users", label: "Users (soon)" },
+  { href: "/dashboard/activity-log", label: "Activity Log" },
 ];
 
 export default function DashboardLayout({ children }: { children: ReactNode }) {
@@ -90,7 +94,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
         <aside className="sticky top-4 h-[calc(100vh-2rem)] w-72 rounded-2xl border border-slate-800 bg-slate-900 p-4">
           <div className="mb-6">
             <p className="text-xs uppercase tracking-wider text-slate-500">
-              Gather Admin
+              Evend Admin
             </p>
             <h2 className="mt-2 text-lg font-semibold">Control Center</h2>
           </div>

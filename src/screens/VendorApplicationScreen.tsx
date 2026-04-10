@@ -16,6 +16,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { C, S } from "../theme";
 import { useUser } from "../data/user";
 import { supabase } from "../lib/supabase";
+import { requireNetwork } from "../lib/network";
 
 type Props = { onBack: () => void };
 
@@ -62,7 +63,7 @@ export default function VendorApplicationScreen({ onBack }: Props) {
 
       const { data, error } = await supabase
         .from("vendor_applications")
-        .select("store_name, description, categories, status, notes")
+        .select("store_name, description, categories, status, notes, experience")
         .eq("profile_id", user.id)
         .maybeSingle();
 
@@ -78,6 +79,7 @@ export default function VendorApplicationScreen({ onBack }: Props) {
         setStoreName(data.store_name ?? "");
         setDescription(data.description ?? "");
         setSelectedCategories(data.categories ?? []);
+        setExperience((data as any).experience ?? "");
         setReviewNotes(data.notes ?? null);
         if (data.status === "approved") setVendorStatus("approved");
         if (data.status === "pending") {
@@ -101,6 +103,7 @@ export default function VendorApplicationScreen({ onBack }: Props) {
   }, [setVendorStatus]);
 
   async function handleSubmit() {
+    if (!(await requireNetwork())) return;
     setFormError(null);
     setSubmitting(true);
 
@@ -119,7 +122,7 @@ export default function VendorApplicationScreen({ onBack }: Props) {
       store_name: storeName.trim(),
       description: description.trim(),
       categories: selectedCategories,
-      notes: experience.trim() || null,
+      experience: experience.trim() || null,
       status: "pending" as const,
       updated_at: new Date().toISOString(),
     };
@@ -145,6 +148,37 @@ export default function VendorApplicationScreen({ onBack }: Props) {
         <StatusBar style="light" />
         <View style={st.loadingWrap}>
           <ActivityIndicator size="large" color={C.accent} />
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  if (vendorStatus === "approved") {
+    return (
+      <SafeAreaView style={st.safe}>
+        <StatusBar style="light" />
+        <View style={st.header}>
+          <Pressable style={st.backBtn} onPress={onBack}>
+            <Feather name="arrow-left" size={20} color={C.textPrimary} />
+          </Pressable>
+          <Text style={st.headerTitle}>Vendor Application</Text>
+          <View style={{ width: 36 }} />
+        </View>
+        <View style={st.pendingState}>
+          <View style={[st.pendingCircle, { backgroundColor: C.success }]}>
+            <Ionicons name="checkmark" size={36} color={C.textHero} />
+          </View>
+          <Text style={st.pendingTitle}>Application Approved</Text>
+          <Text style={st.pendingSub}>
+            Congratulations! Your vendor application has been approved.
+            You can now manage your store from the Vendor Hub.
+          </Text>
+          <Pressable
+            style={[st.doneBtn, { marginBottom: Math.max(insets.bottom, 14) }]}
+            onPress={onBack}
+          >
+            <Text style={st.doneBtnText}>Go to Vendor Hub</Text>
+          </Pressable>
         </View>
       </SafeAreaView>
     );
@@ -226,7 +260,7 @@ export default function VendorApplicationScreen({ onBack }: Props) {
 
         <View style={st.introCard}>
           <Ionicons name="storefront" size={28} color={C.accent} />
-          <Text style={st.introTitle}>Start Selling on Gather</Text>
+          <Text style={st.introTitle}>Start Selling on Evend</Text>
           <Text style={st.introSub}>
             Apply to become a verified vendor. Once approved, you'll be able to
             list cards for sale, manage orders, and build your seller reputation.
@@ -309,7 +343,7 @@ export default function VendorApplicationScreen({ onBack }: Props) {
         <View style={st.termsRow}>
           <Ionicons name="information-circle" size={16} color={C.textAccent} />
           <Text style={st.termsText}>
-            By applying, you agree to Gather's Vendor Terms of Service and
+            By applying, you agree to Evend's Vendor Terms of Service and
             commit to maintaining quality listings and timely shipping.
           </Text>
         </View>

@@ -21,6 +21,9 @@ import { C } from "../theme";
 import { cf } from "../styles/createForm.styles";
 import { MARKET_FILTERS } from "../data/market";
 import { supabase } from "../lib/supabase";
+import { requireNetwork } from "../lib/network";
+import GradeConditionPicker from "../components/GradeConditionPicker";
+import { formatGradeCombined } from "../data/grading";
 
 const CATEGORIES = MARKET_FILTERS.filter((f) => f !== "All");
 
@@ -35,7 +38,8 @@ export default function CreateWantedScreen({ onBack }: Props) {
   const [cardName, setCardName] = useState("");
   const [edition, setEdition] = useState("");
   const [category, setCategory] = useState("");
-  const [gradeWanted, setGradeWanted] = useState("");
+  const [gradingCompany, setGradingCompany] = useState<string | null>(null);
+  const [gradeValue, setGradeValue] = useState<string | null>(null);
   const [offerPrice, setOfferPrice] = useState("");
   const [description, setDescription] = useState("");
 
@@ -86,6 +90,7 @@ export default function CreateWantedScreen({ onBack }: Props) {
   }
 
   async function handleSubmit() {
+    if (!(await requireNetwork())) return;
     setSubmitting(true);
 
     const { data: { user } } = await supabase.auth.getUser();
@@ -139,7 +144,9 @@ export default function CreateWantedScreen({ onBack }: Props) {
         buyer_id: user.id,
         card_name: cardName.trim(),
         edition: edition.trim() || null,
-        grade_wanted: gradeWanted.trim() || null,
+        grade_wanted: formatGradeCombined(gradingCompany, gradeValue),
+        grading_company_wanted: gradingCompany,
+        grade_value_wanted: gradeValue,
         offer_price: numericPrice,
         category,
         description: description.trim() || null,
@@ -293,13 +300,14 @@ export default function CreateWantedScreen({ onBack }: Props) {
                 ))}
               </View>
 
-              <Text style={cf.fieldLabel}>Grade Wanted</Text>
-              <TextInput
-                style={cf.textInput}
-                value={gradeWanted}
-                onChangeText={setGradeWanted}
-                placeholder="e.g. PSA 9+, BGS 9.5"
-                placeholderTextColor={C.textMuted}
+              <GradeConditionPicker
+                gradingCompany={gradingCompany}
+                gradeValue={gradeValue}
+                condition={null}
+                onChangeGradingCompany={setGradingCompany}
+                onChangeGradeValue={setGradeValue}
+                onChangeCondition={() => {}}
+                mode="grade-only"
               />
             </>
           )}
@@ -364,7 +372,9 @@ export default function CreateWantedScreen({ onBack }: Props) {
                 </View>
                 <View style={cf.reviewRow}>
                   <Text style={cf.reviewLabel}>Grade Wanted</Text>
-                  <Text style={cf.reviewValue}>{gradeWanted || "—"}</Text>
+                  <Text style={cf.reviewValue}>
+                    {formatGradeCombined(gradingCompany, gradeValue) || "—"}
+                  </Text>
                 </View>
                 <View style={cf.reviewDivider} />
                 <View style={cf.reviewRow}>

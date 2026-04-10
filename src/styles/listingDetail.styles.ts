@@ -442,6 +442,7 @@ export const ld = StyleSheet.create({
     borderColor: C.accent,
     alignItems: "center",
     justifyContent: "center",
+    overflow: "hidden",
   },
   sellerAvatarText: {
     color: C.textHero,

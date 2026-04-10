@@ -20,6 +20,7 @@ type Address = {
   id: string;
   label: string;
   full_name: string;
+  phone: string | null;
   address_line1: string;
   address_line2: string | null;
   city: string;
@@ -40,12 +41,17 @@ export default function AddressBookScreen({ onBack }: Props) {
   const load = useCallback(async () => {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("user_addresses")
       .select("*")
       .eq("user_id", user.id)
       .order("is_default", { ascending: false })
       .order("created_at", { ascending: false });
+    if (error) {
+      console.warn("AddressBookScreen load failed:", error.message);
+      setAddresses([]);
+      return;
+    }
     if (data) setAddresses(data as Address[]);
   }, []);
 
@@ -62,8 +68,15 @@ export default function AddressBookScreen({ onBack }: Props) {
   async function handleSetDefault(id: string) {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
-    await supabase.from("user_addresses").update({ is_default: false }).eq("user_id", user.id);
-    await supabase.from("user_addresses").update({ is_default: true }).eq("id", id);
+    const { error: clearError } = await supabase.from("user_addresses").update({ is_default: false }).eq("user_id", user.id);
+    if (clearError) {
+      console.warn("AddressBookScreen clear default failed:", clearError.message);
+      return;
+    }
+    const { error: setError } = await supabase.from("user_addresses").update({ is_default: true }).eq("id", id);
+    if (setError) {
+      console.warn("AddressBookScreen set default failed:", setError.message);
+    }
     load();
   }
 
@@ -77,7 +90,10 @@ export default function AddressBookScreen({ onBack }: Props) {
           text: "Delete",
           style: "destructive",
           onPress: async () => {
-            await supabase.from("user_addresses").delete().eq("id", address.id);
+            const { error } = await supabase.from("user_addresses").delete().eq("id", address.id);
+            if (error) {
+              console.warn("AddressBookScreen delete failed:", error.message);
+            }
             load();
           },
         },
@@ -171,10 +187,11 @@ export default function AddressBookScreen({ onBack }: Props) {
               </View>
 
               <Text style={st.cardName}>{addr.full_name}</Text>
+              {addr.phone ? <Text style={st.cardPhone}>{addr.phone}</Text> : null}
               <Text style={st.cardLine}>{addr.address_line1}</Text>
               {addr.address_line2 ? <Text style={st.cardLine}>{addr.address_line2}</Text> : null}
-              <Text style={st.cardLine}>{addr.city}, {addr.state} {addr.zip}</Text>
-              <Text style={st.cardCountry}>{addr.country}</Text>
+              <Text style={st.cardLine}>{addr.zip} {addr.city}, {addr.state}</Text>
+              <Text style={st.cardCountry}>Malaysia</Text>
 
               {!addr.is_default && (
                 <Pressable style={st.setDefaultBtn} onPress={() => handleSetDefault(addr.id)}>
@@ -260,6 +277,7 @@ const st = StyleSheet.create({
     alignItems: "center", justifyContent: "center",
   },
   cardName: { color: C.textPrimary, fontSize: 14, fontWeight: "700" },
+  cardPhone: { color: C.textSecondary, fontSize: 13, fontWeight: "500" },
   cardLine: { color: C.textSecondary, fontSize: 13, fontWeight: "500" },
   cardCountry: { color: C.textMuted, fontSize: 12, fontWeight: "600", marginTop: 2 },
   setDefaultBtn: {

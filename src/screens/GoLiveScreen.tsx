@@ -632,7 +632,7 @@ function LiveHostView({
   }, [streamId, onEnd]);
 
   const handleShare = useCallback(async () => {
-    await Share.share({ message: "I'm live on Gather right now! Come watch!" });
+    await Share.share({ message: "I'm live on Evend right now! Come watch!" });
   }, []);
 
   const flipCamera = () => {

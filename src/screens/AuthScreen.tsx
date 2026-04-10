@@ -87,7 +87,7 @@ export default function AuthScreen() {
             <View style={st.logoWrap}>
               <Ionicons name="albums" size={22} color={C.textHero} />
             </View>
-            <Text style={st.title}>Gather</Text>
+            <Text style={st.title}>Evend</Text>
             <Text style={st.subtitle}>
               {mode === "login"
                 ? "Sign in to continue"

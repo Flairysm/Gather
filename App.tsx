@@ -13,9 +13,14 @@ export default function App() {
 
   useEffect(() => {
     let mounted = true;
-    const loadingTimeout = setTimeout(() => {
-      if (mounted) setCheckingSession(false);
-    }, 4000);
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      if (!mounted) return;
+      setSession(nextSession);
+      setCheckingSession(false);
+    });
 
     supabase.auth.getSession().then(({ data }) => {
       if (!mounted) return;
@@ -23,12 +28,9 @@ export default function App() {
       setCheckingSession(false);
     });
 
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      setSession(nextSession);
-      setCheckingSession(false);
-    });
+    const loadingTimeout = setTimeout(() => {
+      if (mounted) setCheckingSession(false);
+    }, 8000);
 
     return () => {
       mounted = false;

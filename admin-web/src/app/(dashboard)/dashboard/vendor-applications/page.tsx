@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { useEffect, useState } from "react";
+import { adminAction } from "@/lib/adminAction";
+import { adminQuery } from "@/lib/adminQuery";
 
 type VendorApplication = {
   id: string;
@@ -16,12 +17,10 @@ type VendorApplication = {
 };
 
 export default function VendorApplicationsPage() {
-  const supabase = useMemo(() => createClient(), []);
   const [rows, setRows] = useState<VendorApplication[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<VendorApplication | null>(null);
-  const [adminId, setAdminId] = useState<string | null>(null);
   const [adminNote, setAdminNote] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -29,104 +28,46 @@ export default function VendorApplicationsPage() {
     setLoading(true);
     setError(null);
 
-    const { data, error: queryError } = await supabase
-      .from("vendor_applications")
-      .select(
-        "id, profile_id, store_name, description, categories, notes, status, reviewed_at, created_at",
-      )
-      .order("created_at", { ascending: false });
+    const { data, error: queryError } = await adminQuery<VendorApplication>({
+      table: "vendor_applications",
+      select: "id, profile_id, store_name, description, categories, notes, status, reviewed_at, created_at",
+      order: [{ column: "created_at", ascending: false }],
+    });
 
     if (queryError) {
-      setError(queryError.message);
+      setError(queryError);
       setLoading(false);
       return;
     }
 
-    setRows((data ?? []) as VendorApplication[]);
+    setRows(data);
     setLoading(false);
   }
 
   useEffect(() => {
-    let mounted = true;
-
-    async function boot() {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (!mounted) return;
-      setAdminId(user?.id ?? null);
-      await load();
-    }
-
-    boot();
-
-    return () => {
-      mounted = false;
-    };
-  }, [supabase]);
+    load();
+  }, []);
 
   async function updateApplicationStatus(
     row: VendorApplication,
     status: "approved" | "rejected",
   ) {
-    if (!adminId) {
-      setError("Cannot resolve current admin user.");
-      return;
-    }
-
     setSaving(true);
     setError(null);
 
-    const now = new Date().toISOString();
-    const trimmedNote = adminNote.trim();
+    const { ok, error: err } = await adminAction("vendor.review", {
+      id: row.id,
+      profile_id: row.profile_id,
+      status,
+      notes: adminNote.trim() || row.notes,
+      store_name: row.store_name,
+      description: row.description,
+    });
 
-    const { error: appErr } = await supabase
-      .from("vendor_applications")
-      .update({
-        status,
-        reviewed_by: adminId,
-        reviewed_at: now,
-        notes: trimmedNote || row.notes,
-        updated_at: now,
-      })
-      .eq("id", row.id);
-
-    if (appErr) {
+    if (!ok) {
       setSaving(false);
-      setError(appErr.message);
+      setError(err ?? "Failed to update application");
       return;
-    }
-
-    const { error: profileErr } = await supabase
-      .from("profiles")
-      .update({ verified_seller: status === "approved" })
-      .eq("id", row.profile_id);
-
-    if (profileErr) {
-      setSaving(false);
-      setError(profileErr.message);
-      return;
-    }
-
-    if (status === "approved") {
-      const { error: storeErr } = await supabase
-        .from("vendor_stores")
-        .upsert(
-          {
-            profile_id: row.profile_id,
-            store_name: row.store_name?.trim() || "Untitled Store",
-            description: row.description?.trim() || null,
-            is_active: true,
-            updated_at: now,
-          },
-          { onConflict: "profile_id" },
-        );
-
-      if (storeErr) {
-        setSaving(false);
-        setError(storeErr.message);
-        return;
-      }
     }
 
     setSaving(false);

@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { supabase } from "../lib/supabase";
 import { countUnreadConversations } from "../data/messages";
 
 export type BadgeCounts = {
   unreadChats: number;
   unreadNotifications: number;
+  pendingShipments: number;
   myOrders: number;
   myOrdersByCategory: {
     pending: number;
@@ -17,62 +18,60 @@ export type BadgeCounts = {
   };
 };
 
+export type BadgeContextValue = {
+  counts: BadgeCounts;
+  refresh: () => Promise<void>;
+};
+
+export const BadgeContext = createContext<BadgeContextValue>({
+  counts: {
+    unreadChats: 0,
+    unreadNotifications: 0,
+    pendingShipments: 0,
+    myOrders: 0,
+    myOrdersByCategory: {
+      pending: 0, confirmed: 0, shipped: 0, delivered: 0,
+      to_rate: 0, refunded: 0, cancelled: 0,
+    },
+  },
+  refresh: async () => {},
+});
+
+export function useBadgeContext() {
+  return useContext(BadgeContext);
+}
+
 async function computeUnreadNotifications(userId: string): Promise<number> {
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("notifications_last_seen_at")
-    .eq("id", userId)
-    .maybeSingle();
+  const { count, error } = await supabase
+    .from("notifications")
+    .select("id", { count: "exact", head: true })
+    .eq("user_id", userId)
+    .eq("is_read", false);
+  if (error) console.warn("Badge: unread notifications error:", error.message);
+  return count ?? 0;
+}
 
-  const seenAt = profile?.notifications_last_seen_at
-    ? new Date(profile.notifications_last_seen_at).getTime()
-    : 0;
-
-  const [winsRes, bidsRes, ordersRes] = await Promise.all([
-    supabase
-      .from("auction_wins")
-      .select("id, created_at, payment_status")
-      .eq("winner_id", userId)
-      .order("created_at", { ascending: false })
-      .limit(100),
-    supabase
-      .from("auction_bids")
-      .select("id, auction_id, created_at, auction:auction_items!auction_id(status, highest_bidder_id)")
-      .eq("bidder_id", userId)
-      .order("created_at", { ascending: false })
-      .limit(150),
-    supabase
-      .from("order_items")
-      .select("id, fulfillment_status, created_at, order:orders!inner(id, buyer_id)")
-      .eq("order.buyer_id", userId)
-      .order("created_at", { ascending: false })
-      .limit(150),
-  ]);
-
-  let count = 0;
-
-  for (const w of winsRes.data ?? []) {
-    if ((w as any).payment_status !== "pending" && (w as any).payment_status !== "expired") continue;
-    if (new Date((w as any).created_at).getTime() > seenAt) count += 1;
+async function computePendingShipments(userId: string): Promise<number> {
+  const { data: sellerListings, error: listErr } = await supabase
+    .from("listings")
+    .select("id")
+    .eq("seller_id", userId)
+    .limit(500);
+  if (listErr) {
+    console.warn("Badge: seller listings error:", listErr.message);
+    return 0;
   }
+  if (!sellerListings || sellerListings.length === 0) return 0;
 
-  const seenOutbid = new Set<string>();
-  for (const b of bidsRes.data ?? []) {
-    const auction = Array.isArray((b as any).auction) ? (b as any).auction[0] : (b as any).auction;
-    if (!auction || auction.status !== "active") continue;
-    if (auction.highest_bidder_id === userId) continue;
-    if (seenOutbid.has((b as any).auction_id)) continue;
-    seenOutbid.add((b as any).auction_id);
-    if (new Date((b as any).created_at).getTime() > seenAt) count += 1;
-  }
+  const listingIds = sellerListings.map((l: any) => l.id);
+  const { count, error } = await supabase
+    .from("order_items")
+    .select("id", { count: "exact", head: true })
+    .in("listing_id", listingIds)
+    .eq("fulfillment_status", "confirmed");
+  if (error) console.warn("Badge: pending shipments error:", error.message);
 
-  for (const oi of ordersRes.data ?? []) {
-    const st = (oi as any).fulfillment_status;
-    if (st !== "shipped" && st !== "delivered") continue;
-    if (new Date((oi as any).created_at).getTime() > seenAt) count += 1;
-  }
-
-  return count;
+  return count ?? 0;
 }
 
 function emptyOrderCategoryCounts() {
@@ -91,13 +90,12 @@ async function computeMyOrdersBadges(userId: string): Promise<{
   total: number;
   byCategory: BadgeCounts["myOrdersByCategory"];
 }> {
-  const [{ data: orderItems }, { data: wins }] = await Promise.all([
+  const [orderResult, winsResult] = await Promise.all([
     supabase
       .from("order_items")
       .select("order_id, fulfillment_status, order:orders!inner(id, buyer_id)")
       .eq("order.buyer_id", userId)
       .limit(500),
-    // Only fetch unpaid auction wins — paid ones now create real order_items
     supabase
       .from("auction_wins")
       .select("id")
@@ -105,6 +103,10 @@ async function computeMyOrdersBadges(userId: string): Promise<{
       .eq("payment_status", "pending")
       .limit(200),
   ]);
+  if (orderResult.error) console.warn("Badge: order items error:", orderResult.error.message);
+  if (winsResult.error) console.warn("Badge: auction wins error:", winsResult.error.message);
+  const orderItems = orderResult.data;
+  const wins = winsResult.data;
 
   const byCategory = emptyOrderCategoryCounts();
   const statusPriority = [
@@ -138,11 +140,12 @@ async function computeMyOrdersBadges(userId: string): Promise<{
   }
 
   if (deliveredOrderIds.length > 0) {
-    const { data: reviews } = await supabase
+    const { data: reviews, error: revErr } = await supabase
       .from("reviews")
       .select("order_id")
       .eq("reviewer_id", userId)
       .in("order_id", deliveredOrderIds);
+    if (revErr) console.warn("Badge: reviews error:", revErr.message);
     const reviewed = new Set<string>((reviews ?? []).map((r: any) => r.order_id));
     byCategory.to_rate = deliveredOrderIds.filter((id) => !reviewed.has(id)).length;
   }
@@ -150,7 +153,7 @@ async function computeMyOrdersBadges(userId: string): Promise<{
   // Unpaid auction wins count as "To Pay"
   byCategory.pending += (wins ?? []).length;
 
-  const total = byCategory.pending + byCategory.confirmed + byCategory.shipped;
+  const total = byCategory.pending + byCategory.confirmed + byCategory.shipped + byCategory.to_rate;
   return { total, byCategory };
 }
 
@@ -158,6 +161,7 @@ export function useBadgeCounts() {
   const [counts, setCounts] = useState<BadgeCounts>({
     unreadChats: 0,
     unreadNotifications: 0,
+    pendingShipments: 0,
     myOrders: 0,
     myOrdersByCategory: emptyOrderCategoryCounts(),
   });
@@ -169,21 +173,24 @@ export function useBadgeCounts() {
       setCounts({
         unreadChats: 0,
         unreadNotifications: 0,
+        pendingShipments: 0,
         myOrders: 0,
         myOrdersByCategory: emptyOrderCategoryCounts(),
       });
       return;
     }
 
-    const [unreadChats, unreadNotifications, myOrderBadges] = await Promise.all([
+    const [unreadChats, unreadNotifications, pendingShipments, myOrderBadges] = await Promise.all([
       countUnreadConversations(userId),
       computeUnreadNotifications(userId),
+      computePendingShipments(userId),
       computeMyOrdersBadges(userId),
     ]);
 
     setCounts({
       unreadChats,
       unreadNotifications,
+      pendingShipments,
       myOrders: myOrderBadges.total,
       myOrdersByCategory: myOrderBadges.byCategory,
     });
@@ -193,8 +200,31 @@ export function useBadgeCounts() {
     refresh().catch(() => {});
     const id = setInterval(() => {
       refresh().catch(() => {});
-    }, 15000);
+    }, 30000);
     return () => clearInterval(id);
+  }, [refresh]);
+
+  useEffect(() => {
+    const channel = supabase
+      .channel("badge-messages")
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "messages" },
+        () => { refresh().catch(() => {}); },
+      )
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "order_items" },
+        () => { refresh().catch(() => {}); },
+      )
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "notifications" },
+        () => { refresh().catch(() => {}); },
+      )
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
   }, [refresh]);
 
   return { counts, refresh };

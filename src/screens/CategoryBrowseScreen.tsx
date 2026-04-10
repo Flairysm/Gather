@@ -15,6 +15,7 @@ import { C, S } from "../theme";
 import { supabase } from "../lib/supabase";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import { ALL_CATEGORIES, type CategoryDef } from "../data/categories";
+import ErrorState from "../components/ErrorState";
 import { StyleSheet } from "react-native";
 
 const SCREEN_W = Dimensions.get("window").width;
@@ -53,17 +54,26 @@ export default function CategoryBrowseScreen({
   const { push } = useAppNavigation();
   const [stats, setStats] = useState<Record<string, CatStats>>({});
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [sortMode, setSortMode] = useState<SortMode>("recommended");
   const [search, setSearch] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
-    const { data } = await supabase
+    setLoadError(false);
+    const { data, error } = await supabase
       .from("listings")
       .select("category, images")
       .eq("status", "active")
       .order("created_at", { ascending: false })
       .limit(500);
+
+    if (error) {
+      console.warn("CategoryBrowse load error:", error.message);
+      setLoadError(true);
+      setLoading(false);
+      return;
+    }
 
     if (data) {
       const map: Record<string, CatStats> = {};
@@ -160,6 +170,11 @@ export default function CategoryBrowseScreen({
         <View style={st.loadingWrap}>
           <ActivityIndicator size="large" color={C.accent} />
         </View>
+      ) : loadError ? (
+        <ErrorState
+          message="Failed to load categories. Check your connection and try again."
+          onRetry={load}
+        />
       ) : (
         <ScrollView
           showsVerticalScrollIndicator={false}

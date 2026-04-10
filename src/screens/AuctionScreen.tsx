@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ActivityIndicator,
+  Dimensions,
   Pressable,
   RefreshControl,
   SafeAreaView,
   ScrollView,
+  StyleSheet,
   Text,
   TextInput,
   View,
 } from "react-native";
 import CachedImage from "../components/CachedImage";
+import Shimmer, { ShimmerGroup } from "../components/Shimmer";
 import { StatusBar } from "expo-status-bar";
 import { Feather, Ionicons } from "@expo/vector-icons";
 
@@ -49,6 +51,7 @@ type AuctionRow = {
   };
 };
 
+type AuctionTab = "live" | "ended";
 type SortKey = "ending" | "newest" | "bids" | "priceLow" | "priceHigh";
 
 const SORT_OPTIONS: { key: SortKey; label: string }[] = [
@@ -105,6 +108,7 @@ export default function AuctionScreen() {
   >({});
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [auctionTab, setAuctionTab] = useState<AuctionTab>("live");
   const [activeFilter, setActiveFilter] = useState("All");
   const [sortKey, setSortKey] = useState<SortKey>("ending");
   const [searchQuery, setSearchQuery] = useState("");
@@ -122,7 +126,7 @@ export default function AuctionScreen() {
   }, []);
 
   const load = useCallback(async () => {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("auction_items")
       .select(`
         id, seller_id, card_name, edition, grade, condition,
@@ -134,6 +138,13 @@ export default function AuctionScreen() {
       .in("status", ["active", "ended"])
       .order("ends_at", { ascending: true })
       .limit(200);
+
+    if (error) {
+      console.warn("AuctionScreen load failed:", error.message);
+      setAuctions([]);
+      setVendorStores({});
+      return;
+    }
 
     if (data) {
       const mapped: AuctionRow[] = (data as any[]).map((r) => ({
@@ -191,8 +202,17 @@ export default function AuctionScreen() {
     setRefreshing(false);
   }
 
+  const liveAuctions = useMemo(
+    () => auctions.filter((i) => i.status === "active" && new Date(i.ends_at).getTime() > Date.now()),
+    [auctions],
+  );
+  const endedAuctions = useMemo(
+    () => auctions.filter((i) => i.status === "ended" || new Date(i.ends_at).getTime() <= Date.now()),
+    [auctions],
+  );
+
   const filtered = useMemo(() => {
-    let items = auctions;
+    let items = auctionTab === "live" ? liveAuctions : endedAuctions;
 
     if (activeFilter !== "All") {
       items = items.filter((i) => i.category === activeFilter);
@@ -227,10 +247,13 @@ export default function AuctionScreen() {
         break;
     }
 
-    const watched = sorted.filter((i) => watchedSet.has(i.id));
-    const rest = sorted.filter((i) => !watchedSet.has(i.id));
-    return [...watched, ...rest];
-  }, [auctions, activeFilter, searchQuery, sortKey, watchedSet]);
+    if (auctionTab === "live") {
+      const watched = sorted.filter((i) => watchedSet.has(i.id));
+      const rest = sorted.filter((i) => !watchedSet.has(i.id));
+      return [...watched, ...rest];
+    }
+    return sorted;
+  }, [auctions, liveAuctions, endedAuctions, auctionTab, activeFilter, searchQuery, sortKey, watchedSet]);
 
   function getSellerLabel(item: AuctionRow): string {
     return (
@@ -241,12 +264,33 @@ export default function AuctionScreen() {
   }
 
   if (loading) {
+    const skW = (Dimensions.get("window").width - S.screenPadding * 2 - S.cardGap) / 2;
     return (
       <SafeAreaView style={a.safe}>
         <StatusBar style="light" />
-        <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
-          <ActivityIndicator size="large" color={C.accent} />
-        </View>
+        <ScrollView contentContainerStyle={a.scroll}>
+          <View style={{ paddingHorizontal: S.screenPadding, gap: S.md, paddingTop: S.md }}>
+            <Shimmer width="100%" height={42} borderRadius={S.radiusSmall} />
+            <View style={{ flexDirection: "row", gap: 8 }}>
+              {[80, 65, 70, 55, 60].map((w, i) => (
+                <Shimmer key={i} width={w} height={32} borderRadius={16} />
+              ))}
+            </View>
+          </View>
+          <ShimmerGroup>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: S.cardGap, paddingHorizontal: S.screenPadding, paddingTop: S.lg }}>
+              {[0, 1, 2, 3, 4, 5].map((i) => (
+                <View key={i} style={{ width: skW, gap: 8, marginBottom: S.md }}>
+                  <Shimmer width="100%" height={skW * 1.2} borderRadius={S.radiusCardInner} />
+                  <Shimmer width="80%" height={13} borderRadius={5} />
+                  <Shimmer width="50%" height={11} borderRadius={5} />
+                  <Shimmer width="40%" height={16} borderRadius={6} />
+                  <Shimmer width="100%" height={32} borderRadius={10} />
+                </View>
+              ))}
+            </View>
+          </ShimmerGroup>
+        </ScrollView>
       </SafeAreaView>
     );
   }
@@ -278,6 +322,28 @@ export default function AuctionScreen() {
                 </Pressable>
               )}
             </View>
+          </View>
+
+          {/* Live / Ended tabs */}
+          <View style={localSt.tabRow}>
+            <Pressable
+              style={[localSt.tab, auctionTab === "live" && localSt.tabActive]}
+              onPress={() => setAuctionTab("live")}
+            >
+              <Ionicons name="flash-outline" size={14} color={auctionTab === "live" ? C.accent : C.textMuted} />
+              <Text style={[localSt.tabText, auctionTab === "live" && localSt.tabTextActive]}>
+                Live ({liveAuctions.length})
+              </Text>
+            </Pressable>
+            <Pressable
+              style={[localSt.tab, auctionTab === "ended" && localSt.tabActive]}
+              onPress={() => setAuctionTab("ended")}
+            >
+              <Ionicons name="checkmark-done-outline" size={14} color={auctionTab === "ended" ? C.accent : C.textMuted} />
+              <Text style={[localSt.tabText, auctionTab === "ended" && localSt.tabTextActive]}>
+                Ended ({endedAuctions.length})
+              </Text>
+            </Pressable>
           </View>
 
           <ScrollView
@@ -318,8 +384,10 @@ export default function AuctionScreen() {
 
           {filtered.length === 0 ? (
             <View style={a.emptyWrap}>
-              <Ionicons name="hammer-outline" size={36} color={C.textMuted} />
-              <Text style={a.emptyText}>No auctions found</Text>
+              <Ionicons name={auctionTab === "live" ? "flash-outline" : "checkmark-done-outline"} size={36} color={C.textMuted} />
+              <Text style={a.emptyText}>
+                {auctionTab === "live" ? "No live auctions right now" : "No ended auctions"}
+              </Text>
             </View>
           ) : (
             <View style={a.grid}>
@@ -434,3 +502,35 @@ export default function AuctionScreen() {
     </SafeAreaView>
   );
 }
+
+const localSt = StyleSheet.create({
+  tabRow: {
+    flexDirection: "row",
+    gap: 8,
+    marginBottom: S.md,
+  },
+  tab: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    paddingVertical: 10,
+    borderRadius: 12,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border,
+  },
+  tabActive: {
+    backgroundColor: C.accentGlow,
+    borderColor: C.accent,
+  },
+  tabText: {
+    color: C.textMuted,
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  tabTextActive: {
+    color: C.accent,
+  },
+});

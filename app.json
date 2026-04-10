@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "Gather",
-    "slug": "Gather",
+    "name": "Evend",
+    "slug": "Evend",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -13,7 +13,7 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.flairysm.Gather"
+      "bundleIdentifier": "com.flairysm.Evend"
     },
     "android": {
       "adaptiveIcon": {
@@ -37,8 +37,8 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "Gather needs camera access to go live and stream to your viewers.",
-          "microphonePermission": "Gather needs microphone access so viewers can hear you during live streams.",
+          "cameraPermission": "Evend needs camera access to go live and stream to your viewers.",
+          "microphonePermission": "Evend needs microphone access so viewers can hear you during live streams.",
           "recordAudioAndroid": true
         }
       ]

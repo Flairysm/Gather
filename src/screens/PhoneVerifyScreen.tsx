@@ -181,7 +181,7 @@ export default function PhoneVerifyScreen({ onBack }: Props) {
                   style={st.phoneInput}
                   value={formatPhone(phone)}
                   onChangeText={(t) => setPhone(t.replace(/\D/g, "").slice(0, 10))}
-                  placeholder="(555) 123-4567"
+                  placeholder="12 345 6789"
                   placeholderTextColor={C.textMuted}
                   keyboardType="phone-pad"
                   autoFocus
@@ -189,14 +189,14 @@ export default function PhoneVerifyScreen({ onBack }: Props) {
               </View>
 
               <Pressable
-                style={[st.primaryBtn, phoneDigits.length < 10 && st.primaryBtnDisabled]}
+                style={[st.primaryBtn, phoneDigits.length < 9 && st.primaryBtnDisabled]}
                 onPress={handleSendCode}
-                disabled={phoneDigits.length < 10 || sending}
+                disabled={phoneDigits.length < 9 || sending}
               >
                 {sending ? (
                   <ActivityIndicator size="small" color={C.textHero} />
                 ) : (
-                  <Text style={[st.primaryBtnText, phoneDigits.length < 10 && st.primaryBtnTextDisabled]}>
+                  <Text style={[st.primaryBtnText, phoneDigits.length < 9 && st.primaryBtnTextDisabled]}>
                     Send Verification Code
                   </Text>
                 )}

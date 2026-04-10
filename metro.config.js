@@ -10,10 +10,7 @@ config.resolver.nodeModulesPaths = [path.resolve(__dirname, "node_modules")];
 config.resolver.disableHierarchicalLookup = true;
 
 config.resolver.extraNodeModules = {
-  "@react-native-async-storage/async-storage": path.resolve(
-    __dirname,
-    "asyncStorageMock.js",
-  ),
+  "react-native-agora": path.resolve(__dirname, "agoraStub.js"),
 };
 
 module.exports = config;

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   Image,
   KeyboardAvoidingView,
   Platform,
@@ -14,23 +15,30 @@ import {
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { Feather, Ionicons } from "@expo/vector-icons";
+import * as ImagePicker from "expo-image-picker";
 import { C, S } from "../theme";
 import {
   findOrCreateConversation,
   loadMessages,
   sendTextMessage,
   sendOfferMessage,
+  sendImageMessage,
   updateOfferStatus,
+  updateOfferAmount,
   subscribeToMessages,
   markConversationRead,
   type Message,
   type OfferMessage,
+  type ImageMessage,
+  type ListingShareMessage,
   type OfferStatus,
 } from "../data/messages";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import { useCart } from "../data/cart";
+import { useBadgeContext } from "../hooks/useBadgeCounts";
 import type { Listing } from "../data/market";
 import { supabase } from "../lib/supabase";
+import { requireNetwork } from "../lib/network";
 
 type Props = {
   conversationId?: string;
@@ -103,11 +111,17 @@ const STATUS_CONFIG: Record<
     border: "rgba(245,158,11,0.25)",
     color: "#F59E0B",
   },
+  withdrawn: {
+    label: "Withdrawn",
+    icon: "arrow-undo-outline",
+    bg: "rgba(107,114,128,0.08)",
+    border: "rgba(107,114,128,0.25)",
+    color: C.textMuted,
+  },
 };
 
 function OfferBubble({
   msg,
-  listing,
   isBuyer,
   inCart,
   onTapItem,
@@ -115,9 +129,10 @@ function OfferBubble({
   onDecline,
   onCounter,
   onAddToCart,
+  onWithdraw,
+  onEdit,
 }: {
   msg: OfferMessage;
-  listing: ListingContext | null;
   isBuyer: boolean;
   inCart?: boolean;
   onTapItem?: () => void;
@@ -125,11 +140,14 @@ function OfferBubble({
   onDecline?: () => void;
   onCounter?: () => void;
   onAddToCart?: () => void;
+  onWithdraw?: () => void;
+  onEdit?: () => void;
 }) {
   const cfg = STATUS_CONFIG[msg.status];
   const showActions = !msg.isMe && msg.status === "pending";
+  const showSenderActions = msg.isMe && msg.status === "pending";
   const showAddToCart = msg.status === "accepted" && isBuyer && !!onAddToCart;
-  const imageUrl = listing?.images?.[0];
+  const imageUrl = msg.listingImage;
 
   return (
     <View style={[st.offerCard, msg.isMe && st.offerCardMe]}>
@@ -146,10 +164,10 @@ function OfferBubble({
           <Text style={st.offerItemName} numberOfLines={1}>
             {msg.cardName}
           </Text>
-          {listing && (
+          {msg.listingPrice != null && (
             <Text style={st.offerItemPrice}>
               Asking: RM
-              {Number(listing.price).toLocaleString("en-MY", {
+              {Number(msg.listingPrice).toLocaleString("en-MY", {
                 maximumFractionDigits: 0,
               })}
             </Text>
@@ -199,6 +217,19 @@ function OfferBubble({
         </View>
       )}
 
+      {showSenderActions && (
+        <View style={st.offerActions}>
+          <Pressable style={st.editOfferBtn} onPress={onEdit}>
+            <Ionicons name="create-outline" size={15} color={C.textAccent} />
+            <Text style={st.editOfferText}>Edit</Text>
+          </Pressable>
+          <Pressable style={st.withdrawBtn} onPress={onWithdraw}>
+            <Ionicons name="arrow-undo-outline" size={15} color={C.danger} />
+            <Text style={st.withdrawText}>Withdraw</Text>
+          </Pressable>
+        </View>
+      )}
+
       {showAddToCart && (
         <Pressable
           style={[st.addToCartBtn, inCart && st.addToCartBtnDone]}
@@ -231,6 +262,7 @@ export default function ChatScreen({
 }: Props) {
   const { push } = useAppNavigation();
   const { addItem, isInCart } = useCart();
+  const { refresh: refreshBadges } = useBadgeContext();
   const [myId, setMyId] = useState<string | null>(null);
   const [convId, setConvId] = useState<string | null>(initialConvId ?? null);
   const [resolvedListingId, setResolvedListingId] = useState<string | null>(
@@ -239,9 +271,13 @@ export default function ChatScreen({
   const [listing, setListing] = useState<ListingContext | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [otherUserName, setOtherUserName] = useState("...");
+  const [otherUserAvatar, setOtherUserAvatar] = useState<string | null>(null);
+  const [otherStoreName, setOtherStoreName] = useState<string | null>(null);
+  const [otherStoreId, setOtherStoreId] = useState<string | null>(null);
   const [otherUserOnline] = useState(false);
   const [convTopic, setConvTopic] = useState<string | null>(topic ?? null);
   const [loading, setLoading] = useState(true);
+  const [chatError, setChatError] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [showOfferInput, setShowOfferInput] = useState(false);
   const openOfferRequested = useRef(openOffer ?? false);
@@ -251,18 +287,21 @@ export default function ChatScreen({
     originalAmount: string;
   } | null>(null);
   const [sending, setSending] = useState(false);
+  const [showAttachMenu, setShowAttachMenu] = useState(false);
+  const [uploadingMedia, setUploadingMedia] = useState(false);
+  const [editingOfferId, setEditingOfferId] = useState<string | null>(null);
+  const [editOfferAmount, setEditOfferAmount] = useState("");
+  const [otherUserId, setOtherUserId] = useState<string | null>(null);
   const scrollRef = useRef<ScrollView>(null);
 
   const isListingSeller = !!(myId && listing?.seller_id && myId === listing.seller_id);
 
-  const hasPendingOffer = useMemo(() => {
-    return messages.some(
+  const pendingOfferCount = useMemo(() => {
+    return messages.filter(
       (m) => m.kind === "offer" && (m as OfferMessage).status === "pending",
-    );
+    ).length;
   }, [messages]);
-
-  const listingSoldOut = listing ? (listing.quantity ?? 1) <= 0 : false;
-  const canMakeOffer = !isListingSeller && !hasPendingOffer && !listingSoldOut;
+  const maxOffersReached = pendingOfferCount >= 3;
 
   function scrollDown() {
     setTimeout(
@@ -279,10 +318,12 @@ export default function ChatScreen({
   }
 
   const initChat = useCallback(async () => {
+    setChatError(null);
     const {
       data: { user },
     } = await supabase.auth.getUser();
     if (!user) {
+      setChatError("You must be signed in to chat.");
       setLoading(false);
       return;
     }
@@ -301,6 +342,7 @@ export default function ChatScreen({
     }
 
     if (!resolvedConvId) {
+      setChatError("Could not open this conversation.");
       setLoading(false);
       return;
     }
@@ -313,7 +355,7 @@ export default function ChatScreen({
 
     if (convData) {
       setConvTopic(convData.topic);
-      const lid = convData.listing_id ?? listingIdProp;
+      const lid = listingIdProp || convData.listing_id;
       if (lid) {
         setResolvedListingId(lid);
         const { data: listingData } = await supabase
@@ -329,13 +371,20 @@ export default function ChatScreen({
         }
       } else if (convData.topic) {
         // Fallback for older conversations that were created without listing_id.
-        const { data: fallbackListing } = await supabase
+        // Scope to the other participant (the seller) to avoid ambiguous card_name matches.
+        const otherParticipant = (convData.participant_ids as string[]).find(
+          (pid: string) => pid !== user.id,
+        );
+        let fallbackQuery = supabase
           .from("listings")
           .select("id, seller_id, card_name, price, images, edition, grade, quantity")
           .eq("card_name", convData.topic)
           .order("created_at", { ascending: false })
-          .limit(1)
-          .maybeSingle();
+          .limit(1);
+        if (otherParticipant) {
+          fallbackQuery = fallbackQuery.eq("seller_id", otherParticipant);
+        }
+        const { data: fallbackListing } = await fallbackQuery.maybeSingle();
         if (fallbackListing) {
           setResolvedListingId(fallbackListing.id);
           setListing({
@@ -349,15 +398,29 @@ export default function ChatScreen({
         (pid: string) => pid !== user.id,
       );
       if (otherId) {
-        const { data: profile } = await supabase
-          .from("profiles")
-          .select("username, display_name")
-          .eq("id", otherId)
-          .maybeSingle();
+        setOtherUserId(otherId);
+        const [{ data: profile }, { data: store }] = await Promise.all([
+          supabase
+            .from("profiles")
+            .select("username, display_name, avatar_url")
+            .eq("id", otherId)
+            .maybeSingle(),
+          supabase
+            .from("vendor_stores")
+            .select("id, store_name, logo_url")
+            .eq("profile_id", otherId)
+            .maybeSingle(),
+        ]);
         if (profile) {
           setOtherUserName(
             profile.display_name ?? profile.username ?? "User",
           );
+          if (profile.avatar_url) setOtherUserAvatar(profile.avatar_url);
+        }
+        if (store) {
+          if (store.id) setOtherStoreId(store.id);
+          if (store.store_name) setOtherStoreName(store.store_name);
+          if (store.logo_url && !profile?.avatar_url) setOtherUserAvatar(store.logo_url);
         }
       }
     }
@@ -365,22 +428,21 @@ export default function ChatScreen({
     const msgs = await loadMessages(resolvedConvId, user.id);
     setMessages(msgs);
     await markConversationRead(resolvedConvId, user.id).catch(() => {});
+    refreshBadges().catch(() => {});
     setLoading(false);
     scrollDown();
   }, [initialConvId, sellerId, listingIdProp, topic]);
 
   useEffect(() => {
-    initChat().catch(() => setLoading(false));
+    initChat().catch(() => { setChatError("Something went wrong loading this chat."); setLoading(false); });
   }, [initChat]);
 
   useEffect(() => {
-    if (!loading && openOfferRequested.current && canMakeOffer) {
+    if (!loading && openOfferRequested.current) {
       openOfferRequested.current = false;
       setShowOfferInput(true);
-    } else if (!loading && openOfferRequested.current && !canMakeOffer) {
-      openOfferRequested.current = false;
     }
-  }, [loading, canMakeOffer]);
+  }, [loading]);
 
   useEffect(() => {
     if (!convId || !myId) return;
@@ -388,19 +450,40 @@ export default function ChatScreen({
     const channel = subscribeToMessages(
       convId,
       myId,
-      (newMsg) => {
-        setMessages((prev) => {
-          if (prev.some((m) => m.id === newMsg.id)) return prev;
-          return [...prev, newMsg];
-        });
+      async (newMsg) => {
+        const needsEnrich =
+          (newMsg.kind === "listing_share" && !(newMsg as any).sharedListing) ||
+          (newMsg.kind === "offer" && !(newMsg as any).listingImage);
+        if (needsEnrich) {
+          const msgs = await loadMessages(convId, myId);
+          setMessages(msgs);
+        } else {
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === newMsg.id)) return prev;
+            return [...prev, newMsg];
+          });
+        }
         scrollDown();
         if (!newMsg.isMe) {
-          markConversationRead(convId, myId).catch(() => {});
+          markConversationRead(convId, myId)
+            .then(() => refreshBadges())
+            .catch(() => {});
         }
       },
       (updatedMsg) => {
         setMessages((prev) =>
-          prev.map((m) => (m.id === updatedMsg.id ? updatedMsg : m)),
+          prev.map((m) => {
+            if (m.id !== updatedMsg.id) return m;
+            if (m.kind === "offer" && updatedMsg.kind === "offer") {
+              return {
+                ...m,
+                status: updatedMsg.status,
+                amount: updatedMsg.amount,
+                cardName: updatedMsg.cardName,
+              };
+            }
+            return { ...m, ...updatedMsg };
+          }),
         );
       },
     );
@@ -413,6 +496,7 @@ export default function ChatScreen({
   async function handleSendMessage() {
     const text = draft.trim();
     if (!text || !convId || !myId || sending) return;
+    if (!(await requireNetwork())) return;
     setSending(true);
     setDraft("");
     try {
@@ -426,10 +510,15 @@ export default function ChatScreen({
   }
 
   async function handleSendOffer() {
-    if (hasPendingOffer && !counteringInfo) return;
+    if (maxOffersReached && !counteringInfo) return;
     const raw = offerAmount.trim().replace(/(RM|\$|,)/gi, "");
     const amount = parseFloat(raw);
     if (!amount || !convId || !myId || sending) return;
+    if (!(await requireNetwork())) return;
+    if (!listing?.id && !counteringInfo) {
+      Alert.alert("Cannot Send Offer", "No item linked to this conversation. Open a listing first.");
+      return;
+    }
     setSending(true);
     setOfferAmount("");
     setShowOfferInput(false);
@@ -440,7 +529,8 @@ export default function ChatScreen({
         convId,
         myId,
         amount,
-        convTopic ?? listing?.card_name ?? "Card",
+        listing?.card_name ?? convTopic ?? "Card",
+        listing?.id,
       );
       scrollDown();
     } catch {
@@ -456,10 +546,23 @@ export default function ChatScreen({
     msgId: string,
     action: "accepted" | "declined",
   ) {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === msgId && m.kind === "offer"
+          ? { ...m, status: action as OfferStatus }
+          : m,
+      ),
+    );
     try {
       await updateOfferStatus(msgId, action);
     } catch {
-      // silent
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === msgId && m.kind === "offer"
+            ? { ...m, status: "pending" as const }
+            : m,
+        ),
+      );
     }
   }
 
@@ -476,34 +579,175 @@ export default function ChatScreen({
       setOfferAmount("");
       setShowOfferInput(true);
     } catch {
-      // silent
+      Alert.alert("Error", "Failed to counter offer. Please try again.");
     }
   }
 
-  function handleAddOfferToCart(offerMsg: OfferMessage) {
-    if (!listing) return;
+  async function handleWithdrawOffer(msgId: string) {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === msgId && m.kind === "offer"
+          ? { ...m, status: "withdrawn" as OfferStatus }
+          : m,
+      ),
+    );
+    try {
+      await updateOfferStatus(msgId, "withdrawn");
+    } catch {
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === msgId && m.kind === "offer"
+            ? { ...m, status: "pending" as OfferStatus }
+            : m,
+        ),
+      );
+    }
+  }
+
+  function handleStartEditOffer(msgId: string) {
+    const offer = messages.find(
+      (m) => m.id === msgId && m.kind === "offer",
+    ) as OfferMessage | undefined;
+    if (!offer) return;
+    const raw = offer.amount.replace(/(RM|\$|,)/gi, "");
+    setEditingOfferId(msgId);
+    setEditOfferAmount(raw);
+  }
+
+  async function handleSaveEditOffer() {
+    if (!editingOfferId) return;
+    const amount = parseFloat(editOfferAmount.trim());
+    if (!amount || isNaN(amount)) return;
+    const prevMessages = [...messages];
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === editingOfferId && m.kind === "offer"
+          ? { ...m, amount: `RM${amount.toLocaleString("en-MY", { maximumFractionDigits: 0 })}` }
+          : m,
+      ),
+    );
+    const savedId = editingOfferId;
+    setEditingOfferId(null);
+    setEditOfferAmount("");
+    setSending(true);
+    try {
+      await updateOfferAmount(savedId, amount);
+    } catch {
+      setMessages(prevMessages);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function handleAddOfferToCart(offerMsg: OfferMessage) {
+    if (!offerMsg.listingId) return;
     const agreedPrice = parseFloat(
       offerMsg.amount.replace(/(RM|\$|,)/gi, ""),
     );
     if (!agreedPrice || isNaN(agreedPrice)) return;
 
-    const cartListing: Listing = {
-      id: listing.id,
-      seller_id: listing.seller_id,
-      card_name: listing.card_name,
-      edition: listing.edition,
-      grade: listing.grade,
-      condition: null,
-      price: agreedPrice,
-      quantity: 1,
-      category: "",
-      description: null,
-      images: listing.images,
-      views: 0,
-      status: "active",
-      created_at: new Date().toISOString(),
-    };
+    const { data: realListing } = await supabase
+      .from("listings")
+      .select("id, seller_id, card_name, edition, grade, grading_company, grade_value, condition, price, quantity, category, description, images, views, status, created_at")
+      .eq("id", offerMsg.listingId)
+      .maybeSingle();
+
+    const cartListing: Listing = realListing
+      ? {
+          ...realListing,
+          images: normalizeImages(realListing.images),
+          price: agreedPrice,
+        }
+      : {
+          id: offerMsg.listingId,
+          seller_id: listing?.seller_id ?? otherUserId ?? "",
+          card_name: offerMsg.cardName,
+          edition: listing?.edition ?? null,
+          grade: listing?.grade ?? null,
+          grading_company: null,
+          grade_value: null,
+          condition: null,
+          price: agreedPrice,
+          quantity: listing?.quantity ?? 1,
+          category: "",
+          description: null,
+          images: offerMsg.listingImage ? [offerMsg.listingImage] : [],
+          views: 0,
+          status: "active",
+          created_at: new Date().toISOString(),
+        };
     addItem(cartListing, 1);
+  }
+
+  async function uploadChatMedia(localUri: string, index: number): Promise<string> {
+    const extMatch = localUri.match(/\.(\w+)(\?|$)/);
+    const ext = extMatch?.[1]?.toLowerCase() ?? "jpg";
+    const mimeTypes: Record<string, string> = {
+      jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
+      gif: "image/gif", webp: "image/webp", mp4: "video/mp4", mov: "video/quicktime",
+    };
+    const contentType = mimeTypes[ext] ?? "image/jpeg";
+    const filePath = `${myId}/${Date.now()}-${index}.${ext}`;
+
+    const resp = await fetch(localUri);
+    const arrayBuf = await resp.arrayBuffer();
+
+    const { error } = await supabase.storage
+      .from("chat-media")
+      .upload(filePath, arrayBuf, { upsert: true, contentType });
+
+    if (error) throw error;
+    const { data } = supabase.storage.from("chat-media").getPublicUrl(filePath);
+    return data.publicUrl;
+  }
+
+  async function handlePickMedia() {
+    setShowAttachMenu(false);
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ["images"],
+      allowsMultipleSelection: true,
+      selectionLimit: 5,
+      quality: 0.8,
+    });
+
+    if (result.canceled || !result.assets?.length || !convId || !myId) return;
+
+    setUploadingMedia(true);
+    try {
+      const urls: string[] = [];
+      for (let i = 0; i < result.assets.length; i++) {
+        const url = await uploadChatMedia(result.assets[i].uri, i);
+        urls.push(url);
+      }
+      await sendImageMessage(convId, myId, urls);
+      scrollDown();
+    } catch (e: any) {
+      Alert.alert("Upload failed", e.message ?? "Could not send media");
+    } finally {
+      setUploadingMedia(false);
+    }
+  }
+
+  async function handlePickCamera() {
+    setShowAttachMenu(false);
+    const perm = await ImagePicker.requestCameraPermissionsAsync();
+    if (!perm.granted) {
+      Alert.alert("Permission needed", "Camera access is required to take photos.");
+      return;
+    }
+    const result = await ImagePicker.launchCameraAsync({ quality: 0.8 });
+    if (result.canceled || !result.assets?.length || !convId || !myId) return;
+
+    setUploadingMedia(true);
+    try {
+      const url = await uploadChatMedia(result.assets[0].uri, 0);
+      await sendImageMessage(convId, myId, [url]);
+      scrollDown();
+    } catch (e: any) {
+      Alert.alert("Upload failed", e.message ?? "Could not send media");
+    } finally {
+      setUploadingMedia(false);
+    }
   }
 
   if (loading) {
@@ -528,6 +772,33 @@ export default function ChatScreen({
     );
   }
 
+  if (chatError) {
+    return (
+      <SafeAreaView style={st.safe}>
+        <StatusBar style="light" />
+        <View style={st.header}>
+          <Pressable style={st.backBtn} onPress={onBack}>
+            <Feather name="arrow-left" size={20} color={C.textPrimary} />
+          </Pressable>
+          <View style={st.headerCenter}>
+            <Text style={st.headerName}>Chat</Text>
+          </View>
+          <View style={{ width: 34 }} />
+        </View>
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: 40, gap: 8 }}>
+          <Ionicons name="chatbubble-ellipses-outline" size={40} color={C.textMuted} />
+          <Text style={{ color: C.textPrimary, fontSize: 15, fontWeight: "700", textAlign: "center" }}>{chatError}</Text>
+          <Pressable
+            onPress={() => { setLoading(true); initChat().catch(() => { setChatError("Something went wrong."); setLoading(false); }); }}
+            style={{ marginTop: 12, paddingHorizontal: 20, paddingVertical: 10, backgroundColor: C.accent, borderRadius: 10 }}
+          >
+            <Text style={{ color: C.textHero, fontSize: 13, fontWeight: "700" }}>Retry</Text>
+          </Pressable>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
   const listingImageUrl = listing?.images?.[0];
 
   return (
@@ -544,17 +815,29 @@ export default function ChatScreen({
           </Pressable>
 
           <View style={st.headerCenter}>
-            <View style={st.headerAvatar}>
-              <Text style={st.headerAvatarText}>
-                {otherUserName.charAt(0).toUpperCase()}
-              </Text>
+            <View style={st.headerAvatarWrap}>
+              {otherUserAvatar ? (
+                <Image source={{ uri: otherUserAvatar }} style={st.headerAvatarImg} />
+              ) : (
+                <View style={st.headerAvatar}>
+                  <Text style={st.headerAvatarText}>
+                    {otherUserName.charAt(0).toUpperCase()}
+                  </Text>
+                </View>
+              )}
               {otherUserOnline && <View style={st.onlineDot} />}
             </View>
-            <View>
-              <Text style={st.headerName}>{otherUserName}</Text>
-              <Text style={st.headerStatus}>
-                {otherUserOnline ? "Online" : "Offline"}
+            <View style={{ flex: 1 }}>
+              <Text style={st.headerName} numberOfLines={1}>
+                {otherStoreName ?? otherUserName}
               </Text>
+              {otherStoreName ? (
+                <Text style={st.headerStatus} numberOfLines={1}>@{otherUserName}</Text>
+              ) : (
+                <Text style={st.headerStatus}>
+                  {otherUserOnline ? "Online" : "Offline"}
+                </Text>
+              )}
             </View>
           </View>
 
@@ -562,39 +845,6 @@ export default function ChatScreen({
             <Feather name="more-horizontal" size={17} color={C.textSearch} />
           </Pressable>
         </View>
-
-        {/* Item context card */}
-        {listing && (
-          <Pressable style={st.itemContextBar} onPress={navigateToListing}>
-            <View style={st.itemContextThumb}>
-              {listingImageUrl ? (
-                <Image
-                  source={{ uri: listingImageUrl }}
-                  style={st.itemContextThumbImg}
-                />
-              ) : (
-                <Ionicons
-                  name="image-outline"
-                  size={16}
-                  color={C.textMuted}
-                />
-              )}
-            </View>
-            <View style={st.itemContextInfo}>
-              <Text style={st.itemContextName} numberOfLines={1}>
-                {listing.card_name}
-              </Text>
-              <Text style={st.itemContextMeta}>
-                RM{Number(listing.price).toLocaleString("en-MY", { maximumFractionDigits: 0 })}
-                {listing.grade ? `  ·  ${listing.grade}` : ""}
-              </Text>
-            </View>
-            <View style={st.itemContextViewBtn}>
-              <Text style={st.itemContextViewText}>View</Text>
-              <Feather name="chevron-right" size={12} color={C.textAccent} />
-            </View>
-          </Pressable>
-        )}
 
         {/* Messages */}
         <ScrollView
@@ -614,9 +864,9 @@ export default function ChatScreen({
                   color={C.accent}
                 />
               </View>
-              <Text style={st.emptyChatTitle}>Start negotiating</Text>
+              <Text style={st.emptyChatTitle}>Start a conversation</Text>
               <Text style={st.emptyChatText}>
-                Send a message or make an offer to begin.
+                Send a message to begin chatting.
               </Text>
             </View>
           )}
@@ -629,17 +879,106 @@ export default function ChatScreen({
                 >
                   <OfferBubble
                     msg={msg}
-                    listing={listing}
                     isBuyer={!isListingSeller}
-                    inCart={listing ? isInCart(listing.id) : false}
+                    inCart={msg.listingId ? isInCart(msg.listingId) : false}
                     onTapItem={
-                      resolvedListingId ? navigateToListing : undefined
+                      msg.listingId
+                        ? () => push({ type: "LISTING_DETAIL", listingId: msg.listingId! })
+                        : undefined
                     }
                     onAccept={() => handleOfferAction(msg.id, "accepted")}
                     onDecline={() => handleOfferAction(msg.id, "declined")}
                     onCounter={() => handleCounter(msg.id)}
                     onAddToCart={() => handleAddOfferToCart(msg)}
+                    onWithdraw={() => handleWithdrawOffer(msg.id)}
+                    onEdit={() => handleStartEditOffer(msg.id)}
                   />
+                </View>
+              );
+            }
+
+            if (msg.kind === "image") {
+              const imgMsg = msg as ImageMessage;
+              return (
+                <View
+                  key={msg.id}
+                  style={[st.bubbleRow, msg.isMe && st.bubbleRowMe]}
+                >
+                  {!msg.isMe && (
+                    <View style={st.bubbleAvatar}>
+                      <Text style={st.bubbleAvatarText}>
+                        {otherUserName.charAt(0).toUpperCase()}
+                      </Text>
+                    </View>
+                  )}
+                  <View style={[st.imageBubble, msg.isMe ? st.imageBubbleMe : st.imageBubbleThem]}>
+                    {imgMsg.mediaUrls.length === 1 ? (
+                      <Image source={{ uri: imgMsg.mediaUrls[0] }} style={st.singleImage} />
+                    ) : (
+                      <View style={st.imageGrid}>
+                        {imgMsg.mediaUrls.slice(0, 4).map((url, idx) => (
+                          <Image key={idx} source={{ uri: url }} style={st.gridImage} />
+                        ))}
+                      </View>
+                    )}
+                    {!!imgMsg.text && (
+                      <Text style={[st.bubbleText, msg.isMe && st.bubbleTextMe, { paddingHorizontal: 10, paddingTop: 6 }]}>
+                        {imgMsg.text}
+                      </Text>
+                    )}
+                    <Text style={[st.bubbleTime, msg.isMe && st.bubbleTimeMe, { paddingHorizontal: 10, paddingBottom: 8 }]}>
+                      {msg.timestamp}
+                    </Text>
+                  </View>
+                </View>
+              );
+            }
+
+            if (msg.kind === "listing_share") {
+              const lsMsg = msg as ListingShareMessage;
+              return (
+                <View
+                  key={msg.id}
+                  style={[st.bubbleRow, msg.isMe && st.bubbleRowMe]}
+                >
+                  {!msg.isMe && (
+                    <View style={st.bubbleAvatar}>
+                      <Text style={st.bubbleAvatarText}>
+                        {otherUserName.charAt(0).toUpperCase()}
+                      </Text>
+                    </View>
+                  )}
+                  <Pressable
+                    style={[st.listingShareCard, msg.isMe ? st.listingShareMe : st.listingShareThem]}
+                    onPress={() => {
+                      if (lsMsg.sharedListing?.id) {
+                        push({ type: "LISTING_DETAIL", listingId: lsMsg.sharedListing.id });
+                      }
+                    }}
+                  >
+                    <View style={st.listingShareThumb}>
+                      {lsMsg.sharedListing?.image ? (
+                        <Image source={{ uri: lsMsg.sharedListing.image }} style={st.listingShareThumbImg} />
+                      ) : (
+                        <Ionicons name="image-outline" size={20} color={C.textMuted} />
+                      )}
+                    </View>
+                    <View style={st.listingShareInfo}>
+                      <View style={st.listingShareBadge}>
+                        <Ionicons name="bag-handle-outline" size={10} color={C.textAccent} />
+                        <Text style={st.listingShareBadgeText}>Listing</Text>
+                      </View>
+                      <Text style={st.listingShareName} numberOfLines={2}>
+                        {lsMsg.sharedListing?.card_name ?? "Listing"}
+                      </Text>
+                      {lsMsg.sharedListing?.price != null && (
+                        <Text style={st.listingSharePrice}>
+                          RM{Number(lsMsg.sharedListing.price).toLocaleString("en-MY", { maximumFractionDigits: 0 })}
+                        </Text>
+                      )}
+                    </View>
+                    <Feather name="chevron-right" size={14} color={C.textMuted} />
+                  </Pressable>
                 </View>
               );
             }
@@ -665,7 +1004,7 @@ export default function ChatScreen({
                   <Text
                     style={[st.bubbleText, msg.isMe && st.bubbleTextMe]}
                   >
-                    {msg.text}
+                    {(msg as any).text}
                   </Text>
                   <Text
                     style={[st.bubbleTime, msg.isMe && st.bubbleTimeMe]}
@@ -679,7 +1018,7 @@ export default function ChatScreen({
         </ScrollView>
 
         {/* Offer input panel */}
-        {showOfferInput && (canMakeOffer || counteringInfo) && (
+        {showOfferInput && (
           <View style={st.offerPanel}>
             {/* Item context in offer panel */}
             {listing && (
@@ -772,28 +1111,81 @@ export default function ChatScreen({
         )}
 
         {/* Pending offer notice */}
-        {!isListingSeller && hasPendingOffer && (
+        {pendingOfferCount > 0 && !showOfferInput && (
           <View style={st.pendingOfferBanner}>
             <Ionicons name="time" size={14} color="#F59E0B" />
             <Text style={st.pendingOfferText}>
-              You have a pending offer. Wait for the seller to respond before sending another.
+              {pendingOfferCount} pending offer{pendingOfferCount > 1 ? "s" : ""}{maxOffersReached ? " (max reached)" : ""}
             </Text>
+          </View>
+        )}
+
+        {/* Edit offer panel */}
+        {editingOfferId && (
+          <View style={st.offerPanel}>
+            <View style={st.offerPanelHeader}>
+              <Text style={st.offerPanelTitle}>Edit Offer</Text>
+              <Pressable
+                onPress={() => { setEditingOfferId(null); setEditOfferAmount(""); }}
+                hitSlop={12}
+              >
+                <Feather name="x" size={18} color={C.textMuted} />
+              </Pressable>
+            </View>
+            <View style={st.offerPanelRow}>
+              <Text style={st.dollarSign}>RM</Text>
+              <TextInput
+                style={st.offerInput}
+                value={editOfferAmount}
+                onChangeText={setEditOfferAmount}
+                placeholder="0.00"
+                placeholderTextColor={C.textMuted}
+                keyboardType="numeric"
+                autoFocus
+              />
+              <Pressable
+                style={[
+                  st.sendOfferBtn,
+                  editOfferAmount.trim().length > 0 && st.sendOfferBtnActive,
+                ]}
+                onPress={handleSaveEditOffer}
+                disabled={sending}
+              >
+                <Text
+                  style={[
+                    st.sendOfferText,
+                    editOfferAmount.trim().length > 0 && st.sendOfferTextActive,
+                  ]}
+                >
+                  Save
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        )}
+
+        {/* Upload indicator */}
+        {uploadingMedia && (
+          <View style={st.uploadBanner}>
+            <ActivityIndicator size="small" color={C.accent} />
+            <Text style={st.uploadBannerText}>Uploading media...</Text>
           </View>
         )}
 
         {/* Input bar */}
         <View style={st.inputBar}>
-          {!isListingSeller && (
+          <Pressable
+            style={st.attachBtn}
+            onPress={() => setShowAttachMenu((v) => !v)}
+          >
+            <Ionicons name="add" size={22} color={C.textAccent} />
+          </Pressable>
+          {otherStoreId && (
             <Pressable
-              style={[st.offerToggle, !canMakeOffer && { opacity: 0.35 }]}
-              onPress={() => {
-                if (!canMakeOffer) return;
-                setCounteringInfo(null);
-                setShowOfferInput((prev) => !prev);
-              }}
-              disabled={!canMakeOffer}
+              style={st.attachBtn}
+              onPress={() => push({ type: "VENDOR_STORE_PAGE", storeId: otherStoreId })}
             >
-              <Ionicons name="pricetag" size={18} color={canMakeOffer ? C.textAccent : C.textMuted} />
+              <Ionicons name="bag-outline" size={18} color={C.textAccent} />
             </Pressable>
           )}
           <View style={st.inputWrap}>
@@ -822,7 +1214,26 @@ export default function ChatScreen({
             />
           </Pressable>
         </View>
+
+        {/* Attach menu popover */}
+        {showAttachMenu && (
+          <View style={st.attachMenu}>
+            <Pressable style={st.attachMenuItem} onPress={handlePickMedia}>
+              <View style={[st.attachMenuIcon, { backgroundColor: "rgba(99,102,241,0.1)" }]}>
+                <Ionicons name="images-outline" size={20} color="#6366F1" />
+              </View>
+              <Text style={st.attachMenuLabel}>Gallery</Text>
+            </Pressable>
+            <Pressable style={st.attachMenuItem} onPress={handlePickCamera}>
+              <View style={[st.attachMenuIcon, { backgroundColor: "rgba(234,88,12,0.1)" }]}>
+                <Ionicons name="camera-outline" size={20} color="#EA580C" />
+              </View>
+              <Text style={st.attachMenuLabel}>Camera</Text>
+            </Pressable>
+          </View>
+        )}
       </KeyboardAvoidingView>
+
     </SafeAreaView>
   );
 }
@@ -856,6 +1267,11 @@ const st = StyleSheet.create({
     alignItems: "center",
     gap: S.md,
   },
+  headerAvatarWrap: {
+    width: 38,
+    height: 38,
+    position: "relative",
+  },
   headerAvatar: {
     width: 38,
     height: 38,
@@ -865,7 +1281,13 @@ const st = StyleSheet.create({
     borderColor: C.accent,
     alignItems: "center",
     justifyContent: "center",
-    position: "relative",
+  },
+  headerAvatarImg: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    borderWidth: 1.5,
+    borderColor: C.accent,
   },
   headerAvatarText: {
     color: C.textHero,
@@ -882,6 +1304,7 @@ const st = StyleSheet.create({
     backgroundColor: C.success,
     borderWidth: 2,
     borderColor: C.bg,
+    zIndex: 1,
   },
   headerName: { color: C.textPrimary, fontSize: 15, fontWeight: "700" },
   headerStatus: { color: C.textSecondary, fontSize: 11, fontWeight: "500" },
@@ -894,61 +1317,6 @@ const st = StyleSheet.create({
     borderColor: C.borderIcon,
     alignItems: "center",
     justifyContent: "center",
-  },
-
-  // ── Item context bar ──
-  itemContextBar: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    backgroundColor: C.elevated,
-    borderBottomWidth: 1,
-    borderBottomColor: C.border,
-    paddingHorizontal: S.screenPadding,
-    paddingVertical: 10,
-  },
-  itemContextThumb: {
-    width: 42,
-    height: 52,
-    borderRadius: 8,
-    backgroundColor: C.cardAlt,
-    borderWidth: 1,
-    borderColor: C.borderCard,
-    overflow: "hidden",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  itemContextThumbImg: {
-    width: "100%",
-    height: "100%",
-    borderRadius: 7,
-  },
-  itemContextInfo: { flex: 1, gap: 2 },
-  itemContextName: {
-    color: C.textPrimary,
-    fontSize: 13,
-    fontWeight: "700",
-  },
-  itemContextMeta: {
-    color: C.textAccent,
-    fontSize: 12,
-    fontWeight: "800",
-  },
-  itemContextViewBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 2,
-    backgroundColor: C.accentGlow,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: C.borderStream,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-  },
-  itemContextViewText: {
-    color: C.textAccent,
-    fontSize: 11,
-    fontWeight: "700",
   },
 
   // ── Messages ──
@@ -1154,6 +1522,32 @@ const st = StyleSheet.create({
     paddingVertical: 9,
   },
   declineText: { color: C.danger, fontSize: 12, fontWeight: "800" },
+  editOfferBtn: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 4,
+    backgroundColor: C.accentGlow,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: C.borderStream,
+    paddingVertical: 9,
+  },
+  editOfferText: { color: C.textAccent, fontSize: 12, fontWeight: "800" },
+  withdrawBtn: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 4,
+    backgroundColor: "rgba(239,68,68,0.08)",
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "rgba(239,68,68,0.2)",
+    paddingVertical: 9,
+  },
+  withdrawText: { color: C.danger, fontSize: 12, fontWeight: "800" },
   addToCartBtn: {
     flexDirection: "row",
     alignItems: "center",
@@ -1286,11 +1680,12 @@ const st = StyleSheet.create({
   inputBar: {
     flexDirection: "row",
     alignItems: "flex-end",
-    paddingHorizontal: S.screenPadding,
-    paddingVertical: S.md,
+    paddingHorizontal: 10,
+    paddingTop: 6,
+    paddingBottom: 6,
     borderTopWidth: 1,
     borderTopColor: C.border,
-    gap: 8,
+    gap: 6,
     backgroundColor: C.bg,
   },
   pendingOfferBanner: {
@@ -1310,13 +1705,13 @@ const st = StyleSheet.create({
     fontWeight: "600",
     lineHeight: 15,
   },
-  offerToggle: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: C.accentGlow,
+  attachBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: C.elevated,
     borderWidth: 1,
-    borderColor: C.borderStream,
+    borderColor: C.border,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -1327,16 +1722,16 @@ const st = StyleSheet.create({
     borderWidth: 1,
     borderColor: C.border,
     paddingHorizontal: 14,
-    paddingVertical: 8,
-    minHeight: 38,
+    paddingVertical: 0,
+    minHeight: 34,
     maxHeight: 100,
     justifyContent: "center",
   },
-  input: { color: C.textPrimary, fontSize: 14, lineHeight: 20 },
+  input: { color: C.textPrimary, fontSize: 14, lineHeight: 18, paddingVertical: 6 },
   sendBtn: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
     backgroundColor: C.elevated,
     borderWidth: 1,
     borderColor: C.border,
@@ -1344,4 +1739,142 @@ const st = StyleSheet.create({
     justifyContent: "center",
   },
   sendBtnActive: { backgroundColor: C.accent, borderColor: C.accent },
+
+  // ── Upload banner ──
+  uploadBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    paddingVertical: 8,
+    borderTopWidth: 1,
+    borderTopColor: C.border,
+    backgroundColor: C.elevated,
+  },
+  uploadBannerText: {
+    color: C.textSecondary,
+    fontSize: 12,
+    fontWeight: "600",
+  },
+
+  // ── Attach menu ──
+  attachMenu: {
+    flexDirection: "row",
+    gap: 16,
+    paddingHorizontal: S.screenPadding,
+    paddingVertical: 12,
+    backgroundColor: C.elevated,
+    borderTopWidth: 1,
+    borderTopColor: C.border,
+  },
+  attachMenuItem: {
+    alignItems: "center",
+    gap: 6,
+  },
+  attachMenuIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: C.border,
+  },
+  attachMenuLabel: {
+    color: C.textSecondary,
+    fontSize: 11,
+    fontWeight: "600",
+  },
+
+  // ── Image bubble ──
+  imageBubble: {
+    maxWidth: "72%",
+    borderRadius: 16,
+    overflow: "hidden",
+  },
+  imageBubbleMe: { backgroundColor: C.accent },
+  imageBubbleThem: { backgroundColor: C.surface, borderWidth: 1, borderColor: C.border },
+  singleImage: {
+    width: 220,
+    height: 220,
+    borderRadius: 0,
+  },
+  imageGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    width: 220,
+  },
+  gridImage: {
+    width: 108,
+    height: 108,
+    margin: 1,
+  },
+
+  // ── Listing share bubble ──
+  listingShareCard: {
+    maxWidth: "78%",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    borderRadius: 16,
+    padding: 10,
+    overflow: "hidden",
+  },
+  listingShareMe: {
+    backgroundColor: C.accent,
+  },
+  listingShareThem: {
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border,
+  },
+  listingShareThumb: {
+    width: 52,
+    height: 64,
+    borderRadius: 8,
+    backgroundColor: C.cardAlt,
+    borderWidth: 1,
+    borderColor: C.borderCard,
+    overflow: "hidden",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  listingShareThumbImg: {
+    width: "100%",
+    height: "100%",
+    borderRadius: 7,
+  },
+  listingShareInfo: {
+    flex: 1,
+    gap: 3,
+  },
+  listingShareBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    alignSelf: "flex-start",
+    backgroundColor: C.accentGlow,
+    borderRadius: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  listingShareBadgeText: {
+    color: C.textAccent,
+    fontSize: 9,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.3,
+  },
+  listingShareName: {
+    color: C.textPrimary,
+    fontSize: 13,
+    fontWeight: "700",
+    lineHeight: 17,
+  },
+  listingSharePrice: {
+    color: C.textAccent,
+    fontSize: 13,
+    fontWeight: "800",
+  },
+
 });

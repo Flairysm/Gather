@@ -32,9 +32,15 @@ yarn-error.*
 
 # local env files
 .env*.local
+.env
+
 
 # typescript
 *.tsbuildinfo
+
+# SSH/deploy keys
+gather
+gather.pub
 
 # generated native folders
 /ios

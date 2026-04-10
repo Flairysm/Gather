@@ -14,6 +14,7 @@ import {
 import { StatusBar } from "expo-status-bar";
 import { Feather, Ionicons } from "@expo/vector-icons";
 import CachedImage from "../components/CachedImage";
+import ErrorState from "../components/ErrorState";
 import { C, S } from "../theme";
 import {
   loadConversations,
@@ -36,15 +37,17 @@ export default function MessagesScreen({ onBack }: Props) {
   const { push, stack } = useAppNavigation();
   const [convos, setConvos] = useState<Conversation[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [search, setSearch] = useState("");
   const [userId, setUserId] = useState<string | null>(null);
 
   const fetchConversations = useCallback(async (uid: string) => {
     try {
+      setLoadError(false);
       const data = await loadConversations(uid);
       setConvos(data);
     } catch {
-      /* silent */
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -52,24 +55,27 @@ export default function MessagesScreen({ onBack }: Props) {
 
   useEffect(() => {
     let channel: ReturnType<typeof subscribeToConversations> | null = null;
+    let cancelled = false;
 
     (async () => {
       const {
         data: { user },
       } = await supabase.auth.getUser();
-      if (!user) {
-        setLoading(false);
+      if (!user || cancelled) {
+        if (!cancelled) setLoading(false);
         return;
       }
       setUserId(user.id);
       await fetchConversations(user.id);
 
+      if (cancelled) return;
       channel = subscribeToConversations(user.id, () => {
         fetchConversations(user.id);
       });
     })();
 
     return () => {
+      cancelled = true;
       if (channel) supabase.removeChannel(channel);
     };
   }, [fetchConversations]);
@@ -102,15 +108,17 @@ export default function MessagesScreen({ onBack }: Props) {
 
   async function handleToggleFavorite(conv: Conversation) {
     if (!userId) return;
+    const prev = conv.isFavorite;
+    setConvos((c) =>
+      c.map((x) => (x.id === conv.id ? { ...x, isFavorite: !prev } : x)),
+    );
     try {
-      await setConversationFavorite(userId, conv.id, !conv.isFavorite);
-      setConvos((prev) =>
-        prev.map((c) =>
-          c.id === conv.id ? { ...c, isFavorite: !c.isFavorite } : c,
-        ),
-      );
+      await setConversationFavorite(userId, conv.id, !prev);
     } catch {
-      /* silent */
+      setConvos((c) =>
+        c.map((x) => (x.id === conv.id ? { ...x, isFavorite: prev } : x)),
+      );
+      Alert.alert("Error", "Failed to update favorite. Please try again.");
     }
   }
 
@@ -122,11 +130,13 @@ export default function MessagesScreen({ onBack }: Props) {
         text: "Delete",
         style: "destructive",
         onPress: async () => {
+          const snapshot = convos;
+          setConvos((prev) => prev.filter((c) => c.id !== conv.id));
           try {
             await hideConversationForUser(userId, conv.id);
-            setConvos((prev) => prev.filter((c) => c.id !== conv.id));
           } catch {
-            /* silent */
+            setConvos(snapshot);
+            Alert.alert("Error", "Failed to delete chat. Please try again.");
           }
         },
       },
@@ -178,6 +188,8 @@ export default function MessagesScreen({ onBack }: Props) {
         <View style={st.center}>
           <ActivityIndicator size="large" color={C.accent} />
         </View>
+      ) : loadError ? (
+        <ErrorState message="Could not load messages." onRetry={() => userId && fetchConversations(userId)} />
       ) : filtered.length === 0 ? (
         <View style={st.center}>
           <Ionicons
@@ -279,9 +291,9 @@ function SwipeableRow({
   }
 
   const displayName =
-    conv.otherUser.displayName ?? conv.otherUser.username ?? "User";
+    conv.otherUser.storeName ?? conv.otherUser.displayName ?? conv.otherUser.username ?? "User";
   const initial = displayName.charAt(0).toUpperCase();
-  const thumbUrl = conv.listingImage ?? conv.otherUser.avatarUrl;
+  const thumbUrl = conv.otherUser.avatarUrl ?? conv.otherUser.storeLogo;
   const isUnread = conv.isUnread;
 
   return (
@@ -324,7 +336,7 @@ function SwipeableRow({
         onTouchEnd={onTouchEnd}
       >
         <Pressable style={st.row} onPress={handlePress}>
-          {/* Product / listing image as avatar */}
+          {/* User avatar */}
           <View style={st.avatarWrap}>
             {thumbUrl ? (
               <CachedImage
@@ -351,7 +363,6 @@ function SwipeableRow({
                 numberOfLines={1}
               >
                 {displayName}
-                {conv.topic ? ` · ${conv.topic}` : ""}
               </Text>
               <Text style={[st.time, isUnread && st.timeUnread]}>
                 {conv.lastMessageAt
@@ -508,11 +519,13 @@ const st = StyleSheet.create({
     gap: 12,
   },
 
-  /* ── Avatar (product image) ── */
+  /* ── Avatar ── */
   avatarWrap: {
     position: "relative",
     width: 52,
     height: 52,
+    borderRadius: 26,
+    overflow: "hidden",
   },
   avatar: {
     width: 52,
@@ -533,6 +546,7 @@ const st = StyleSheet.create({
     borderRadius: 26,
     borderWidth: 2,
     borderColor: C.border,
+    overflow: "hidden",
   },
   avatarImgUnread: {
     borderColor: C.accent,
@@ -568,9 +582,9 @@ const st = StyleSheet.create({
   },
   name: {
     flex: 1,
-    color: C.textSecondary,
-    fontSize: 14,
-    fontWeight: "500",
+    color: C.textPrimary,
+    fontSize: 15,
+    fontWeight: "700",
     marginRight: 8,
   },
   nameUnread: {

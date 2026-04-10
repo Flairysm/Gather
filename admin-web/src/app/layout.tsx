@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Gather Admin",
-  description: "Admin dashboard for Gather platform operations",
+  title: "Evend Admin",
+  description: "Admin dashboard for Evend platform operations",
 };
 
 export default function RootLayout({

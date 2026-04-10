@@ -15,6 +15,13 @@ export type CartContextValue = {
   clearCart: () => void;
   isInCart: (listingId: string) => boolean;
   total: () => string;
+  selectedIds: Set<string>;
+  toggleSelected: (listingId: string) => void;
+  selectAll: () => void;
+  deselectAll: () => void;
+  selectedItems: () => CartItem[];
+  selectedTotal: () => string;
+  allSelected: boolean;
 };
 
 export const CartContext = createContext<CartContextValue>({
@@ -25,6 +32,13 @@ export const CartContext = createContext<CartContextValue>({
   clearCart: () => {},
   isInCart: () => false,
   total: () => "RM0",
+  selectedIds: new Set(),
+  toggleSelected: () => {},
+  selectAll: () => {},
+  deselectAll: () => {},
+  selectedItems: () => [],
+  selectedTotal: () => "RM0",
+  allSelected: false,
 });
 
 export function useCart() {

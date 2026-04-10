@@ -7,8 +7,9 @@ const supabasePublishableKey =
   process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
 
 if (!supabaseUrl || !supabasePublishableKey) {
-  console.warn(
-    "Missing EXPO_PUBLIC_SUPABASE_URL or EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY. Auth will not work until these are set.",
+  console.error(
+    "Missing EXPO_PUBLIC_SUPABASE_URL or EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY. " +
+    "Create a .env file at the project root with these variables. Auth and data will not work.",
   );
 }
 

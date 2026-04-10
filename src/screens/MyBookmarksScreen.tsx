@@ -18,6 +18,7 @@ import { useReconnect } from "../hooks/useReconnect";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import type { Listing, WantedPost } from "../data/market";
 import { formatListingPrice } from "../data/market";
+import ErrorState from "../components/ErrorState";
 
 type SavedItem = {
   id: string;
@@ -46,10 +47,12 @@ type Props = { onBack: () => void };
 export default function MyBookmarksScreen({ onBack }: Props) {
   const { push } = useAppNavigation();
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [rows, setRows] = useState<BookmarkRow[]>([]);
 
   const load = useCallback(async () => {
     setLoading(true);
+    setLoadError(false);
 
     const {
       data: { user },
@@ -60,12 +63,19 @@ export default function MyBookmarksScreen({ onBack }: Props) {
       return;
     }
 
-    const { data: saved } = await supabase
+    const { data: saved, error: savedErr } = await supabase
       .from("saved_items")
       .select("id, item_type, item_id, created_at")
       .eq("user_id", user.id)
       .order("created_at", { ascending: false })
       .limit(200);
+
+    if (savedErr) {
+      console.warn("MyBookmarks load error:", savedErr.message);
+      setLoadError(true);
+      setLoading(false);
+      return;
+    }
 
     const savedItems = (saved ?? []) as SavedItem[];
     const listingIds = savedItems
@@ -139,7 +149,7 @@ export default function MyBookmarksScreen({ onBack }: Props) {
   }, []);
 
   useEffect(() => {
-    load().catch(() => setLoading(false));
+    load().catch(() => { setLoadError(true); setLoading(false); });
   }, [load]);
 
   useReconnect(load);
@@ -209,7 +219,9 @@ export default function MyBookmarksScreen({ onBack }: Props) {
         <View style={{ width: 36 }} />
       </View>
 
-      {isEmpty ? (
+      {loadError ? (
+        <ErrorState message="Could not load bookmarks." onRetry={load} />
+      ) : isEmpty ? (
         <ScrollView contentContainerStyle={st.emptyWrap}>
           <View style={st.emptyCard}>
             <Ionicons name="bookmark-outline" size={34} color={C.textSecondary} />

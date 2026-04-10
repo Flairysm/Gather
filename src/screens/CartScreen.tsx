@@ -1,4 +1,4 @@
-import { Image, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, Image, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { Feather, Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -12,9 +12,13 @@ import { supabase } from "../lib/supabase";
 type Props = { onBack: () => void };
 
 export default function CartScreen({ onBack }: Props) {
-  const { items, setQuantity, removeItem, clearCart, total } = useCart();
+  const {
+    items, setQuantity, removeItem, clearCart,
+    selectedIds, toggleSelected, selectAll, deselectAll, selectedTotal, allSelected,
+  } = useCart();
   const { push } = useAppNavigation();
   const insets = useSafeAreaInsets();
+  const selectedCount = items.filter((ci) => selectedIds.has(ci.listing.id)).length;
   const [vendorStoreNames, setVendorStoreNames] = useState<Record<string, string>>({});
   const [vendorStoreLogos, setVendorStoreLogos] = useState<Record<string, string>>({});
 
@@ -28,12 +32,16 @@ export default function CartScreen({ onBack }: Props) {
         if (mounted) setVendorStoreNames({});
         return;
       }
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from("vendor_stores")
         .select("profile_id, store_name, logo_url")
         .in("profile_id", sellerIds)
         .eq("is_active", true);
       if (!mounted) return;
+      if (error) {
+        console.warn("CartScreen vendor store query error:", error.message);
+        return;
+      }
       if (data) {
         const map: Record<string, string> = {};
         const logoMap: Record<string, string> = {};
@@ -47,7 +55,7 @@ export default function CartScreen({ onBack }: Props) {
         setVendorStoreNames({});
         setVendorStoreLogos({});
       }
-    })().catch(() => {});
+    })();
 
     return () => {
       mounted = false;
@@ -64,11 +72,32 @@ export default function CartScreen({ onBack }: Props) {
         </Pressable>
         <Text style={st.headerTitle}>Cart ({items.length})</Text>
         {items.length > 0 && (
-          <Pressable onPress={clearCart}>
+          <Pressable onPress={() => Alert.alert(
+            "Clear Cart?",
+            "Remove all items from your cart?",
+            [{ text: "Cancel", style: "cancel" }, { text: "Clear", style: "destructive", onPress: clearCart }],
+          )}>
             <Text style={st.clearText}>Clear All</Text>
           </Pressable>
         )}
       </View>
+
+      {items.length > 0 && (
+        <View style={st.selectBar}>
+          <Pressable
+            style={st.selectAllRow}
+            onPress={allSelected ? deselectAll : selectAll}
+          >
+            <View style={[st.checkbox, allSelected && st.checkboxActive]}>
+              {allSelected && <Feather name="check" size={12} color="#fff" />}
+            </View>
+            <Text style={st.selectAllLabel}>Select All</Text>
+          </Pressable>
+          {selectedCount > 0 && selectedCount < items.length && (
+            <Text style={st.selectedCount}>{selectedCount} selected</Text>
+          )}
+        </View>
+      )}
 
       {items.length === 0 ? (
         <View style={st.emptyState}>
@@ -84,8 +113,17 @@ export default function CartScreen({ onBack }: Props) {
             showsVerticalScrollIndicator={false}
             contentContainerStyle={st.scroll}
           >
-            {items.map((ci) => (
-              <View key={ci.listing.id} style={st.card}>
+            {items.map((ci) => {
+              const isSelected = selectedIds.has(ci.listing.id);
+              return (
+              <Pressable
+                key={ci.listing.id}
+                style={[st.card, isSelected && st.cardSelected]}
+                onPress={() => toggleSelected(ci.listing.id)}
+              >
+                <View style={[st.checkbox, isSelected && st.checkboxActive]}>
+                  {isSelected && <Feather name="check" size={12} color="#fff" />}
+                </View>
                 <View style={st.cardArt}>
                   {ci.listing.images?.[0] ? (
                     <Image source={{ uri: ci.listing.images[0] }} style={st.cardArtImg} />
@@ -159,21 +197,27 @@ export default function CartScreen({ onBack }: Props) {
                     <Feather name="trash-2" size={14} color={C.danger} />
                   </Pressable>
                 </View>
-              </View>
-            ))}
+              </Pressable>
+              );
+            })}
           </ScrollView>
 
           <View style={[st.bottomBar, { paddingBottom: Math.max(insets.bottom, 14) }]}>
             <View style={st.totalRow}>
-              <Text style={st.totalLabel}>Total</Text>
-              <Text style={st.totalPrice}>{total()}</Text>
+              <Text style={st.totalLabel}>
+                Total ({selectedCount} {selectedCount === 1 ? "item" : "items"})
+              </Text>
+              <Text style={st.totalPrice}>{selectedTotal()}</Text>
             </View>
             <Pressable
-              style={st.checkoutBtn}
-              onPress={() => push({ type: "CHECKOUT" })}
+              style={[st.checkoutBtn, selectedCount === 0 && st.checkoutBtnDisabled]}
+              onPress={() => selectedCount > 0 && push({ type: "CHECKOUT" })}
+              disabled={selectedCount === 0}
             >
               <Ionicons name="flash" size={20} color={C.textHero} />
-              <Text style={st.checkoutText}>Proceed to Checkout</Text>
+              <Text style={st.checkoutText}>
+                {selectedCount === 0 ? "Select Items to Checkout" : "Proceed to Checkout"}
+              </Text>
             </Pressable>
           </View>
         </>
@@ -208,12 +252,32 @@ const st = StyleSheet.create({
   emptyTitle: { color: C.textPrimary, fontSize: 18, fontWeight: "800" },
   emptySub: { color: C.textSecondary, fontSize: 13, fontWeight: "500", textAlign: "center", paddingHorizontal: 40 },
 
+  selectBar: {
+    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
+    paddingHorizontal: S.screenPadding, paddingVertical: 10,
+    borderBottomWidth: 1, borderBottomColor: C.border,
+  },
+  selectAllRow: { flexDirection: "row", alignItems: "center", gap: 10 },
+  selectAllLabel: { color: C.textPrimary, fontSize: 13, fontWeight: "700" },
+  selectedCount: { color: C.textSecondary, fontSize: 12, fontWeight: "600" },
+  checkbox: {
+    width: 22, height: 22, borderRadius: 6,
+    borderWidth: 2, borderColor: C.border,
+    alignItems: "center", justifyContent: "center",
+  },
+  checkboxActive: {
+    backgroundColor: C.accent, borderColor: C.accent,
+  },
+
   scroll: { paddingHorizontal: S.screenPadding, paddingTop: S.lg, paddingBottom: 160, gap: S.md },
 
   card: {
     flexDirection: "row", alignItems: "center", gap: S.md,
     backgroundColor: C.surface, borderRadius: S.radiusCard, borderWidth: 1, borderColor: C.border,
     padding: S.md,
+  },
+  cardSelected: {
+    borderColor: C.accent, backgroundColor: "rgba(44,128,255,0.04)",
   },
   cardArt: {
     width: 64, height: 80, borderRadius: S.radiusSmall,
@@ -288,5 +352,6 @@ const st = StyleSheet.create({
     flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8,
     backgroundColor: C.success, borderRadius: S.radiusSmall, paddingVertical: 16,
   },
+  checkoutBtnDisabled: { opacity: 0.4 },
   checkoutText: { color: C.textHero, fontSize: 15, fontWeight: "800" },
 });

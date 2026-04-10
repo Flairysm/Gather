@@ -21,9 +21,12 @@ import { C } from "../theme";
 import { cf } from "../styles/createForm.styles";
 import { MARKET_FILTERS } from "../data/market";
 import { supabase } from "../lib/supabase";
+import { requireNetwork } from "../lib/network";
+
+import GradeConditionPicker from "../components/GradeConditionPicker";
+import { formatGradeCombined, formatConditionLabel } from "../data/grading";
 
 const CATEGORIES = MARKET_FILTERS.filter((f) => f !== "All");
-const CONDITIONS = ["Gem Mint", "Mint", "Near Mint", "Excellent", "Good"];
 const MAX_IMAGES = 4;
 
 type Props = { onBack: () => void };
@@ -37,8 +40,9 @@ export default function CreateListingScreen({ onBack }: Props) {
   const [cardName, setCardName] = useState("");
   const [edition, setEdition] = useState("");
   const [category, setCategory] = useState("");
-  const [grade, setGrade] = useState("");
-  const [condition, setCondition] = useState("");
+  const [gradingCompany, setGradingCompany] = useState<string | null>(null);
+  const [gradeValue, setGradeValue] = useState<string | null>(null);
+  const [condition, setCondition] = useState<string | null>(null);
   const [price, setPrice] = useState("");
   const [quantity, setQuantity] = useState("1");
   const [description, setDescription] = useState("");
@@ -119,6 +123,7 @@ export default function CreateListingScreen({ onBack }: Props) {
   }
 
   async function handleSubmit() {
+    if (!(await requireNetwork())) return;
     setSubmitting(true);
 
     const { data: { user } } = await supabase.auth.getUser();
@@ -147,7 +152,9 @@ export default function CreateListingScreen({ onBack }: Props) {
         seller_id: user.id,
         card_name: cardName.trim(),
         edition: edition.trim() || null,
-        grade: grade.trim() || null,
+        grade: formatGradeCombined(gradingCompany, gradeValue),
+        grading_company: gradingCompany,
+        grade_value: gradeValue,
         condition: condition || null,
         price: numericPrice,
         quantity: safeQty,
@@ -288,37 +295,14 @@ export default function CreateListingScreen({ onBack }: Props) {
                 ))}
               </View>
 
-              <Text style={cf.fieldLabel}>Grade</Text>
-              <TextInput
-                style={cf.textInput}
-                value={grade}
-                onChangeText={setGrade}
-                placeholder="e.g. PSA 10, BGS 9.5"
-                placeholderTextColor={C.textMuted}
+              <GradeConditionPicker
+                gradingCompany={gradingCompany}
+                gradeValue={gradeValue}
+                condition={condition}
+                onChangeGradingCompany={setGradingCompany}
+                onChangeGradeValue={setGradeValue}
+                onChangeCondition={setCondition}
               />
-
-              <Text style={cf.fieldLabel}>Condition</Text>
-              <View style={cf.conditionRow}>
-                {CONDITIONS.map((c) => (
-                  <Pressable
-                    key={c}
-                    style={[
-                      cf.conditionChip,
-                      condition === c && cf.conditionChipActive,
-                    ]}
-                    onPress={() => setCondition(c)}
-                  >
-                    <Text
-                      style={[
-                        cf.conditionChipText,
-                        condition === c && cf.conditionChipTextActive,
-                      ]}
-                    >
-                      {c}
-                    </Text>
-                  </Pressable>
-                ))}
-              </View>
             </>
           )}
 
@@ -344,7 +328,7 @@ export default function CreateListingScreen({ onBack }: Props) {
 
               <Text style={cf.fieldLabel}>Quantity</Text>
               <TextInput
-                style={cf.input}
+                style={cf.textInput}
                 value={quantity}
                 onChangeText={setQuantity}
                 placeholder="1"
@@ -396,11 +380,15 @@ export default function CreateListingScreen({ onBack }: Props) {
                 </View>
                 <View style={cf.reviewRow}>
                   <Text style={cf.reviewLabel}>Grade</Text>
-                  <Text style={cf.reviewValue}>{grade || "—"}</Text>
+                  <Text style={cf.reviewValue}>
+                    {formatGradeCombined(gradingCompany, gradeValue) || "—"}
+                  </Text>
                 </View>
                 <View style={cf.reviewRow}>
                   <Text style={cf.reviewLabel}>Condition</Text>
-                  <Text style={cf.reviewValue}>{condition || "—"}</Text>
+                  <Text style={cf.reviewValue}>
+                    {condition ? formatConditionLabel(condition) : "—"}
+                  </Text>
                 </View>
                 <View style={cf.reviewDivider} />
                 <View style={cf.reviewRow}>

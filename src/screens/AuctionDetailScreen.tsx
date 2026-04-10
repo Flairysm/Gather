@@ -4,7 +4,6 @@ import {
   Animated,
   Dimensions,
   Easing,
-  Image,
   Modal,
   Pressable,
   SafeAreaView,
@@ -25,6 +24,10 @@ import { useAppNavigation } from "../navigation/NavigationContext";
 import { supabase } from "../lib/supabase";
 import { useReconnect } from "../hooks/useReconnect";
 import { requireNetwork } from "../lib/network";
+import ErrorState from "../components/ErrorState";
+import { formatConditionLabel, getConditionColor } from "../data/grading";
+import CachedImage from "../components/CachedImage";
+import Shimmer, { ShimmerGroup, FadeIn } from "../components/Shimmer";
 
 const SCREEN_W = Dimensions.get("window").width;
 const SCREEN_H = Dimensions.get("window").height;
@@ -144,6 +147,7 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
   const [vendorStore, setVendorStore] = useState<{ id: string; store_name: string; logo_url: string | null } | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [bidding, setBidding] = useState(false);
   const [showBidSheet, setShowBidSheet] = useState(false);
   const [bidAmount, setBidAmount] = useState("");
@@ -172,7 +176,8 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
   }, []);
 
   const loadAuction = useCallback(async () => {
-    const { data } = await supabase
+    setLoadError(false);
+    const { data, error } = await supabase
       .from("auction_items")
       .select(`
         id, seller_id, card_name, edition, grade, condition, description,
@@ -185,23 +190,35 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
       .eq("id", auctionId)
       .maybeSingle();
 
-    if (data) {
-      const row = { ...data, seller: Array.isArray(data.seller) ? data.seller[0] : data.seller } as AuctionRow;
-      setItem(row);
-      setVendorStore(null);
-
-      const { data: store } = await supabase
-        .from("vendor_stores")
-        .select("id, store_name, logo_url")
-        .eq("profile_id", row.seller_id)
-        .eq("is_active", true)
-        .maybeSingle();
-      if (store?.id) setVendorStore(store as any);
+    if (error) {
+      console.warn("AuctionDetail load error:", error.message);
+      if (!item) setLoadError(true);
+      return;
     }
+
+    if (!data) {
+      if (!item) {
+        setItem(null);
+        setVendorStore(null);
+      }
+      return;
+    }
+
+    const row = { ...data, seller: Array.isArray(data.seller) ? data.seller[0] : data.seller } as AuctionRow;
+    setItem(row);
+    setVendorStore(null);
+
+    const { data: store } = await supabase
+      .from("vendor_stores")
+      .select("id, store_name, logo_url")
+      .eq("profile_id", row.seller_id)
+      .eq("is_active", true)
+      .maybeSingle();
+    if (store?.id) setVendorStore(store as any);
   }, [auctionId]);
 
   const loadBids = useCallback(async () => {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("auction_bids")
       .select(`
         id, bidder_id, amount, created_at,
@@ -211,6 +228,10 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
       .order("created_at", { ascending: false })
       .limit(50);
 
+    if (error) {
+      console.warn("AuctionDetail loadBids error:", error.message);
+      return;
+    }
     if (data) {
       setBids(
         (data as any[]).map((r) => ({
@@ -225,7 +246,7 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
 
-    const [{ data: profile }, { count: addrCount }] = await Promise.all([
+    const [profileResult, addrResult] = await Promise.all([
       supabase
         .from("profiles")
         .select("phone_verified, transaction_banned, transaction_ban_reason")
@@ -236,12 +257,14 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
         .select("id", { count: "exact", head: true })
         .eq("user_id", user.id),
     ]);
+    if (profileResult.error) console.warn("loadEligibility profile error:", profileResult.error.message);
+    if (addrResult.error) console.warn("loadEligibility address error:", addrResult.error.message);
 
     setEligibility({
-      phoneVerified: profile?.phone_verified ?? false,
-      hasAddress: (addrCount ?? 0) > 0,
-      isBanned: profile?.transaction_banned ?? false,
-      banReason: profile?.transaction_ban_reason ?? null,
+      phoneVerified: profileResult.data?.phone_verified ?? false,
+      hasAddress: (addrResult.count ?? 0) > 0,
+      isBanned: profileResult.data?.transaction_banned ?? false,
+      banReason: profileResult.data?.transaction_ban_reason ?? null,
       loaded: true,
     });
   }, []);
@@ -360,10 +383,12 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
     if (!item || item.status !== "active") return;
     const diff = new Date(item.ends_at).getTime() - Date.now();
     if (diff <= 0) {
-      supabase.rpc("end_auction", { p_auction_id: auctionId }).then(() => {
-        loadAuction();
-        loadWinRecord();
-      });
+      (async () => {
+        try {
+          await supabase.rpc("end_auction", { p_auction_id: auctionId });
+          loadAuction(); loadWinRecord();
+        } catch { loadAuction(); }
+      })();
       return;
     }
     const timeout = setTimeout(() => {
@@ -480,22 +505,23 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
           style: "default",
           onPress: async () => {
             setBidding(true);
-            const { error } = await supabase.rpc("place_bid", {
-              p_auction_id: auctionId,
-              p_amount: item.buy_now_price,
-            });
-            if (error) {
-              Alert.alert("Error", error.message);
+            try {
+              const { error } = await supabase.rpc("place_bid", {
+                p_auction_id: auctionId,
+                p_amount: item.buy_now_price,
+              });
+              if (error) {
+                Alert.alert("Error", error.message);
+                return;
+              }
+              const { error: endErr } = await supabase.rpc("end_auction", { p_auction_id: auctionId });
+              if (endErr) console.warn("end_auction after buy-now:", endErr.message);
+              await loadAuction();
+              await loadBids();
+              loadWinRecord();
+            } finally {
               setBidding(false);
-              return;
             }
-            await supabase
-              .from("auction_items")
-              .update({ status: "ended", winner_id: currentUserId, updated_at: new Date().toISOString() })
-              .eq("id", auctionId);
-            setBidding(false);
-            loadAuction();
-            loadBids();
           },
         },
       ],
@@ -563,7 +589,7 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
         : ` Starting at ${formatPrice(item.starting_price)}.`;
       await Share.share({
         title: item.card_name,
-        message: `Check out "${item.card_name}" on Gather Auctions!${bidPart}`,
+        message: `Check out "${item.card_name}" on Evend Auctions!${bidPart}`,
       });
     } catch {
       /* user dismissed share sheet */
@@ -609,9 +635,31 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
           <Text style={st.headerTitle}>Auction</Text>
           <View style={{ width: 68 }} />
         </View>
-        <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
-          <ActivityIndicator size="large" color={C.accent} />
-        </View>
+        <ShimmerGroup>
+          <ScrollView contentContainerStyle={{ padding: S.screenPadding, gap: 14 }}>
+            <Shimmer width="100%" height={280} borderRadius={S.radiusCard} />
+            <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+              <View style={{ gap: 6, flex: 1 }}>
+                <Shimmer width="40%" height={12} borderRadius={6} />
+                <Shimmer width="80%" height={18} borderRadius={6} />
+                <Shimmer width="55%" height={13} borderRadius={6} />
+              </View>
+            </View>
+            <View style={{ height: 4 }} />
+            <Shimmer width="30%" height={10} borderRadius={5} />
+            <Shimmer width="45%" height={22} borderRadius={6} />
+            <View style={{ height: 8 }} />
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+              <Shimmer width={40} height={40} borderRadius={20} />
+              <View style={{ flex: 1, gap: 6 }}>
+                <Shimmer width="50%" height={13} borderRadius={5} />
+                <Shimmer width="35%" height={10} borderRadius={5} />
+              </View>
+            </View>
+            <View style={{ height: 8 }} />
+            <Shimmer width="100%" height={48} borderRadius={12} />
+          </ScrollView>
+        </ShimmerGroup>
       </SafeAreaView>
     );
   }
@@ -627,9 +675,16 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
           <Text style={st.headerTitle}>Auction</Text>
           <View style={{ width: 68 }} />
         </View>
-        <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
-          <Text style={{ color: C.textMuted, fontSize: 14 }}>Auction not found</Text>
-        </View>
+        {loadError ? (
+          <ErrorState
+            message="Failed to load auction. Check your connection and try again."
+            onRetry={loadAuction}
+          />
+        ) : (
+          <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
+            <Text style={{ color: C.textMuted, fontSize: 14 }}>Auction not found</Text>
+          </View>
+        )}
       </SafeAreaView>
     );
   }
@@ -789,11 +844,12 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
             <Ionicons name="close" size={22} color={C.textPrimary} />
           </Pressable>
           {images[imageIndex] ? (
-            <Image source={{ uri: images[imageIndex] }} style={st.imageViewerImage} />
+            <CachedImage source={{ uri: images[imageIndex] }} style={st.imageViewerImage} />
           ) : null}
         </View>
       </Modal>
 
+      <FadeIn>
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={st.scroll}>
         {/* Image carousel */}
         <ScrollView
@@ -806,7 +862,7 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
           {images.length > 0 ? (
             images.map((uri, i) => (
               <Pressable key={i} onPress={() => openImageViewer(i)}>
-                <Image source={{ uri }} style={st.heroImage} />
+                <CachedImage source={{ uri }} style={st.heroImage} />
               </Pressable>
             ))
           ) : (
@@ -964,12 +1020,12 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
         <View style={st.sellerSection}>
           <View style={st.sellerAvatar}>
             {vendorStore?.logo_url ? (
-              <Image
+              <CachedImage
                 source={{ uri: vendorStore.logo_url }}
                 style={{ width: "100%", height: "100%", borderRadius: 22 }}
               />
             ) : item.seller?.avatar_url ? (
-              <Image
+              <CachedImage
                 source={{ uri: item.seller.avatar_url }}
                 style={{ width: "100%", height: "100%", borderRadius: 22 }}
               />
@@ -1023,7 +1079,9 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
           {item.condition && (
             <View style={st.chip}>
               <Text style={st.chipLabel}>Condition</Text>
-              <Text style={st.chipValue}>{item.condition}</Text>
+              <Text style={[st.chipValue, { color: getConditionColor(item.condition) }]}>
+                {formatConditionLabel(item.condition)}
+              </Text>
             </View>
           )}
           <View style={st.chip}>
@@ -1068,6 +1126,7 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
           )}
         </View>
       </ScrollView>
+      </FadeIn>
 
       {/* Bottom bar */}
       <View style={[st.bottomBar, { paddingBottom: Math.max(insets.bottom, 14) }]}>
@@ -1083,7 +1142,7 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
           </View>
         ) : (
           <>
-            <Pressable style={st.msgBtn} onPress={() => push({ type: "CHAT", sellerId: item.seller_id, listingId: item.id, topic: item.card_name })}>
+            <Pressable style={st.msgBtn} onPress={() => push({ type: "CHAT", sellerId: item.seller_id, listingId: "", topic: item.card_name })}>
               <Feather name="message-circle" size={19} color={C.textPrimary} />
             </Pressable>
             <Pressable style={st.bidBtn} onPress={openBidSheet}>

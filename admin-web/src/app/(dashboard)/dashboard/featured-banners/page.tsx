@@ -1,7 +1,9 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { FormEvent, useEffect, useState } from "react";
+import { ConfirmModal } from "@/components/ConfirmModal";
+import { adminAction } from "@/lib/adminAction";
+import { adminQuery } from "@/lib/adminQuery";
 
 type FeaturedBanner = {
   id: string;
@@ -15,8 +17,6 @@ type FeaturedBanner = {
 };
 
 export default function FeaturedBannersPage() {
-  const supabase = useMemo(() => createClient(), []);
-
   const [rows, setRows] = useState<FeaturedBanner[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -31,60 +31,78 @@ export default function FeaturedBannersPage() {
   const [subheading, setSubheading] = useState("");
   const [priority, setPriority] = useState("100");
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [deleteBannerId, setDeleteBannerId] = useState<string | null>(null);
+  const [deletingBanner, setDeletingBanner] = useState(false);
 
   async function loadRows() {
     setLoading(true);
     setError(null);
 
-    const { data, error: queryError } = await supabase
-      .from("featured_banners")
-      .select(
-        "id, image_url, target_url, heading, subheading, priority, is_active, created_at",
-      )
-      .order("priority", { ascending: true })
-      .order("created_at", { ascending: false });
+    const { data, error: queryError } = await adminQuery<FeaturedBanner>({
+      table: "featured_banners",
+      select: "id, image_url, target_url, heading, subheading, priority, is_active, created_at",
+      order: [{ column: "priority", ascending: true }, { column: "created_at", ascending: false }],
+    });
 
     if (queryError) {
-      setError(queryError.message);
+      setError(queryError);
       setLoading(false);
       return;
     }
 
-    setRows((data ?? []) as FeaturedBanner[]);
+    setRows(data);
     setLoading(false);
   }
 
   useEffect(() => {
     loadRows();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function uploadSelectedFile() {
     if (!imageFile) return null;
 
     setUploading(true);
-    const extension = imageFile.name.split(".").pop()?.toLowerCase() ?? "jpg";
-    const filePath = `banners/${Date.now()}-${crypto.randomUUID()}.${extension}`;
+    try {
+      const form = new FormData();
+      form.append("file", imageFile);
+      form.append("bucket", "featured-banners");
 
-    const { error: uploadError } = await supabase.storage
-      .from("featured-banners")
-      .upload(filePath, imageFile, {
-        cacheControl: "3600",
-        upsert: false,
+      const res = await fetch("/api/admin/upload", {
+        method: "POST",
+        body: form,
+        credentials: "include",
       });
+      const text = await res.text();
+      let data: { url?: string; error?: string } = {};
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch {
+        setError(text?.slice(0, 120) || "Upload failed");
+        return null;
+      }
 
-    setUploading(false);
-
-    if (uploadError) {
-      setError(uploadError.message);
+      if (!res.ok || data.error) {
+        setError(data.error ?? "Upload failed");
+        return null;
+      }
+      return data.url as string;
+    } catch (err: any) {
+      setError(err.message ?? "Upload failed");
       return null;
+    } finally {
+      setUploading(false);
     }
+  }
 
-    const { data } = supabase.storage
-      .from("featured-banners")
-      .getPublicUrl(filePath);
-
-    return data.publicUrl;
+  async function runDeleteBanner(id: string) {
+    setDeletingBanner(true);
+    const { ok, error: err } = await adminAction("banner.delete", { id });
+    setDeletingBanner(false);
+    if (!ok) {
+      setError(err ?? "Failed to delete banner");
+      return;
+    }
+    await loadRows();
   }
 
   async function handleCreate(e: FormEvent<HTMLFormElement>) {
@@ -128,15 +146,14 @@ export default function FeaturedBannersPage() {
       is_active: true,
     };
 
-    const query = editingId
-      ? supabase.from("featured_banners").update(payload).eq("id", editingId)
-      : supabase.from("featured_banners").insert(payload);
-
-    const { error: insertError } = await query;
+    const { ok, error: actionErr } = await adminAction("banner.upsert", {
+      id: editingId ?? undefined,
+      payload,
+    });
     setSaving(false);
 
-    if (insertError) {
-      setError(insertError.message);
+    if (!ok) {
+      setError(actionErr ?? "Failed to save banner");
       return;
     }
 
@@ -151,16 +168,11 @@ export default function FeaturedBannersPage() {
   }
 
   async function setActive(id: string, active: boolean) {
-    const { error: updateError } = await supabase
-      .from("featured_banners")
-      .update({ is_active: active })
-      .eq("id", id);
-
-    if (updateError) {
-      setError(updateError.message);
+    const { ok, error: err } = await adminAction("banner.setActive", { id, active });
+    if (!ok) {
+      setError(err ?? "Failed to update banner");
       return;
     }
-
     await loadRows();
   }
 
@@ -382,27 +394,36 @@ export default function FeaturedBannersPage() {
                     </span>
                   </td>
                   <td className="px-4 py-3">
-                    <button
-                      onClick={() => startEdit(row)}
-                      className="mr-2 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-200 hover:bg-slate-800"
-                    >
-                      Edit
-                    </button>
-                    {row.is_active ? (
+                    <div className="flex flex-wrap gap-1">
                       <button
-                        onClick={() => setActive(row.id, false)}
+                        onClick={() => startEdit(row)}
                         className="rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-200 hover:bg-slate-800"
                       >
-                        Deactivate
+                        Edit
                       </button>
-                    ) : (
+                      {row.is_active ? (
+                        <button
+                          onClick={() => setActive(row.id, false)}
+                          className="rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-200 hover:bg-slate-800"
+                        >
+                          Deactivate
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => setActive(row.id, true)}
+                          className="rounded-md bg-sky-500 px-2 py-1 text-xs font-medium text-slate-950 hover:bg-sky-400"
+                        >
+                          Activate
+                        </button>
+                      )}
                       <button
-                        onClick={() => setActive(row.id, true)}
-                        className="rounded-md bg-sky-500 px-2 py-1 text-xs font-medium text-slate-950 hover:bg-sky-400"
+                        type="button"
+                        onClick={() => setDeleteBannerId(row.id)}
+                        className="rounded-md bg-rose-600 px-2 py-1 text-xs font-medium text-white hover:bg-rose-500"
                       >
-                        Activate
+                        Delete
                       </button>
-                    )}
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -410,6 +431,22 @@ export default function FeaturedBannersPage() {
           </table>
         </div>
       )}
+
+      <ConfirmModal
+        open={deleteBannerId !== null}
+        title="Delete banner"
+        message="Delete this banner permanently? This cannot be undone."
+        confirmLabel="Delete"
+        danger
+        busy={deletingBanner}
+        onCancel={() => setDeleteBannerId(null)}
+        onConfirm={async () => {
+          if (!deleteBannerId) return;
+          const id = deleteBannerId;
+          setDeleteBannerId(null);
+          await runDeleteBanner(id);
+        }}
+      />
     </div>
   );
 }

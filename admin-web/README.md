@@ -1,6 +1,6 @@
-# Gather Admin Web
+# Evend Admin Web
 
-Separate web admin dashboard for Gather operations and moderation.
+Separate web admin dashboard for Evend operations and moderation.
 
 ## Included in this scaffold
 

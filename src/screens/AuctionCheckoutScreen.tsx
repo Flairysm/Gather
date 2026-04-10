@@ -16,6 +16,25 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { C, S } from "../theme";
 import { supabase } from "../lib/supabase";
 import { requireNetwork } from "../lib/network";
+import { useAppNavigation } from "../navigation/NavigationContext";
+
+type ShippingAddress = {
+  id: string;
+  label: string;
+  full_name: string;
+  phone: string | null;
+  address_line1: string;
+  address_line2: string | null;
+  city: string;
+  state: string;
+  zip: string;
+};
+
+const EAST_MALAYSIA = ["sabah", "sarawak", "w.p. labuan"];
+
+function getShippingFee(state: string): number {
+  return EAST_MALAYSIA.some((s) => s === state.toLowerCase()) ? 15 : 10;
+}
 
 type Props = { winId: string; onBack: () => void };
 
@@ -55,14 +74,20 @@ function formatPrice(n: number): string {
 
 export default function AuctionCheckoutScreen({ winId, onBack }: Props) {
   const insets = useSafeAreaInsets();
+  const { push, stack } = useAppNavigation();
   const [win, setWin] = useState<WinData | null>(null);
   const [loading, setLoading] = useState(true);
   const [processing, setProcessing] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
+  const [address, setAddress] = useState<ShippingAddress | null>(null);
+  const [loadingAddr, setLoadingAddr] = useState(true);
+
+  const [loadError, setLoadError] = useState(false);
 
   const loadWin = useCallback(async () => {
     try {
-      const { data } = await supabase
+      setLoadError(false);
+      const { data, error } = await supabase
         .from("auction_wins")
         .select(`
           id, auction_id, winning_bid, payment_deadline, payment_status, seller_id,
@@ -72,6 +97,11 @@ export default function AuctionCheckoutScreen({ winId, onBack }: Props) {
         .eq("id", winId)
         .maybeSingle();
 
+      if (error) {
+        console.warn("AuctionCheckout loadWin error:", error.message);
+        setLoadError(true);
+        return;
+      }
       if (!data) return;
 
       const auction = Array.isArray((data as any).auction)
@@ -95,19 +125,46 @@ export default function AuctionCheckoutScreen({ winId, onBack }: Props) {
         seller_name: seller?.display_name ?? seller?.username ?? "Seller",
         seller_avatar: seller?.avatar_url ?? null,
       });
-    } catch {
-      /* silent */
+    } catch (e) {
+      console.warn("AuctionCheckout loadWin exception:", e);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
   }, [winId]);
 
+  const loadDefaultAddress = useCallback(async () => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) { setLoadingAddr(false); return; }
+    const { data, error } = await supabase
+      .from("user_addresses")
+      .select("*")
+      .eq("user_id", user.id)
+      .order("is_default", { ascending: false })
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) console.warn("AuctionCheckout loadDefaultAddress error:", error.message);
+    if (data) setAddress(data as ShippingAddress);
+    setLoadingAddr(false);
+  }, []);
+
   useEffect(() => {
     loadWin();
-  }, [loadWin]);
+    loadDefaultAddress();
+  }, [loadWin, loadDefaultAddress]);
+
+  useEffect(() => { loadDefaultAddress(); }, [stack.length]);
+
+  const shippingFee = address ? getShippingFee(address.state) : 0;
+  const total = (win?.winning_bid ?? 0) + shippingFee;
 
   async function handleConfirmPayment() {
     if (processing || !win) return;
+    if (!address) {
+      Alert.alert("Shipping Address Required", "Please add a shipping address before confirming payment.");
+      return;
+    }
     if (!(await requireNetwork())) return;
     setProcessing(true);
 
@@ -166,11 +223,15 @@ export default function AuctionCheckoutScreen({ winId, onBack }: Props) {
                 {formatPrice(win.winning_bid)}
               </Text>
             </View>
+            <View style={st.successItem}>
+              <Text style={st.successItemName}>Shipping</Text>
+              <Text style={st.successItemPrice}>{formatPrice(shippingFee)}</Text>
+            </View>
             <View style={st.successDivider} />
             <View style={st.successItem}>
               <Text style={st.successTotalLabel}>Total Paid</Text>
               <Text style={st.successTotalPrice}>
-                {formatPrice(win.winning_bid)}
+                {formatPrice(total)}
               </Text>
             </View>
           </View>
@@ -197,7 +258,12 @@ export default function AuctionCheckoutScreen({ winId, onBack }: Props) {
           <View style={{ width: 36 }} />
         </View>
         <View style={st.center}>
-          <Text style={st.emptyText}>Win record not found</Text>
+          <Text style={st.emptyText}>{loadError ? "Failed to load win record. Please try again." : "Win record not found"}</Text>
+          {loadError && (
+            <Pressable onPress={loadWin} style={{ marginTop: 12, paddingHorizontal: 16, paddingVertical: 8, backgroundColor: C.accent, borderRadius: 8 }}>
+              <Text style={{ color: "#fff", fontWeight: "600", fontSize: 14 }}>Retry</Text>
+            </Pressable>
+          )}
         </View>
       </SafeAreaView>
     );
@@ -271,24 +337,34 @@ export default function AuctionCheckoutScreen({ winId, onBack }: Props) {
 
         {/* Shipping */}
         <Text style={st.sectionTitle}>Shipping Address</Text>
-        <Pressable style={st.addressCard}>
-          <Feather name="map-pin" size={18} color={C.textAccent} />
+        <Pressable
+          style={[st.addressCard, !address && { borderColor: C.danger + "60" }]}
+          onPress={() => push({ type: "ADDRESS_BOOK" })}
+        >
+          <Feather name="map-pin" size={18} color={address ? C.textAccent : C.danger} />
           <View style={st.addressInfo}>
-            <Text style={st.addressName}>Add Shipping Address</Text>
-            <Text style={st.addressSub}>
-              Tap to set your delivery address
-            </Text>
-          </View>
-          <Feather name="chevron-right" size={18} color={C.textMuted} />
-        </Pressable>
-
-        {/* Payment */}
-        <Text style={st.sectionTitle}>Payment Method</Text>
-        <Pressable style={st.addressCard}>
-          <Ionicons name="card-outline" size={18} color={C.textAccent} />
-          <View style={st.addressInfo}>
-            <Text style={st.addressName}>Add Payment Method</Text>
-            <Text style={st.addressSub}>Credit/Debit card, Apple Pay</Text>
+            {address ? (
+              <>
+                <Text style={st.addressName}>
+                  {address.full_name}
+                  {address.phone ? `  •  ${address.phone}` : ""}
+                </Text>
+                <Text style={st.addressSub} numberOfLines={2}>
+                  {address.address_line1}
+                  {address.address_line2 ? `, ${address.address_line2}` : ""}
+                  {`, ${address.zip} ${address.city}, ${address.state}`}
+                </Text>
+              </>
+            ) : (
+              <>
+                <Text style={[st.addressName, { color: C.danger }]}>
+                  Add Shipping Address
+                </Text>
+                <Text style={st.addressSub}>
+                  Tap to set your delivery address
+                </Text>
+              </>
+            )}
           </View>
           <Feather name="chevron-right" size={18} color={C.textMuted} />
         </Pressable>
@@ -308,13 +384,15 @@ export default function AuctionCheckoutScreen({ winId, onBack }: Props) {
           </View>
           <View style={st.breakdownRow}>
             <Text style={st.breakdownLabel}>Shipping</Text>
-            <Text style={st.breakdownValue}>Calculated at next step</Text>
+            <Text style={st.breakdownValue}>
+              {address ? `RM${shippingFee}` : "Select address"}
+            </Text>
           </View>
           <View style={st.breakdownDivider} />
           <View style={st.breakdownRow}>
             <Text style={st.breakdownTotalLabel}>Total</Text>
             <Text style={st.breakdownTotal}>
-              {formatPrice(win.winning_bid)}
+              {formatPrice(total)}
             </Text>
           </View>
         </View>
@@ -352,7 +430,7 @@ export default function AuctionCheckoutScreen({ winId, onBack }: Props) {
             <Text style={st.confirmText}>
               {processing
                 ? "Processing…"
-                : `Confirm Payment  •  ${formatPrice(win.winning_bid)}`}
+                : `Confirm Payment  •  ${formatPrice(total)}`}
             </Text>
           </Pressable>
         )}

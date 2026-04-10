@@ -38,7 +38,7 @@ export default function LoginPage() {
       <div className="w-full max-w-md rounded-2xl border border-slate-800 bg-slate-900/70 p-6 shadow-xl">
         <div className="mb-6">
           <p className="text-xs uppercase tracking-wider text-slate-400">
-            Gather Admin
+            Evend Admin
           </p>
           <h1 className="mt-2 text-2xl font-semibold">Sign in</h1>
           <p className="mt-1 text-sm text-slate-400">

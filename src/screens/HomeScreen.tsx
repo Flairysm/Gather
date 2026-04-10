@@ -14,6 +14,8 @@ import { LinearGradient } from "expo-linear-gradient";
 import { Feather, Ionicons } from "@expo/vector-icons";
 
 import CachedImage from "../components/CachedImage";
+import ErrorState from "../components/ErrorState";
+import Shimmer, { ShimmerGroup } from "../components/Shimmer";
 import { C, S } from "../theme";
 import { home as h } from "../styles/home.styles";
 import { shared as sh } from "../styles/shared.styles";
@@ -25,7 +27,7 @@ import { ALL_CATEGORIES } from "../data/categories";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "../lib/supabase";
 import { fetchLiveStreams, type LiveStream } from "../data/live";
-import { useBadgeCounts } from "../hooks/useBadgeCounts";
+import { useBadgeContext } from "../hooks/useBadgeCounts";
 
 type FeaturedBanner = {
   id: string;
@@ -100,7 +102,7 @@ function resolveConditionLabel(
 export default function HomeScreen() {
   const { push } = useAppNavigation();
   const { items } = useCart();
-  const { counts, refresh: refreshBadges } = useBadgeCounts();
+  const { counts, refresh: refreshBadges } = useBadgeContext();
   const { selectedCategories } = useFeedPreferences();
   const [banner, setBanner] = useState<FeaturedBanner | null>(null);
   const [vendorStores, setVendorStores] = useState<VendorStoreRow[]>([]);
@@ -109,6 +111,8 @@ export default function HomeScreen() {
   const [searchQuery, setSearchQuery] = useState("");
   const [activeFilter, setActiveFilter] = useState("For You");
   const [refreshing, setRefreshing] = useState(false);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
 
   const feedFilters: FilterItem[] = useMemo(() => {
     const catPills: FilterItem[] = ALL_CATEGORIES
@@ -121,8 +125,8 @@ export default function HomeScreen() {
     ];
   }, [selectedCategories]);
 
-  const loadFeaturedBanner = useCallback(async () => {
-    const { data } = await supabase
+  const loadFeaturedBanner = useCallback(async (): Promise<boolean> => {
+    const { data, error } = await supabase
       .from("featured_banners")
       .select("id, image_url, target_url, heading, subheading, priority")
       .eq("is_active", true)
@@ -131,11 +135,17 @@ export default function HomeScreen() {
       .limit(1)
       .maybeSingle();
 
+    if (error) {
+      console.warn("loadFeaturedBanner failed:", error.message);
+      setBanner(null);
+      return false;
+    }
     setBanner((data as FeaturedBanner | null) ?? null);
+    return true;
   }, []);
 
-  const loadVendorStores = useCallback(async () => {
-    const { data } = await supabase
+  const loadVendorStores = useCallback(async (): Promise<boolean> => {
+    const { data, error } = await supabase
       .from("vendor_stores")
       .select(`
         id, profile_id, store_name, description, logo_url, banner_url, theme_color,
@@ -148,6 +158,11 @@ export default function HomeScreen() {
       .order("priority", { ascending: true })
       .limit(10);
 
+    if (error) {
+      console.warn("loadVendorStores failed:", error.message);
+      setVendorStores([]);
+      return false;
+    }
     if (data) {
       setVendorStores(
         (data as any[]).map((store) => ({
@@ -157,30 +172,47 @@ export default function HomeScreen() {
               ...di,
               listing: Array.isArray(di.listing) ? di.listing[0] : di.listing,
             }))
+            .filter((di: any) => di.listing && (di.listing.quantity ?? 0) > 0)
             .sort((a: any, b: any) => a.display_order - b.display_order),
         })),
       );
     }
+    return true;
   }, []);
 
-  const loadLiveStreams = useCallback(async () => {
-    const streams = await fetchLiveStreams();
-    setLiveStreams(streams);
-    setLiveProfileIds(new Set(streams.map((s) => s.streamer_id)));
+  const loadLiveStreams = useCallback(async (): Promise<boolean> => {
+    try {
+      const streams = await fetchLiveStreams();
+      setLiveStreams(streams);
+      setLiveProfileIds(new Set(streams.map((s) => s.streamer_id)));
+      return true;
+    } catch {
+      return false;
+    }
   }, []);
+
+  const [partialError, setPartialError] = useState(false);
+
+  const loadAll = useCallback(async () => {
+    const results = await Promise.all([
+      loadFeaturedBanner(),
+      loadVendorStores(),
+      loadLiveStreams(),
+    ]);
+    const failCount = results.filter((ok) => !ok).length;
+    setLoadError(failCount === results.length);
+    setPartialError(failCount > 0 && failCount < results.length);
+  }, [loadFeaturedBanner, loadVendorStores, loadLiveStreams]);
 
   useEffect(() => {
-    loadFeaturedBanner().catch(() => {});
-    loadVendorStores().catch(() => {});
-    loadLiveStreams().catch(() => {});
-  }, [loadFeaturedBanner, loadVendorStores, loadLiveStreams]);
+    loadAll().finally(() => setInitialLoading(false));
+  }, [loadAll]);
 
   async function onRefresh() {
     setRefreshing(true);
+    setLoadError(false);
     await Promise.all([
-      loadFeaturedBanner().catch(() => {}),
-      loadVendorStores().catch(() => {}),
-      loadLiveStreams().catch(() => {}),
+      loadAll(),
       refreshBadges().catch(() => {}),
     ]);
     await new Promise((resolve) => setTimeout(resolve, 700));
@@ -228,13 +260,7 @@ export default function HomeScreen() {
       }
 
       return { ...store, display_items: items };
-    })
-    .filter(
-      (store) =>
-        store.display_items.length > 0 ||
-        (normalizedQuery &&
-          store.store_name.toLowerCase().includes(normalizedQuery)),
-    );
+    });
 
   return (
     <SafeAreaView style={h.safe}>
@@ -257,7 +283,7 @@ export default function HomeScreen() {
               <Feather name="search" size={S.iconSize.md} color={C.textMuted} />
               <TextInput
                 style={h.searchInput}
-                placeholder="Search Gather"
+                placeholder="Search Evend"
                 placeholderTextColor={C.textMuted}
                 value={searchQuery}
                 onChangeText={setSearchQuery}
@@ -300,14 +326,38 @@ export default function HomeScreen() {
             </View>
           </View>
 
+          {/* Error State */}
+          {loadError && !initialLoading && !refreshing && (
+            <ErrorState
+              message="Failed to load content. Check your connection and try again."
+              onRetry={onRefresh}
+            />
+          )}
+
+          {/* Partial error banner */}
+          {partialError && !loadError && !initialLoading && !refreshing && (
+            <Pressable
+              onPress={onRefresh}
+              style={{ backgroundColor: "#78350F", borderRadius: S.radiusCard, padding: 10, marginBottom: 12, flexDirection: "row", alignItems: "center", gap: 8 }}
+            >
+              <Ionicons name="warning-outline" size={16} color="#FBBF24" />
+              <Text style={{ color: "#FDE68A", fontSize: 12, flex: 1 }}>Some content failed to load. Tap to retry.</Text>
+            </Pressable>
+          )}
+
           {/* Hero Banner */}
-          {refreshing ? (
-            <View style={h.refreshSkeletonHero} />
+          {refreshing || initialLoading ? (
+            <Shimmer width="100%" height={S.heroHeight} borderRadius={S.radiusCard} />
           ) : banner ? (
             <Pressable
               onPress={() => {
                 if (banner.target_url) {
-                  Linking.openURL(banner.target_url);
+                  const url = banner.target_url;
+                  if (/^https?:\/\//i.test(url)) {
+                    Linking.openURL(url);
+                  } else {
+                    console.warn("Blocked non-http banner URL:", url);
+                  }
                 }
               }}
             >
@@ -420,7 +470,7 @@ export default function HomeScreen() {
                 if (!hasItems) {
                   return (
                     <View style={h.noDisplayItems}>
-                      <Text style={h.noDisplayItemsText}>No display items yet</Text>
+                      <Text style={h.noDisplayItemsText}>No items listed</Text>
                     </View>
                   );
                 }
@@ -544,7 +594,26 @@ export default function HomeScreen() {
               })()}
             </View>
           ))}
-          {filteredVendorStores.length === 0 && (
+          {initialLoading ? (
+            <ShimmerGroup>
+              {[0, 1].map((i) => (
+                <View key={i} style={{ marginBottom: 20, gap: 10 }}>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: S.screenPadding }}>
+                    <Shimmer width={36} height={36} borderRadius={18} />
+                    <View style={{ gap: 4 }}>
+                      <Shimmer width={100} height={13} borderRadius={5} />
+                      <Shimmer width={60} height={10} borderRadius={4} />
+                    </View>
+                  </View>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: S.screenPadding, gap: 10 }}>
+                    {[0, 1, 2].map((j) => (
+                      <Shimmer key={j} width={140} height={180} borderRadius={S.radiusCard} />
+                    ))}
+                  </ScrollView>
+                </View>
+              ))}
+            </ShimmerGroup>
+          ) : filteredVendorStores.length === 0 ? (
             <View style={h.noDisplayItems}>
               <Text style={h.noDisplayItemsText}>
                 {normalizedQuery
@@ -554,7 +623,7 @@ export default function HomeScreen() {
                     : "No vendor stores yet"}
               </Text>
             </View>
-          )}
+          ) : null}
         </ScrollView>
 
       </View>

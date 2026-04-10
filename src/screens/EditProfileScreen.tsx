@@ -28,12 +28,14 @@ export default function EditProfileScreen({ onBack }: Props) {
   const [pickedAvatarUri, setPickedAvatarUri] = useState<string | null>(null);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
 
+  const [noAuth, setNoAuth] = useState(false);
+
   const load = useCallback(async () => {
     try {
       const {
         data: { user },
       } = await supabase.auth.getUser();
-      if (!user) return;
+      if (!user) { setNoAuth(true); return; }
       setUserId(user.id);
 
       const { data } = await supabase
@@ -175,6 +177,24 @@ export default function EditProfileScreen({ onBack }: Props) {
         <StatusBar style="light" />
         <View style={st.loadingWrap}>
           <ActivityIndicator color={C.accent} size="large" />
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  if (noAuth) {
+    return (
+      <SafeAreaView style={st.safe}>
+        <StatusBar style="light" />
+        <View style={st.header}>
+          <Pressable style={st.backBtn} onPress={onBack}>
+            <Feather name="arrow-left" size={20} color={C.textPrimary} />
+          </Pressable>
+          <Text style={st.headerTitle}>Edit Profile</Text>
+          <View style={{ width: 36 }} />
+        </View>
+        <View style={st.loadingWrap}>
+          <Text style={{ color: C.textMuted, fontSize: 14 }}>Please sign in to edit your profile.</Text>
         </View>
       </SafeAreaView>
     );

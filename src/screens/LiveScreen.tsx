@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  ActivityIndicator,
   FlatList,
   Pressable,
   RefreshControl,
+  ScrollView,
   Text,
   TextInput,
   View,
@@ -16,7 +16,10 @@ import { C, S } from "../theme";
 import { live as l } from "../styles/live.styles";
 import { fetchLiveStreams, type LiveStream } from "../data/live";
 import { useAppNavigation } from "../navigation/NavigationContext";
+import { AGORA_DISABLED } from "../lib/agoraFlag";
 import CachedImage from "../components/CachedImage";
+import ErrorState from "../components/ErrorState";
+import Shimmer, { ShimmerGroup, FadeIn } from "../components/Shimmer";
 import { useReconnect } from "../hooks/useReconnect";
 
 function formatViewers(n: number): string {
@@ -99,18 +102,25 @@ export default function LiveScreen() {
   const { push, stack } = useAppNavigation();
   const [streams, setStreams] = useState<LiveStream[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [search, setSearch] = useState("");
   const [searchVisible, setSearchVisible] = useState(false);
 
   const load = useCallback(async () => {
-    const data = await fetchLiveStreams();
-    setStreams(data);
-    setLoading(false);
+    try {
+      setLoadError(false);
+      const data = await fetchLiveStreams();
+      setStreams(data);
+    } catch {
+      setLoadError(true);
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
-    load().catch(() => setLoading(false));
+    load();
   }, [load]);
 
   useReconnect(load);
@@ -176,19 +186,43 @@ export default function LiveScreen() {
                 <Feather name="search" size={16} color={C.textMuted} />
                 <Text style={headerSt.searchPlaceholder}>Search live streams</Text>
               </Pressable>
-              <Pressable style={l.goLiveBtn} onPress={() => push({ type: "GO_LIVE" })}>
-                <Ionicons name="radio" size={14} color={C.textHero} />
-                <Text style={l.goLiveText}>GO LIVE</Text>
-              </Pressable>
+              {!AGORA_DISABLED && (
+                <Pressable style={l.goLiveBtn} onPress={() => push({ type: "GO_LIVE" })}>
+                  <Ionicons name="radio" size={14} color={C.textHero} />
+                  <Text style={l.goLiveText}>GO LIVE</Text>
+                </Pressable>
+              )}
             </>
           )}
         </View>
       </View>
 
       {loading ? (
-        <View style={emptySt.center}>
-          <ActivityIndicator color={C.accent} size="large" />
-        </View>
+        <ShimmerGroup>
+          <ScrollView
+            contentContainerStyle={{
+              paddingTop: insets.top + 64,
+              paddingHorizontal: S.screenPadding,
+              paddingBottom: S.scrollPaddingBottom,
+              gap: 14,
+            }}
+          >
+            {[0, 1, 2, 3].map((i) => (
+              <View key={i} style={{ backgroundColor: C.card, borderRadius: S.radiusCard, borderWidth: 1, borderColor: C.borderCard, overflow: "hidden" }}>
+                <Shimmer width="100%" height={180} borderRadius={0} />
+                <View style={{ flexDirection: "row", alignItems: "center", padding: 12, gap: 10 }}>
+                  <Shimmer width={36} height={36} borderRadius={18} />
+                  <View style={{ flex: 1, gap: 6 }}>
+                    <Shimmer width="65%" height={14} borderRadius={5} />
+                    <Shimmer width="45%" height={11} borderRadius={4} />
+                  </View>
+                </View>
+              </View>
+            ))}
+          </ScrollView>
+        </ShimmerGroup>
+      ) : loadError ? (
+        <ErrorState message="Could not load live streams." onRetry={load} />
       ) : filtered.length === 0 ? (
         <View style={emptySt.center}>
           <Ionicons name="radio-outline" size={48} color={C.textMuted} />
@@ -198,24 +232,26 @@ export default function LiveScreen() {
           <Text style={emptySt.sub}>Be the first — tap GO LIVE above!</Text>
         </View>
       ) : (
-        <FlatList
-          data={filtered}
-          keyExtractor={(s) => s.id}
-          renderItem={({ item }) => <StreamCard stream={item} />}
-          contentContainerStyle={{
-            paddingTop: insets.top + 64,
-            paddingHorizontal: S.screenPadding,
-            paddingBottom: S.scrollPaddingBottom,
-            gap: 14,
-          }}
-          refreshControl={
-            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.accent} />
-          }
-          initialNumToRender={6}
-          maxToRenderPerBatch={8}
-          windowSize={5}
-          removeClippedSubviews
-        />
+        <FadeIn>
+          <FlatList
+            data={filtered}
+            keyExtractor={(s) => s.id}
+            renderItem={({ item }) => <StreamCard stream={item} />}
+            contentContainerStyle={{
+              paddingTop: insets.top + 64,
+              paddingHorizontal: S.screenPadding,
+              paddingBottom: S.scrollPaddingBottom,
+              gap: 14,
+            }}
+            refreshControl={
+              <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.accent} />
+            }
+            initialNumToRender={6}
+            maxToRenderPerBatch={8}
+            windowSize={5}
+            removeClippedSubviews
+          />
+        </FadeIn>
       )}
     </View>
   );

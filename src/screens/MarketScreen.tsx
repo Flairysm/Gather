@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Animated,
   Dimensions,
+  Image,
   Pressable,
   RefreshControl,
   SafeAreaView,
@@ -11,6 +12,9 @@ import {
   View,
 } from "react-native";
 import CachedImage from "../components/CachedImage";
+import ErrorState from "../components/ErrorState";
+import Shimmer, { ShimmerGroup, FadeIn } from "../components/Shimmer";
+import { formatConditionShort, getConditionColor, GRADING_COMPANIES, CONDITION_TIERS } from "../data/grading";
 import { StatusBar } from "expo-status-bar";
 import { Feather, Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -32,20 +36,9 @@ import { supabase } from "../lib/supabase";
 type Tab = "Listings" | "Wanted";
 type SortMode = "newest" | "price_low" | "price_high";
 
-/** Grade filter chips — match substring on listing `grade` / wanted `grade_wanted`. */
-const GRADE_FILTER_OPTIONS = [
-  "Any",
-  "PSA 10",
-  "PSA 9",
-  "PSA 8",
-  "BGS 10",
-  "BGS 9.5",
-  "CGC 10",
-  "CGC 9.5",
-  "SGC 10",
-  "Raw",
-  "Ungraded",
-] as const;
+const FILTER_COMPANIES = GRADING_COMPANIES.filter((c) => c.id !== "RAW");
+const RAW_COMPANY = GRADING_COMPANIES.find((c) => c.id === "RAW")!;
+
 
 const FAB_ACTIONS = [
   {
@@ -89,8 +82,10 @@ export default function MarketScreen() {
   const [searchQuery, setSearchQuery] = useState("");
   const [showFilterSheet, setShowFilterSheet] = useState(false);
   const [sortMode, setSortMode] = useState<SortMode>("newest");
-  /** `null` = Any (no grade filter). */
-  const [selectedGrade, setSelectedGrade] = useState<string | null>(null);
+  const [selectedCompanies, setSelectedCompanies] = useState<Set<string>>(new Set());
+  const [selectedGrades, setSelectedGrades] = useState<Set<string>>(new Set());
+  const [rawSelected, setRawSelected] = useState(false);
+  const [selectedConditions, setSelectedConditions] = useState<Set<string>>(new Set());
   const [minPriceText, setMinPriceText] = useState("");
   const [maxPriceText, setMaxPriceText] = useState("");
   const [fabOpen, setFabOpen] = useState(false);
@@ -104,19 +99,26 @@ export default function MarketScreen() {
   >({});
   const [loadingListings, setLoadingListings] = useState(true);
   const [loadingWanted, setLoadingWanted] = useState(true);
+  const [loadError, setLoadError] = useState(false);
 
-  const loadListings = useCallback(async () => {
+  const loadListings = useCallback(async (): Promise<boolean> => {
     setLoadingListings(true);
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("listings")
       .select(`
-        id, seller_id, card_name, edition, grade, condition, price, quantity,
-        category, description, images, views, status, created_at,
+        id, seller_id, card_name, edition, grade, grading_company, grade_value,
+        condition, price, quantity, category, description, images, views, status, created_at,
         seller:profiles!seller_id(username, display_name, rating, total_sales, avatar_url)
       `)
       .eq("status", "active")
       .order("created_at", { ascending: false })
       .limit(50);
+
+    if (error) {
+      console.warn("MarketScreen loadListings error:", error.message);
+      setLoadingListings(false);
+      return false;
+    }
 
     if (data) {
       const mapped = (data as any[]).map((r) => ({
@@ -162,14 +164,16 @@ export default function MarketScreen() {
       }
     }
     setLoadingListings(false);
+    return true;
   }, []);
 
-  const loadWanted = useCallback(async () => {
+  const loadWanted = useCallback(async (): Promise<boolean> => {
     setLoadingWanted(true);
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("wanted_posts")
       .select(`
         id, buyer_id, card_name, edition, grade_wanted, offer_price,
+        grading_company_wanted, grade_value_wanted,
         category, description, image_url, views, status, created_at,
         buyer:profiles!buyer_id(username, display_name, rating, total_purchases, avatar_url)
       `)
@@ -177,6 +181,12 @@ export default function MarketScreen() {
       .order("created_at", { ascending: false })
       .limit(50);
 
+    if (error) {
+      console.warn("MarketScreen loadWanted error:", error.message);
+      setWantedPosts([]);
+      setLoadingWanted(false);
+      return false;
+    }
     if (data) {
       setWantedPosts(
         (data as any[]).map((r) => ({
@@ -186,27 +196,37 @@ export default function MarketScreen() {
       );
     }
     setLoadingWanted(false);
+    return true;
   }, []);
 
   useEffect(() => {
-    loadListings().catch(() => {});
-    loadWanted().catch(() => {});
+    Promise.all([loadListings(), loadWanted()]).then((results) => {
+      setLoadError(results.every((ok) => !ok));
+    });
   }, [loadListings, loadWanted]);
 
   const normalizedQuery = searchQuery.trim().toLowerCase();
   const minPrice = Number(minPriceText.replace(/(RM|\$|,)/gi, ""));
   const maxPrice = Number(maxPriceText.replace(/(RM|\$|,)/gi, ""));
-  const normalizedGradeFilter = (selectedGrade ?? "").trim().toLowerCase();
+  const hasCompanyFilter = selectedCompanies.size > 0;
+  const hasGradeFilter = selectedGrades.size > 0;
+  const hasConditionFilter = selectedConditions.size > 0;
   const hasMinPrice = Number.isFinite(minPrice) && minPrice > 0;
   const hasMaxPrice = Number.isFinite(maxPrice) && maxPrice > 0;
   const hasAdvancedFilters =
     sortMode !== "newest" ||
-    normalizedGradeFilter.length > 0 ||
+    hasCompanyFilter ||
+    hasGradeFilter ||
+    rawSelected ||
+    hasConditionFilter ||
     hasMinPrice ||
     hasMaxPrice;
   const activeFilterCount =
     (sortMode !== "newest" ? 1 : 0) +
-    (normalizedGradeFilter.length > 0 ? 1 : 0) +
+    (hasCompanyFilter ? selectedCompanies.size : 0) +
+    (hasGradeFilter ? selectedGrades.size : 0) +
+    (rawSelected ? 1 : 0) +
+    (hasConditionFilter ? selectedConditions.size : 0) +
     (hasMinPrice ? 1 : 0) +
     (hasMaxPrice ? 1 : 0);
 
@@ -234,10 +254,28 @@ export default function MarketScreen() {
       });
     }
 
-    if (normalizedGradeFilter) {
-      next = next.filter((item) =>
-        String(item.grade ?? "").toLowerCase().includes(normalizedGradeFilter),
-      );
+    if (hasCompanyFilter || rawSelected) {
+      next = next.filter((item) => {
+        const company = (item as any).grading_company ?? "";
+        const isRaw = !company || company === "RAW";
+        if (isRaw) return rawSelected;
+        return selectedCompanies.has(company);
+      });
+    }
+    if (hasGradeFilter || hasConditionFilter) {
+      next = next.filter((item) => {
+        const gc = (item as any).grading_company ?? "";
+        const isRaw = !gc || gc === "RAW";
+        if (isRaw && hasConditionFilter) {
+          const cond = (item.condition ?? "").trim().toUpperCase();
+          return selectedConditions.has(cond);
+        }
+        if (!isRaw && hasGradeFilter) {
+          const gv = (item as any).grade_value ?? "";
+          return selectedGrades.has(`${gc}:${gv}`);
+        }
+        return true;
+      });
     }
     if (hasMinPrice) next = next.filter((item) => Number(item.price) >= minPrice);
     if (hasMaxPrice) next = next.filter((item) => Number(item.price) <= maxPrice);
@@ -257,7 +295,13 @@ export default function MarketScreen() {
     listings,
     normalizedQuery,
     vendorStores,
-    normalizedGradeFilter,
+    hasCompanyFilter,
+    selectedCompanies,
+    hasGradeFilter,
+    selectedGrades,
+    rawSelected,
+    hasConditionFilter,
+    selectedConditions,
     hasMinPrice,
     minPrice,
     hasMaxPrice,
@@ -287,10 +331,22 @@ export default function MarketScreen() {
       });
     }
 
-    if (normalizedGradeFilter) {
-      next = next.filter((item) =>
-        String(item.grade_wanted ?? "").toLowerCase().includes(normalizedGradeFilter),
-      );
+    if (hasCompanyFilter || rawSelected) {
+      next = next.filter((item) => {
+        const company = (item as any).grading_company_wanted ?? "";
+        const isRaw = !company || company === "RAW";
+        if (isRaw) return rawSelected;
+        return selectedCompanies.has(company);
+      });
+    }
+    if (hasGradeFilter) {
+      next = next.filter((item) => {
+        const gc = (item as any).grading_company_wanted ?? "";
+        const isRaw = !gc || gc === "RAW";
+        if (isRaw) return true;
+        const gv = (item as any).grade_value_wanted ?? "";
+        return selectedGrades.has(`${gc}:${gv}`);
+      });
     }
     if (hasMinPrice) next = next.filter((item) => Number(item.offer_price) >= minPrice);
     if (hasMaxPrice) next = next.filter((item) => Number(item.offer_price) <= maxPrice);
@@ -309,7 +365,13 @@ export default function MarketScreen() {
     activeFilter,
     wantedPosts,
     normalizedQuery,
-    normalizedGradeFilter,
+    hasCompanyFilter,
+    selectedCompanies,
+    hasGradeFilter,
+    selectedGrades,
+    rawSelected,
+    hasConditionFilter,
+    selectedConditions,
     hasMinPrice,
     minPrice,
     hasMaxPrice,
@@ -351,19 +413,59 @@ export default function MarketScreen() {
 
   async function onRefresh() {
     setRefreshing(true);
-    await Promise.all([
-      loadListings().catch(() => {}),
-      loadWanted().catch(() => {}),
-    ]);
+    setLoadError(false);
+    const results = await Promise.allSettled([loadListings(), loadWanted()]);
+    setLoadError(results.every((r) => r.status === "rejected"));
     await new Promise((resolve) => setTimeout(resolve, 500));
     setRefreshing(false);
   }
 
   function clearAdvancedFilters() {
     setSortMode("newest");
-    setSelectedGrade(null);
+    setSelectedCompanies(new Set());
+    setSelectedGrades(new Set());
+    setRawSelected(false);
+    setSelectedConditions(new Set());
     setMinPriceText("");
     setMaxPriceText("");
+  }
+
+  function toggleCompany(id: string) {
+    setSelectedCompanies((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+        setSelectedGrades((gPrev) => {
+          const gNext = new Set(gPrev);
+          for (const key of gPrev) {
+            if (key.startsWith(`${id}:`)) gNext.delete(key);
+          }
+          return gNext;
+        });
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }
+
+  function toggleGrade(companyId: string, gradeValue: string) {
+    const key = `${companyId}:${gradeValue}`;
+    setSelectedGrades((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  function toggleCondition(tier: string) {
+    setSelectedConditions((prev) => {
+      const next = new Set(prev);
+      if (next.has(tier)) next.delete(tier);
+      else next.add(tier);
+      return next;
+    });
   }
 
   return (
@@ -382,41 +484,22 @@ export default function MarketScreen() {
           }
         >
           {refreshing && (
-            <View style={{ gap: S.md, marginBottom: S.lg }}>
-              <View
-                style={{
-                  height: 42,
-                  borderRadius: S.radiusSmall,
-                  backgroundColor: C.elevated,
-                  borderWidth: 1,
-                  borderColor: C.border,
-                }}
-              />
-              <View
-                style={{
-                  height: 44,
-                  borderRadius: S.radiusSmall,
-                  backgroundColor: C.elevated,
-                  borderWidth: 1,
-                  borderColor: C.border,
-                }}
-              />
-              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: S.cardGap }}>
-                {Array.from({ length: 4 }).map((_, i) => (
-                  <View
-                    key={i}
-                    style={{
-                      width: SKELETON_CARD_W,
-                      height: SKELETON_CARD_W * 1.65,
-                      borderRadius: S.radiusCard,
-                      backgroundColor: C.elevated,
-                      borderWidth: 1,
-                      borderColor: C.border,
-                    }}
-                  />
-                ))}
+            <ShimmerGroup>
+              <View style={{ gap: S.md, marginBottom: S.lg }}>
+                <Shimmer width="100%" height={42} borderRadius={S.radiusSmall} />
+                <Shimmer width="100%" height={44} borderRadius={S.radiusSmall} />
+                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: S.cardGap }}>
+                  {Array.from({ length: 4 }).map((_, i) => (
+                    <View key={i} style={{ width: SKELETON_CARD_W, gap: 8 }}>
+                      <Shimmer width="100%" height={SKELETON_CARD_W * 1.2} borderRadius={S.radiusCardInner} />
+                      <Shimmer width="75%" height={13} borderRadius={5} />
+                      <Shimmer width="50%" height={11} borderRadius={5} />
+                      <Shimmer width="40%" height={16} borderRadius={6} />
+                    </View>
+                  ))}
+                </View>
               </View>
-            </View>
+            </ShimmerGroup>
           )}
 
           {/* Header */}
@@ -466,6 +549,13 @@ export default function MarketScreen() {
             ))}
           </View>
 
+          {loadError && !loadingListings && !loadingWanted && (
+            <ErrorState
+              message="Failed to load marketplace. Check your connection and try again."
+              onRetry={onRefresh}
+            />
+          )}
+
           {/* Category Filter Pills */}
           <ScrollView
             horizontal
@@ -494,9 +584,18 @@ export default function MarketScreen() {
           {activeTab === "Listings" && (
             <View style={m.listingsGrid}>
               {loadingListings && listings.length === 0 ? (
-                <Text style={{ color: C.textMuted, fontSize: 13, padding: 20 }}>
-                  Loading listings...
-                </Text>
+                <ShimmerGroup>
+                  <View style={{ flexDirection: "row", flexWrap: "wrap", gap: S.cardGap, width: "100%" }}>
+                    {[0, 1, 2, 3].map((i) => (
+                      <View key={i} style={{ width: SKELETON_CARD_W, gap: 8, marginBottom: S.md }}>
+                        <Shimmer width="100%" height={SKELETON_CARD_W * 1.2} borderRadius={S.radiusCardInner} />
+                        <Shimmer width="75%" height={13} borderRadius={5} />
+                        <Shimmer width="50%" height={11} borderRadius={5} />
+                        <Shimmer width="40%" height={16} borderRadius={6} />
+                      </View>
+                    ))}
+                  </View>
+                </ShimmerGroup>
               ) : searchedListings.length === 0 ? (
                 <View style={{ alignItems: "center", padding: 40, width: "100%" }}>
                   <Ionicons name="storefront-outline" size={32} color={C.textMuted} />
@@ -510,7 +609,8 @@ export default function MarketScreen() {
                   </Text>
                 </View>
               ) : (
-                searchedListings.map((item) => (
+                <FadeIn style={{ flexDirection: "row", flexWrap: "wrap", gap: S.cardGap }}>
+                {searchedListings.map((item) => (
                   <Pressable
                     key={item.id}
                     style={m.listingCard}
@@ -526,7 +626,7 @@ export default function MarketScreen() {
                       {hasDisplayableCondition(item.condition) && (
                         <View style={m.conditionBadge}>
                           <Text numberOfLines={1} style={m.conditionBadgeText}>
-                            {item.condition}
+                            {formatConditionShort(item.condition) || item.condition}
                           </Text>
                         </View>
                       )}
@@ -571,7 +671,8 @@ export default function MarketScreen() {
                       </View>
                     </View>
                   </Pressable>
-                ))
+                ))}
+                </FadeIn>
               )}
             </View>
           )}
@@ -580,9 +681,18 @@ export default function MarketScreen() {
           {activeTab === "Wanted" && (
             <View style={m.wantedGrid}>
               {loadingWanted && wantedPosts.length === 0 ? (
-                <Text style={{ color: C.textMuted, fontSize: 13, padding: 20 }}>
-                  Loading wanted posts...
-                </Text>
+                <ShimmerGroup>
+                  <View style={{ flexDirection: "row", flexWrap: "wrap", gap: S.cardGap, width: "100%" }}>
+                    {[0, 1, 2, 3].map((i) => (
+                      <View key={i} style={{ width: SKELETON_CARD_W, gap: 8, marginBottom: S.md }}>
+                        <Shimmer width="100%" height={SKELETON_CARD_W * 1.2} borderRadius={S.radiusCardInner} />
+                        <Shimmer width="75%" height={13} borderRadius={5} />
+                        <Shimmer width="50%" height={11} borderRadius={5} />
+                        <Shimmer width="35%" height={14} borderRadius={5} />
+                      </View>
+                    ))}
+                  </View>
+                </ShimmerGroup>
               ) : searchedWanted.length === 0 ? (
                 <View style={{ alignItems: "center", padding: 40, width: "100%" }}>
                   <MaterialCommunityIcons name="card-search-outline" size={32} color={C.textMuted} />
@@ -596,7 +706,8 @@ export default function MarketScreen() {
                   </Text>
                 </View>
               ) : (
-                searchedWanted.map((item) => (
+                <FadeIn style={{ flexDirection: "row", flexWrap: "wrap", gap: S.cardGap }}>
+                {searchedWanted.map((item) => (
                   <Pressable
                     key={item.id}
                     style={m.wantedCard}
@@ -644,7 +755,8 @@ export default function MarketScreen() {
                       <Text style={m.wantedPostedAt}>{timeAgo(item.created_at)}</Text>
                     </View>
                   </Pressable>
-                ))
+                ))}
+                </FadeIn>
               )}
             </View>
           )}
@@ -762,6 +874,7 @@ export default function MarketScreen() {
                 {
                   marginBottom: 72,
                   paddingBottom: Math.max(insets.bottom, 14),
+                  maxHeight: "80%",
                 },
               ]}
             >
@@ -772,80 +885,199 @@ export default function MarketScreen() {
                 </Pressable>
               </View>
 
-              <Text style={(m as any).filterLabel}>Sort</Text>
-              <View style={(m as any).sortRow}>
-                <Pressable
-                  style={[(m as any).sortChip, sortMode === "newest" && (m as any).sortChipActive]}
-                  onPress={() => setSortMode("newest")}
-                >
-                  <Text style={[(m as any).sortChipText, sortMode === "newest" && (m as any).sortChipTextActive]}>Newest</Text>
-                </Pressable>
-                <Pressable
-                  style={[(m as any).sortChip, sortMode === "price_low" && (m as any).sortChipActive]}
-                  onPress={() => setSortMode("price_low")}
-                >
-                  <Text style={[(m as any).sortChipText, sortMode === "price_low" && (m as any).sortChipTextActive]}>Price: Low to High</Text>
-                </Pressable>
-                <Pressable
-                  style={[(m as any).sortChip, sortMode === "price_high" && (m as any).sortChipActive]}
-                  onPress={() => setSortMode("price_high")}
-                >
-                  <Text style={[(m as any).sortChipText, sortMode === "price_high" && (m as any).sortChipTextActive]}>Price: High to Low</Text>
-                </Pressable>
+              <ScrollView showsVerticalScrollIndicator={false} style={{ flexGrow: 0 }} contentContainerStyle={{ gap: 16, paddingBottom: 8 }}>
+
+              {/* Sort */}
+              <View style={{ gap: 8 }}>
+                <Text style={(m as any).filterLabel}>Sort</Text>
+                <View style={(m as any).sortRow}>
+                  <Pressable
+                    style={[(m as any).sortChip, sortMode === "newest" && (m as any).sortChipActive]}
+                    onPress={() => setSortMode("newest")}
+                  >
+                    <Text style={[(m as any).sortChipText, sortMode === "newest" && (m as any).sortChipTextActive]}>Newest</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[(m as any).sortChip, sortMode === "price_low" && (m as any).sortChipActive]}
+                    onPress={() => setSortMode("price_low")}
+                  >
+                    <Text style={[(m as any).sortChipText, sortMode === "price_low" && (m as any).sortChipTextActive]}>Price: Low to High</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[(m as any).sortChip, sortMode === "price_high" && (m as any).sortChipActive]}
+                    onPress={() => setSortMode("price_high")}
+                  >
+                    <Text style={[(m as any).sortChipText, sortMode === "price_high" && (m as any).sortChipTextActive]}>Price: High to Low</Text>
+                  </Pressable>
+                </View>
               </View>
 
-              <Text style={(m as any).filterLabel}>Price Range (RM)</Text>
-              <View style={(m as any).priceRow}>
-                <TextInput
-                  style={(m as any).priceInput}
-                  placeholder="Min"
-                  placeholderTextColor={C.textMuted}
-                  keyboardType="number-pad"
-                  value={minPriceText}
-                  onChangeText={setMinPriceText}
-                />
-                <Text style={(m as any).priceDash}>-</Text>
-                <TextInput
-                  style={(m as any).priceInput}
-                  placeholder="Max"
-                  placeholderTextColor={C.textMuted}
-                  keyboardType="number-pad"
-                  value={maxPriceText}
-                  onChangeText={setMaxPriceText}
-                />
+              {/* Price */}
+              <View style={{ gap: 8 }}>
+                <Text style={(m as any).filterLabel}>Price Range (RM)</Text>
+                <View style={(m as any).priceRow}>
+                  <TextInput
+                    style={(m as any).priceInput}
+                    placeholder="Min"
+                    placeholderTextColor={C.textMuted}
+                    keyboardType="number-pad"
+                    value={minPriceText}
+                    onChangeText={setMinPriceText}
+                  />
+                  <Text style={(m as any).priceDash}>-</Text>
+                  <TextInput
+                    style={(m as any).priceInput}
+                    placeholder="Max"
+                    placeholderTextColor={C.textMuted}
+                    keyboardType="number-pad"
+                    value={maxPriceText}
+                    onChangeText={setMaxPriceText}
+                  />
+                </View>
               </View>
 
-              <Text style={(m as any).filterLabel}>Grade</Text>
-              <View style={(m as any).sortRow}>
-                {GRADE_FILTER_OPTIONS.map((opt) => {
-                  const isAny = opt === "Any";
-                  const selected =
-                    isAny
-                      ? selectedGrade === null
-                      : selectedGrade === opt;
-                  return (
-                    <Pressable
-                      key={opt}
+              {/* Grading Company */}
+              <View style={{ gap: 8 }}>
+                <Text style={(m as any).filterLabel}>Grading</Text>
+                <View style={(m as any).sortRow}>
+                  <Pressable
+                    style={[
+                      (m as any).sortChip,
+                      { flexDirection: "row", alignItems: "center", gap: 6 },
+                      rawSelected && (m as any).sortChipActive,
+                    ]}
+                    onPress={() => {
+                      setRawSelected((v) => {
+                        if (v) setSelectedConditions(new Set());
+                        return !v;
+                      });
+                    }}
+                  >
+                    <Ionicons name="document-text-outline" size={14} color={rawSelected ? C.accent : C.textMuted} />
+                    <Text
                       style={[
-                        (m as any).sortChip,
-                        selected && (m as any).sortChipActive,
+                        (m as any).sortChipText,
+                        rawSelected && (m as any).sortChipTextActive,
                       ]}
-                      onPress={() =>
-                        setSelectedGrade(isAny ? null : opt)
-                      }
                     >
-                      <Text
+                      Raw / Ungraded
+                    </Text>
+                  </Pressable>
+                  {FILTER_COMPANIES.map((co) => {
+                    const active = selectedCompanies.has(co.id);
+                    return (
+                      <Pressable
+                        key={co.id}
                         style={[
-                          (m as any).sortChipText,
-                          selected && (m as any).sortChipTextActive,
+                          (m as any).sortChip,
+                          { flexDirection: "row", alignItems: "center", gap: 6 },
+                          active && (m as any).sortChipActive,
                         ]}
+                        onPress={() => toggleCompany(co.id)}
                       >
-                        {opt}
-                      </Text>
-                    </Pressable>
-                  );
-                })}
+                        {co.logo && (
+                          <Image
+                            source={co.logo}
+                            style={{ width: 16, height: 16, borderRadius: 3 }}
+                            resizeMode="contain"
+                          />
+                        )}
+                        <Text
+                          style={[
+                            (m as any).sortChipText,
+                            active && (m as any).sortChipTextActive,
+                          ]}
+                        >
+                          {co.label}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
               </View>
+
+              {/* Condition tiers for Raw */}
+              {rawSelected && (
+                <View style={{ gap: 8 }}>
+                  <Text style={(m as any).filterLabel}>Condition (Raw)</Text>
+                  <View style={(m as any).sortRow}>
+                    {CONDITION_TIERS.map((ct) => {
+                      const active = selectedConditions.has(ct.tier);
+                      return (
+                        <Pressable
+                          key={ct.tier}
+                          style={[
+                            (m as any).sortChip,
+                            { flexDirection: "row", alignItems: "center", gap: 6 },
+                            active && { borderColor: ct.color, backgroundColor: ct.color + "18" },
+                          ]}
+                          onPress={() => toggleCondition(ct.tier)}
+                        >
+                          <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: ct.color }} />
+                          <Text
+                            style={[
+                              (m as any).sortChipText,
+                              active && { color: ct.color },
+                            ]}
+                          >
+                            {ct.tier} — {ct.shortTitle}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                </View>
+              )}
+
+              {/* Grade Values (shown per selected company) */}
+              {selectedCompanies.size > 0 && (
+                <View style={{ gap: 12 }}>
+                  <Text style={(m as any).filterLabel}>Grade Value</Text>
+                  {FILTER_COMPANIES.filter((co) => selectedCompanies.has(co.id)).map((co) => (
+                    <View key={co.id} style={{ gap: 8 }}>
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                        {co.logo && (
+                          <Image
+                            source={co.logo}
+                            style={{ width: 14, height: 14, borderRadius: 2 }}
+                            resizeMode="contain"
+                          />
+                        )}
+                        <Text style={{ color: C.textSecondary, fontSize: 11, fontWeight: "700" }}>
+                          {co.label}
+                        </Text>
+                      </View>
+                      <View style={(m as any).sortRow}>
+                        {co.grades.map((g) => {
+                          const key = `${co.id}:${g.value}`;
+                          const active = selectedGrades.has(key);
+                          return (
+                            <Pressable
+                              key={key}
+                              style={[
+                                (m as any).sortChip,
+                                active && (m as any).sortChipActive,
+                              ]}
+                              onPress={() => toggleGrade(co.id, g.value)}
+                            >
+                              <Text
+                                style={[
+                                  (m as any).sortChipText,
+                                  active && (m as any).sortChipTextActive,
+                                ]}
+                              >
+                                {g.label}
+                              </Text>
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+                    </View>
+                  ))}
+                </View>
+              )}
+
+              </ScrollView>
 
               <View style={(m as any).filterActions}>
                 <Pressable style={(m as any).filterResetBtn} onPress={clearAdvancedFilters}>

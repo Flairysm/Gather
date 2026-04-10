@@ -19,8 +19,9 @@ import * as ImagePicker from "expo-image-picker";
 import { C, S } from "../theme";
 import { supabase } from "../lib/supabase";
 import { useAppNavigation } from "../navigation/NavigationContext";
+import DisputesView from "./DisputesView";
 
-type ViewId = "home" | "orders" | "listings" | "auctions" | "store";
+type ViewId = "home" | "orders" | "listings" | "auctions" | "store" | "performance" | "disputes";
 
 type VendorStore = {
   id: string;
@@ -207,6 +208,10 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
   const [auctionFilter, setAuctionFilter] = useState<"all" | "active" | "ended" | "cancelled">("active");
   const [listingFilter, setListingFilter] = useState<"all" | "active" | "sold" | "paused" | "draft">("active");
 
+  // Display item picker
+  const [pickerVisible, setPickerVisible] = useState(false);
+  const [pickerSearch, setPickerSearch] = useState("");
+
   // Sold counts per listing (from order_items)
   const [soldCounts, setSoldCounts] = useState<Record<string, number>>({});
 
@@ -220,10 +225,23 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
     shipped: orderItems.filter((oi) => oi.fulfillment_status === "shipped").length,
     cancelled: orderItems.filter((oi) => oi.fulfillment_status === "cancelled").length,
     pending: orderItems.filter((oi) => oi.fulfillment_status === "pending").length,
+    delivered: orderItems.filter((oi) => oi.fulfillment_status === "delivered").length,
   };
 
-  const totalRevenue = orderItems.reduce((s, i) => s + i.quantity * Number(i.unit_price), 0);
   const activeListingCount = myListings.filter((l) => l.status === "active").length;
+
+  const [openDisputeCount, setOpenDisputeCount] = useState(0);
+  useEffect(() => {
+    if (!userId) return;
+    (async () => {
+      const { count } = await supabase
+        .from("disputes")
+        .select("id", { count: "exact", head: true })
+        .eq("seller_id", userId)
+        .in("status", ["open", "under_review"]);
+      setOpenDisputeCount(count ?? 0);
+    })();
+  }, [userId]);
 
   function showToast(msg: string) {
     setToastMsg(msg);
@@ -273,17 +291,30 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
     try {
       const { data, error } = await supabase
         .from("vendor_display_items")
-        .select(`id, listing_id, display_order, listing:listings(id, card_name, edition, grade, price, images)`)
+        .select(`id, listing_id, display_order, listing:listings(id, card_name, edition, grade, price, quantity, status, images)`)
         .eq("store_id", store.id)
         .order("display_order", { ascending: true });
       if (error) throw error;
       if (data) {
-        setDisplayItems(
-          (data as any[]).map((d) => ({
-            ...d,
-            listing: Array.isArray(d.listing) ? d.listing[0] : d.listing,
-          })),
+        const mapped = (data as any[]).map((d) => ({
+          ...d,
+          listing: Array.isArray(d.listing) ? d.listing[0] : d.listing,
+        }));
+
+        // Auto-remove display items whose listing is gone or no longer active
+        const stale = mapped.filter(
+          (d) => !d.listing || d.listing.status !== "active" || (d.listing.quantity ?? 0) <= 0,
         );
+        if (stale.length > 0) {
+          await supabase
+            .from("vendor_display_items")
+            .delete()
+            .in("id", stale.map((d) => d.id));
+        }
+
+        setDisplayItems(mapped.filter(
+          (d) => d.listing && d.listing.status === "active" && (d.listing.quantity ?? 0) > 0,
+        ));
       }
     } catch (e) {
       showToast(errMsg(e, "Failed to load display items"));
@@ -329,9 +360,7 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
         .select(`
           id, order_id, listing_id, quantity, unit_price, fulfillment_status, tracking_number, created_at,
           listing:listings(card_name, edition, grade, images),
-          order:orders(id, buyer_id, total, created_at,
-            buyer:profiles!buyer_id(username, display_name)
-          )
+          order:orders(id, buyer_id, total, created_at)
         `)
         .eq("seller_id", userId)
         .order("created_at", { ascending: false })
@@ -345,11 +374,21 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
         source: "market",
       }));
 
+      const buyerIds = [...new Set(mapped.map((m) => m.order?.buyer_id).filter(Boolean))] as string[];
+      let buyerMap: Record<string, { username: string; display_name: string | null }> = {};
+      if (buyerIds.length > 0) {
+        const { data: profiles } = await supabase
+          .from("profiles")
+          .select("id, username, display_name")
+          .in("id", buyerIds);
+        for (const p of profiles ?? []) {
+          buyerMap[(p as any).id] = { username: (p as any).username, display_name: (p as any).display_name };
+        }
+      }
+
       for (const item of mapped) {
         if (item.order) {
-          item.order.buyer = Array.isArray((item.order as any).buyer)
-            ? (item.order as any).buyer[0]
-            : (item.order as any).buyer;
+          item.order.buyer = buyerMap[item.order.buyer_id] ?? null;
         }
         if (item.listing) {
           (item.listing as any).images = normalizeImages((item.listing as any).images);
@@ -456,11 +495,12 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
   }, [userId, loadOrderItems, loadMyAuctions]);
 
   useEffect(() => {
-    if (store?.id) {
-      loadDisplayItems();
-      loadMyListings();
-    }
-  }, [store?.id, loadDisplayItems, loadMyListings]);
+    if (store?.id) loadDisplayItems();
+  }, [store?.id, loadDisplayItems]);
+
+  useEffect(() => {
+    if (userId) loadMyListings();
+  }, [userId, loadMyListings]);
 
   // ── Order Fulfillment ──
   // Vendor flow: confirmed → shipped (requires tracking number). Buyer handles delivered.
@@ -608,10 +648,13 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
     if (swapIdx < 0 || swapIdx >= displayItems.length) return;
     const a = displayItems[idx];
     const b = displayItems[swapIdx];
-    await Promise.all([
+    const [r1, r2] = await Promise.all([
       supabase.from("vendor_display_items").update({ display_order: b.display_order }).eq("id", a.id),
       supabase.from("vendor_display_items").update({ display_order: a.display_order }).eq("id", b.id),
     ]);
+    if (r1.error || r2.error) {
+      showToast("Failed to reorder items");
+    }
     await loadDisplayItems();
   }
 
@@ -635,7 +678,7 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
     const parsedQty = parseInt(editQuantity, 10);
     if (!editName.trim()) { showToast("Card name is required"); return; }
     if (!Number.isFinite(parsed) || parsed <= 0) { showToast("Enter a valid price"); return; }
-    if (isNaN(parsedQty) || parsedQty < 0) { showToast("Enter a valid quantity"); return; }
+    if (isNaN(parsedQty) || parsedQty < 0) { showToast("Quantity must be 0 or more"); return; }
     setSavingListing(true);
     const { error } = await supabase.from("listings").update({
       card_name: editName.trim(), edition: editEdition.trim() || null,
@@ -654,7 +697,8 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
       {
         text: "Remove", style: "destructive",
         onPress: async () => {
-          await supabase.from("vendor_display_items").delete().eq("listing_id", item.id);
+          const { error: dispErr } = await supabase.from("vendor_display_items").delete().eq("listing_id", item.id);
+          if (dispErr) console.warn("removeListing display cleanup:", dispErr.message);
           const { error } = await supabase.from("listings").update({ status: "removed", updated_at: new Date().toISOString() }).eq("id", item.id);
           if (error) { showToast(errMsg(error, "Failed to remove listing")); return; }
           if (editingListingId === item.id) cancelEditListing();
@@ -768,14 +812,21 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
             </View>
           </View>
 
-          {/* Revenue Banner */}
-          <View style={st.revenueBanner}>
-            <View style={st.revenueLeft}>
-              <Ionicons name="cash-outline" size={18} color={C.success} />
-              <Text style={st.revenueLabel}>Total Revenue</Text>
-            </View>
-            <Text style={st.revenueValue}>{formatCurrency(totalRevenue)}</Text>
-          </View>
+          {/* To Ship Alert */}
+          {orderCounts.confirmed > 0 && (
+            <Pressable style={st.shipAlert} onPress={() => goToOrders("confirmed")}>
+              <View style={st.shipAlertIcon}>
+                <Ionicons name="cube-outline" size={20} color="#fff" />
+              </View>
+              <View style={st.shipAlertInfo}>
+                <Text style={st.shipAlertTitle}>
+                  {orderCounts.confirmed} order{orderCounts.confirmed === 1 ? "" : "s"} to ship
+                </Text>
+                <Text style={st.shipAlertSub}>Tap to view and ship orders</Text>
+              </View>
+              <Feather name="chevron-right" size={16} color={C.accent} />
+            </Pressable>
+          )}
 
           {/* Order Status Section */}
           <View style={st.sectionHeader}>
@@ -819,7 +870,8 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
             {[
               { icon: "cube-outline", label: "My Products", color: C.accent, bg: "rgba(44,128,255,0.1)", onPress: () => setView("listings") },
               { icon: "hammer-outline", label: "My Auctions", color: "#F59E0B", bg: "rgba(245,158,11,0.1)", onPress: () => setView("auctions") },
-              { icon: "bar-chart-outline", label: "Performance", color: C.success, bg: "rgba(34,197,94,0.1)", onPress: () => goToOrders("all") },
+              { icon: "bar-chart-outline", label: "Performance", color: C.success, bg: "rgba(34,197,94,0.1)", onPress: () => setView("performance") },
+              { icon: "alert-circle-outline", label: "Disputes", color: "#EF4444", bg: "rgba(239,68,68,0.1)", onPress: () => setView("disputes"), badge: openDisputeCount },
               { icon: "storefront-outline", label: "Store Settings", color: "#8B5CF6", bg: "rgba(139,92,246,0.1)", onPress: () => setView("store") },
               { icon: "add-circle-outline", label: "New Listing", color: C.accent, bg: "rgba(44,128,255,0.1)", onPress: () => push({ type: "CREATE_LISTING" }) },
               { icon: "add-circle-outline", label: "New Auction", color: "#F59E0B", bg: "rgba(245,158,11,0.1)", onPress: () => push({ type: "CREATE_AUCTION" }) },
@@ -827,59 +879,17 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
               <Pressable key={i} style={st.toolTile} onPress={tool.onPress}>
                 <View style={[st.toolIcon, { backgroundColor: tool.bg }]}>
                   <Ionicons name={tool.icon as any} size={24} color={tool.color} />
+                  {"badge" in tool && (tool as any).badge > 0 && (
+                    <View style={st.toolBadge}>
+                      <Text style={st.toolBadgeText}>{(tool as any).badge > 99 ? "99+" : (tool as any).badge}</Text>
+                    </View>
+                  )}
                 </View>
                 <Text style={st.toolLabel}>{tool.label}</Text>
               </Pressable>
             ))}
           </View>
 
-          {/* Recent Orders */}
-          <View style={st.sectionHeader}>
-            <Text style={st.sectionTitle}>Recent Orders</Text>
-            {orderItems.length > 0 && (
-              <Pressable style={st.sectionLink} onPress={() => goToOrders("all")}>
-                <Text style={st.sectionLinkText}>See All</Text>
-                <Feather name="chevron-right" size={14} color={C.textAccent} />
-              </Pressable>
-            )}
-          </View>
-
-          {orderItems.length === 0 ? (
-            <View style={st.emptyCard}>
-              <Ionicons name="receipt-outline" size={28} color={C.textMuted} />
-              <Text style={st.emptyTitle}>No Orders Yet</Text>
-              <Text style={st.emptySub}>Orders from buyers will appear here</Text>
-            </View>
-          ) : (
-            orderItems.slice(0, 5).map((oi) => {
-              const cfg = FULFILLMENT_CONFIG[oi.fulfillment_status];
-              const imgUrl = oi.listing?.images?.[0];
-              return (
-                <Pressable key={oi.id} style={st.recentCard} onPress={() => goToOrders(oi.fulfillment_status)}>
-                  <View style={st.recentThumb}>
-                    {imgUrl ? (
-                      <Image source={{ uri: imgUrl }} style={st.recentThumbImg} />
-                    ) : (
-                      <Ionicons name="image-outline" size={16} color={C.textMuted} />
-                    )}
-                  </View>
-                  <View style={st.recentInfo}>
-                    <Text style={st.recentName} numberOfLines={1}>{oi.listing?.card_name ?? "Item"}</Text>
-                    <Text style={st.recentMeta}>
-                      {oi.order?.buyer?.display_name ?? oi.order?.buyer?.username ?? "Buyer"}
-                      {" · "}{relativeTime(oi.created_at)}
-                    </Text>
-                  </View>
-                  <View style={st.recentRight}>
-                    <Text style={st.recentPrice}>{formatCurrency(oi.quantity * Number(oi.unit_price))}</Text>
-                    <View style={[st.statusBadge, { backgroundColor: cfg.bg, borderColor: cfg.border }]}>
-                      <Text style={[st.statusBadgeText, { color: cfg.color }]}>{cfg.label}</Text>
-                    </View>
-                  </View>
-                </Pressable>
-              );
-            })
-          )}
         </ScrollView>
 
         {toastMsg && (
@@ -945,7 +955,9 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
               const cfg = FULFILLMENT_CONFIG[oi.fulfillment_status];
               const action = oi.source !== "auction" ? vendorNextAction(oi.fulfillment_status) : null;
               const imgUrl = oi.listing?.images?.[0];
-              const buyerName = oi.order?.buyer?.display_name ?? oi.order?.buyer?.username ?? "Buyer";
+              const buyerDisplay = oi.order?.buyer?.display_name ?? oi.order?.buyer?.username ?? "Buyer";
+              const buyerHandle = oi.order?.buyer?.username ? `@${oi.order.buyer.username}` : null;
+              const buyerId = oi.order?.buyer_id ? oi.order.buyer_id.slice(0, 8).toUpperCase() : null;
 
               return (
                 <View style={st.orderCard}>
@@ -972,8 +984,12 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
                       </Text>
                       <View style={st.orderBuyerRow}>
                         <Ionicons name="person-circle-outline" size={12} color={C.textAccent} />
-                        <Text style={st.orderBuyerName}>{buyerName}</Text>
+                        <Text style={st.orderBuyerName}>{buyerDisplay}</Text>
+                        {buyerHandle && <Text style={st.orderBuyerHandle}>{buyerHandle}</Text>}
                       </View>
+                      {buyerId && (
+                        <Text style={st.orderBuyerId}>ID: {buyerId}</Text>
+                      )}
                     </View>
                     <View style={st.orderPriceCol}>
                       <Text style={st.orderPrice}>{formatCurrency(oi.quantity * Number(oi.unit_price))}</Text>
@@ -1409,17 +1425,233 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
     );
   }
 
+  // ══════════════════ PERFORMANCE / ANALYTICS ══════════════════
+  if (view === "performance") {
+    // All orders that represent a real sale (everything except cancelled/refunded)
+    const allSoldItems = orderItems.filter(
+      (oi) => oi.fulfillment_status !== "cancelled" && oi.fulfillment_status !== "refunded"
+    );
+    const deliveredItems = allSoldItems.filter(
+      (oi) => oi.fulfillment_status === "delivered"
+    );
+
+    const totalRevenue = allSoldItems.reduce(
+      (sum, oi) => sum + oi.quantity * Number(oi.unit_price),
+      0
+    );
+    const completedRevenue = deliveredItems.reduce(
+      (sum, oi) => sum + oi.quantity * Number(oi.unit_price),
+      0
+    );
+    const pendingRevenue = totalRevenue - completedRevenue;
+    const totalSales = allSoldItems.reduce((sum, oi) => sum + oi.quantity, 0);
+    const avgOrderValue = totalSales > 0 ? totalRevenue / totalSales : 0;
+
+    const totalViews = myListings.reduce((sum, l) => sum + (l.views ?? 0), 0)
+      + myAuctions.reduce((sum, a) => sum + (a.views ?? 0), 0);
+    const conversionRate = totalViews > 0 ? ((totalSales / totalViews) * 100) : 0;
+
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const dayOfWeek = now.getDay() === 0 ? 7 : now.getDay();
+    const startOfWeek = new Date(startOfToday);
+    startOfWeek.setDate(startOfToday.getDate() - (dayOfWeek - 1));
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    const revenueFor = (since: Date) =>
+      allSoldItems
+        .filter((oi) => new Date(oi.created_at) >= since)
+        .reduce((s, oi) => s + oi.quantity * Number(oi.unit_price), 0);
+
+    const salesFor = (since: Date) =>
+      allSoldItems
+        .filter((oi) => new Date(oi.created_at) >= since)
+        .reduce((s, oi) => s + oi.quantity, 0);
+
+    const todayRevenue = revenueFor(startOfToday);
+    const weekRevenue = revenueFor(startOfWeek);
+    const monthRevenue = revenueFor(startOfMonth);
+    const todaySales = salesFor(startOfToday);
+    const weekSales = salesFor(startOfWeek);
+    const monthSales = salesFor(startOfMonth);
+
+    // Top sellers by revenue (all sold, not just delivered)
+    const itemRevMap: Record<string, { name: string; revenue: number; qty: number }> = {};
+    for (const oi of allSoldItems) {
+      const name = oi.listing?.card_name ?? "Unknown";
+      const key = oi.listing_id || name;
+      if (!itemRevMap[key]) itemRevMap[key] = { name, revenue: 0, qty: 0 };
+      itemRevMap[key].revenue += oi.quantity * Number(oi.unit_price);
+      itemRevMap[key].qty += oi.quantity;
+    }
+    const topSellers = Object.values(itemRevMap)
+      .sort((a, b) => b.revenue - a.revenue)
+      .slice(0, 5);
+
+    return (
+      <SafeAreaView style={st.safe}>
+        <SubHeader title="Performance" />
+        <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ padding: S.screenPadding, paddingBottom: 40 }}>
+
+          {/* Revenue Hero */}
+          <View style={st.perfHero}>
+            <Text style={st.perfHeroLabel}>Total Revenue</Text>
+            <Text style={st.perfHeroValue}>{formatCurrency(totalRevenue)}</Text>
+            {pendingRevenue > 0 && (
+              <Text style={st.perfHeroPending}>
+                {formatCurrency(completedRevenue)} completed · {formatCurrency(pendingRevenue)} pending
+              </Text>
+            )}
+          </View>
+
+          {/* Key Metrics Row */}
+          <View style={st.perfMetricsRow}>
+            <View style={st.perfMetricCard}>
+              <Ionicons name="cart-outline" size={18} color={C.accent} />
+              <Text style={st.perfMetricValue}>{totalSales}</Text>
+              <Text style={st.perfMetricLabel}>Items Sold</Text>
+            </View>
+            <View style={st.perfMetricCard}>
+              <Ionicons name="pricetag-outline" size={18} color="#8B5CF6" />
+              <Text style={st.perfMetricValue}>{formatCurrency(avgOrderValue)}</Text>
+              <Text style={st.perfMetricLabel}>Avg. Item Value</Text>
+            </View>
+            <View style={st.perfMetricCard}>
+              <Ionicons name="eye-outline" size={18} color="#F59E0B" />
+              <Text style={st.perfMetricValue}>{totalViews.toLocaleString()}</Text>
+              <Text style={st.perfMetricLabel}>Total Views</Text>
+            </View>
+          </View>
+
+          {/* Conversion Rate */}
+          <View style={st.perfConversion}>
+            <View style={st.perfConvLeft}>
+              <Ionicons name="trending-up" size={20} color={C.success} />
+              <Text style={st.perfConvLabel}>Conversion Rate</Text>
+            </View>
+            <Text style={st.perfConvValue}>{conversionRate.toFixed(1)}%</Text>
+          </View>
+
+          {/* Period Breakdown */}
+          <Text style={st.perfSectionTitle}>Revenue Breakdown</Text>
+          <View style={st.perfPeriodGrid}>
+            {[
+              { label: "Today", rev: todayRevenue, sales: todaySales, icon: "today-outline", color: C.accent },
+              { label: "This Week", rev: weekRevenue, sales: weekSales, icon: "calendar-outline", color: "#8B5CF6" },
+              { label: "This Month", rev: monthRevenue, sales: monthSales, icon: "calendar-number-outline", color: "#F59E0B" },
+              { label: "All Time", rev: totalRevenue, sales: totalSales, icon: "infinite-outline", color: C.success },
+            ].map((p) => (
+              <View key={p.label} style={st.perfPeriodCard}>
+                <View style={st.perfPeriodHeader}>
+                  <Ionicons name={p.icon as any} size={16} color={p.color} />
+                  <Text style={st.perfPeriodLabel}>{p.label}</Text>
+                </View>
+                <Text style={st.perfPeriodValue}>{formatCurrency(p.rev)}</Text>
+                <Text style={st.perfPeriodSales}>{p.sales} sold</Text>
+              </View>
+            ))}
+          </View>
+
+          {/* Order Status Breakdown */}
+          <Text style={st.perfSectionTitle}>Order Status</Text>
+          <View style={st.perfStatusList}>
+            {[
+              { label: "Completed", count: orderCounts.delivered, color: C.success, icon: "checkmark-done-circle-outline" },
+              { label: "To Ship", count: orderCounts.confirmed, color: C.accent, icon: "cube-outline" },
+              { label: "Shipping", count: orderCounts.shipped, color: "#8B5CF6", icon: "airplane-outline" },
+              { label: "Unpaid", count: orderCounts.pending, color: "#F59E0B", icon: "time-outline" },
+              { label: "Cancelled", count: orderCounts.cancelled, color: "#EF4444", icon: "close-circle-outline" },
+            ].map((s) => (
+              <View key={s.label} style={st.perfStatusRow}>
+                <View style={st.perfStatusLeft}>
+                  <View style={[st.perfStatusDot, { backgroundColor: s.color }]} />
+                  <Ionicons name={s.icon as any} size={16} color={s.color} />
+                  <Text style={st.perfStatusLabel}>{s.label}</Text>
+                </View>
+                <Text style={[st.perfStatusCount, { color: s.color }]}>{s.count}</Text>
+              </View>
+            ))}
+          </View>
+
+          {/* Inventory Summary */}
+          <Text style={st.perfSectionTitle}>Inventory</Text>
+          <View style={st.perfMetricsRow}>
+            <View style={st.perfMetricCard}>
+              <Ionicons name="layers-outline" size={18} color={C.accent} />
+              <Text style={st.perfMetricValue}>{activeListingCount}</Text>
+              <Text style={st.perfMetricLabel}>Active Listings</Text>
+            </View>
+            <View style={st.perfMetricCard}>
+              <Ionicons name="hammer-outline" size={18} color="#F59E0B" />
+              <Text style={st.perfMetricValue}>
+                {myAuctions.filter((a) => a.status === "active").length}
+              </Text>
+              <Text style={st.perfMetricLabel}>Active Auctions</Text>
+            </View>
+            <View style={st.perfMetricCard}>
+              <Ionicons name="people-outline" size={18} color="#8B5CF6" />
+              <Text style={st.perfMetricValue}>
+                {myAuctions.reduce((s, a) => s + (a.watchers ?? 0), 0)}
+              </Text>
+              <Text style={st.perfMetricLabel}>Watchers</Text>
+            </View>
+          </View>
+
+          {/* Top Selling Items */}
+          {topSellers.length > 0 && (
+            <>
+              <Text style={st.perfSectionTitle}>Top Sellers</Text>
+              {topSellers.map((item, idx) => (
+                <View key={idx} style={st.perfTopRow}>
+                  <View style={st.perfTopRank}>
+                    <Text style={st.perfTopRankText}>#{idx + 1}</Text>
+                  </View>
+                  <View style={st.perfTopInfo}>
+                    <Text style={st.perfTopName} numberOfLines={1}>{item.name}</Text>
+                    <Text style={st.perfTopMeta}>{item.qty} sold</Text>
+                  </View>
+                  <Text style={st.perfTopRevenue}>{formatCurrency(item.revenue)}</Text>
+                </View>
+              ))}
+            </>
+          )}
+
+        </ScrollView>
+      </SafeAreaView>
+    );
+  }
+
+  // ══════════════════ DISPUTES ══════════════════
+  if (view === "disputes") {
+    return <DisputesView userId={userId ?? ""} onBack={() => setView("home")} />;
+  }
+
   // ══════════════════ STORE SETTINGS ══════════════════
+
+  const pickerListings = myListings
+    .filter((l) => l.status === "active" && !displayItems.some((d) => d.listing_id === l.id))
+    .filter((l) => {
+      if (!pickerSearch.trim()) return true;
+      const q = pickerSearch.toLowerCase();
+      return (
+        l.card_name.toLowerCase().includes(q) ||
+        (l.edition ?? "").toLowerCase().includes(q)
+      );
+    });
+
   return (
     <SafeAreaView style={st.safe}>
       <SubHeader title="Store Settings" />
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={st.storeScroll}>
-        {/* Preview Card */}
+
+        {/* ── Store Preview ── */}
         <View style={[st.previewCard, { borderColor: themeColor + "40" }]}>
           {bannerLocalUri || bannerUrl.trim() ? (
             <Image source={{ uri: bannerLocalUri ?? bannerUrl }} style={st.previewBanner} />
           ) : (
-            <View style={[st.previewBanner, { backgroundColor: themeColor + "22" }]} />
+            <View style={[st.previewBanner, { backgroundColor: themeColor + "22" }]}>
+              <Ionicons name="image-outline" size={28} color={themeColor + "55"} />
+            </View>
           )}
           <View style={st.previewBody}>
             <View style={st.previewLogoRow}>
@@ -1438,6 +1670,7 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
           </View>
         </View>
 
+        {/* ── Store Details ── */}
         <Text style={st.formLabel}>Store Details</Text>
         <View style={st.formCard}>
           <View style={st.field}>
@@ -1448,41 +1681,63 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
             <Text style={st.fieldLabel}>Description</Text>
             <TextInput style={[st.fieldInput, st.fieldMulti]} value={storeDesc} onChangeText={setStoreDesc} placeholder="Tell buyers about your store" placeholderTextColor={C.textMuted} multiline numberOfLines={3} />
           </View>
+        </View>
+
+        {/* ── Branding ── */}
+        <Text style={st.formLabel}>Branding</Text>
+        <View style={st.formCard}>
           <View style={st.field}>
             <Text style={st.fieldLabel}>Store Logo</Text>
             <Pressable style={st.uploadBtn} onPress={() => pickImage("logo")}>
-              <Feather name="image" size={16} color={C.textPrimary} />
+              {logoLocalUri || logoUrl.trim() ? (
+                <Image source={{ uri: logoLocalUri ?? logoUrl }} style={st.uploadThumb} />
+              ) : (
+                <View style={st.uploadThumbEmpty}>
+                  <Feather name="camera" size={14} color={C.textMuted} />
+                </View>
+              )}
               <Text style={st.uploadBtnText}>{logoLocalUri ? "Logo selected" : logoUrl ? "Change logo" : "Upload logo"}</Text>
+              <Feather name="chevron-right" size={14} color={C.textMuted} style={{ marginLeft: "auto" }} />
             </Pressable>
           </View>
           <View style={st.field}>
             <Text style={st.fieldLabel}>Store Banner</Text>
             <Pressable style={st.uploadBtn} onPress={() => pickImage("banner")}>
-              <Feather name="image" size={16} color={C.textPrimary} />
+              {bannerLocalUri || bannerUrl.trim() ? (
+                <Image source={{ uri: bannerLocalUri ?? bannerUrl }} style={st.uploadThumbWide} />
+              ) : (
+                <View style={[st.uploadThumbEmpty, { width: 48, borderRadius: 6 }]}>
+                  <Feather name="image" size={14} color={C.textMuted} />
+                </View>
+              )}
               <Text style={st.uploadBtnText}>{bannerLocalUri ? "Banner selected" : bannerUrl ? "Change banner" : "Upload banner"}</Text>
+              <Feather name="chevron-right" size={14} color={C.textMuted} style={{ marginLeft: "auto" }} />
             </Pressable>
           </View>
-        </View>
-
-        <Text style={st.formLabel}>Theme Color</Text>
-        <View style={st.colorRow}>
-          {THEME_COLORS.map((color) => (
-            <Pressable key={color} onPress={() => setThemeColor(color)} style={[st.colorDot, { backgroundColor: color }, themeColor === color && st.colorDotActive]}>
-              {themeColor === color && <Feather name="check" size={14} color="#fff" />}
-            </Pressable>
-          ))}
+          <View style={st.field}>
+            <Text style={st.fieldLabel}>Theme Color</Text>
+            <View style={st.colorRow}>
+              {THEME_COLORS.map((color) => (
+                <Pressable key={color} onPress={() => setThemeColor(color)} style={[st.colorDot, { backgroundColor: color }, themeColor === color && st.colorDotActive]}>
+                  {themeColor === color && <Feather name="check" size={14} color="#fff" />}
+                </Pressable>
+              ))}
+            </View>
+          </View>
         </View>
 
         <Pressable style={[st.saveBtn, { backgroundColor: themeColor }]} onPress={handleSaveStore} disabled={saving || !storeName.trim()}>
           {saving ? <ActivityIndicator color="#fff" size="small" /> : <Text style={st.saveBtnText}>{uploadingImage ? "Uploading images..." : store ? "Update Store" : "Create Store"}</Text>}
         </Pressable>
 
-        {/* Display Items */}
-        <View style={st.displayHeader}>
-          <Text style={st.formLabel}>Display Items</Text>
+        {/* ── Display Items ── */}
+        <View style={st.displaySectionHeader}>
+          <View>
+            <Text style={st.formLabel}>Display Items</Text>
+            <Text style={st.displayHint}>Featured listings shown on your store page</Text>
+          </View>
           <Text style={st.displayCount}>{displayItems.length}/10</Text>
         </View>
-        <Text style={st.displayHint}>Featured listings shown on your store page. Manage from My Products.</Text>
 
         {!store ? (
           <View style={st.emptyCard}>
@@ -1490,36 +1745,135 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
             <Text style={st.emptyTitle}>Create your store first</Text>
             <Text style={st.emptySub}>Save your store details above to get started</Text>
           </View>
-        ) : displayItems.length === 0 ? (
-          <View style={st.emptyCard}>
-            <Ionicons name="grid-outline" size={28} color={C.textMuted} />
-            <Text style={st.emptyTitle}>No display items</Text>
-            <Text style={st.emptySub}>Feature listings from My Products</Text>
-          </View>
         ) : (
-          displayItems.map((item, idx) => (
-            <View key={item.id} style={st.displayRow}>
-              <View style={st.displayOrder}><Text style={st.displayOrderText}>{item.display_order}</Text></View>
-              <View style={st.displayInfo}>
-                <Text style={st.displayName} numberOfLines={1}>{item.listing?.card_name ?? "Unknown"}</Text>
-                <Text style={st.displayMeta}>{item.listing?.edition ?? ""} {item.listing?.grade ? `· ${item.listing.grade}` : ""}</Text>
-                <Text style={st.displayPrice}>{item.listing ? formatCurrency(Number(item.listing.price)) : "—"}</Text>
+          <View style={st.displayCard}>
+            {displayItems.length === 0 ? (
+              <View style={st.displayEmpty}>
+                <Ionicons name="grid-outline" size={24} color={C.textMuted} />
+                <Text style={st.displayEmptyText}>No featured items yet</Text>
               </View>
-              <View style={st.displayActions}>
-                <Pressable onPress={() => moveDisplayItem(item.id, "up")} style={[st.miniBtn, idx === 0 && { opacity: 0.3 }]} disabled={idx === 0} hitSlop={8}>
-                  <Feather name="chevron-up" size={14} color={C.textPrimary} />
-                </Pressable>
-                <Pressable onPress={() => moveDisplayItem(item.id, "down")} style={[st.miniBtn, idx === displayItems.length - 1 && { opacity: 0.3 }]} disabled={idx === displayItems.length - 1} hitSlop={8}>
-                  <Feather name="chevron-down" size={14} color={C.textPrimary} />
-                </Pressable>
-                <Pressable onPress={() => removeDisplayItem(item.id)} style={st.miniBtn} hitSlop={8}>
-                  <Feather name="x" size={14} color={C.danger} />
-                </Pressable>
-              </View>
-            </View>
-          ))
+            ) : (
+              displayItems.map((item, idx) => {
+                const thumb = item.listing?.images?.[0];
+                return (
+                  <View key={item.id} style={[st.displayRow, idx < displayItems.length - 1 && st.displayRowBorder]}>
+                    {thumb ? (
+                      <Image source={{ uri: thumb }} style={st.displayThumb} />
+                    ) : (
+                      <View style={[st.displayThumb, { backgroundColor: C.elevated, alignItems: "center", justifyContent: "center" }]}>
+                        <Ionicons name="image-outline" size={16} color={C.textMuted} />
+                      </View>
+                    )}
+                    <View style={st.displayInfo}>
+                      <Text style={st.displayName} numberOfLines={1}>{item.listing?.card_name ?? "Unknown"}</Text>
+                      <Text style={st.displayMeta} numberOfLines={1}>
+                        {[item.listing?.edition, item.listing?.grade].filter(Boolean).join(" · ") || "—"}
+                      </Text>
+                      <Text style={st.displayPrice}>{item.listing ? formatCurrency(Number(item.listing.price)) : "—"}</Text>
+                    </View>
+                    <View style={st.displayActions}>
+                      <Pressable onPress={() => moveDisplayItem(item.id, "up")} style={[st.miniBtn, idx === 0 && { opacity: 0.3 }]} disabled={idx === 0} hitSlop={8}>
+                        <Feather name="chevron-up" size={14} color={C.textPrimary} />
+                      </Pressable>
+                      <Pressable onPress={() => moveDisplayItem(item.id, "down")} style={[st.miniBtn, idx === displayItems.length - 1 && { opacity: 0.3 }]} disabled={idx === displayItems.length - 1} hitSlop={8}>
+                        <Feather name="chevron-down" size={14} color={C.textPrimary} />
+                      </Pressable>
+                      <Pressable onPress={() => removeDisplayItem(item.id)} style={st.miniBtn} hitSlop={8}>
+                        <Feather name="x" size={14} color={C.danger} />
+                      </Pressable>
+                    </View>
+                  </View>
+                );
+              })
+            )}
+
+            {displayItems.length < 10 && (
+              <Pressable
+                style={st.addDisplayBtn}
+                onPress={() => { setPickerSearch(""); setPickerVisible(true); }}
+              >
+                <Ionicons name="add-circle-outline" size={20} color={C.accent} />
+                <Text style={st.addDisplayBtnText}>Add Item</Text>
+              </Pressable>
+            )}
+          </View>
         )}
+
       </ScrollView>
+
+      {/* ── Listing Picker Modal ── */}
+      <Modal visible={pickerVisible} animationType="fade" transparent>
+        <View style={st.pickerOverlay}>
+          <View style={st.pickerSheet}>
+            <View style={st.pickerHeader}>
+              <Text style={st.pickerTitle}>Select a Listing</Text>
+              <Pressable onPress={() => setPickerVisible(false)} hitSlop={12}>
+                <Ionicons name="close" size={22} color={C.textPrimary} />
+              </Pressable>
+            </View>
+
+            <View style={st.pickerSearchWrap}>
+              <Feather name="search" size={16} color={C.textMuted} />
+              <TextInput
+                style={st.pickerSearchInput}
+                value={pickerSearch}
+                onChangeText={setPickerSearch}
+                placeholder="Search listings..."
+                placeholderTextColor={C.textMuted}
+              />
+              {pickerSearch.length > 0 && (
+                <Pressable onPress={() => setPickerSearch("")} hitSlop={8}>
+                  <Ionicons name="close-circle" size={16} color={C.textMuted} />
+                </Pressable>
+              )}
+            </View>
+
+            <FlatList
+              data={pickerListings}
+              keyExtractor={(l) => l.id}
+              contentContainerStyle={{ paddingBottom: 20 }}
+              ListEmptyComponent={
+                <View style={st.pickerEmpty}>
+                  <Ionicons name="search-outline" size={24} color={C.textMuted} />
+                  <Text style={st.pickerEmptyText}>
+                    {pickerSearch ? "No matching listings" : "No active listings available"}
+                  </Text>
+                </View>
+              }
+              renderItem={({ item: listing }) => {
+                const thumb = listing.images?.[0];
+                return (
+                  <Pressable
+                    style={st.pickerRow}
+                    onPress={async () => {
+                      await addDisplayItem(listing.id);
+                      setPickerVisible(false);
+                    }}
+                  >
+                    {thumb ? (
+                      <Image source={{ uri: thumb }} style={st.pickerThumb} />
+                    ) : (
+                      <View style={[st.pickerThumb, { backgroundColor: C.elevated, alignItems: "center", justifyContent: "center" }]}>
+                        <Ionicons name="image-outline" size={18} color={C.textMuted} />
+                      </View>
+                    )}
+                    <View style={st.pickerInfo}>
+                      <Text style={st.pickerName} numberOfLines={1}>{listing.card_name}</Text>
+                      <Text style={st.pickerMeta} numberOfLines={1}>
+                        {[listing.edition, listing.grade].filter(Boolean).join(" · ")}
+                      </Text>
+                      <Text style={st.pickerPrice}>{formatCurrency(Number(listing.price))}</Text>
+                    </View>
+                    <View style={st.pickerAddIcon}>
+                      <Ionicons name="add" size={18} color={C.accent} />
+                    </View>
+                  </Pressable>
+                );
+              }}
+            />
+          </View>
+        </View>
+      </Modal>
 
       {toastMsg && (
         <Animated.View style={[st.toast, { opacity: toastOpacity }]}>
@@ -1576,6 +1930,21 @@ const st = StyleSheet.create({
   // ══ HOME / DASHBOARD ══
   homeScroll: { paddingHorizontal: S.screenPadding, paddingBottom: 60 },
 
+  shipAlert: {
+    flexDirection: "row", alignItems: "center", gap: 12,
+    backgroundColor: "rgba(44,128,255,0.08)", borderRadius: 12,
+    borderWidth: 1, borderColor: "rgba(44,128,255,0.25)",
+    padding: 14, marginBottom: 12,
+  },
+  shipAlertIcon: {
+    width: 36, height: 36, borderRadius: 18,
+    backgroundColor: C.accent,
+    alignItems: "center", justifyContent: "center",
+  },
+  shipAlertInfo: { flex: 1, gap: 1 },
+  shipAlertTitle: { color: C.accent, fontSize: 14, fontWeight: "800" },
+  shipAlertSub: { color: C.textSecondary, fontSize: 11, fontWeight: "500" },
+
   storeCard: {
     backgroundColor: C.surface, borderRadius: 16,
     borderWidth: 1, borderColor: C.border, padding: 14, marginBottom: 12,
@@ -1597,16 +1966,6 @@ const st = StyleSheet.create({
     paddingHorizontal: 12, paddingVertical: 7,
   },
   viewShopText: { color: C.accent, fontSize: 12, fontWeight: "700" },
-
-  revenueBanner: {
-    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
-    backgroundColor: "rgba(34,197,94,0.06)", borderRadius: 12,
-    borderWidth: 1, borderColor: "rgba(34,197,94,0.2)",
-    paddingHorizontal: 14, paddingVertical: 12, marginBottom: 20,
-  },
-  revenueLeft: { flexDirection: "row", alignItems: "center", gap: 8 },
-  revenueLabel: { color: C.success, fontSize: 13, fontWeight: "700" },
-  revenueValue: { color: C.success, fontSize: 18, fontWeight: "900" },
 
   sectionHeader: {
     flexDirection: "row", alignItems: "center", justifyContent: "space-between",
@@ -1640,6 +1999,14 @@ const st = StyleSheet.create({
     alignItems: "center", justifyContent: "center",
   },
   toolLabel: { color: C.textSecondary, fontSize: 11, fontWeight: "700", textAlign: "center" },
+  toolBadge: {
+    position: "absolute", top: -4, right: -4,
+    minWidth: 18, height: 18, borderRadius: 9,
+    backgroundColor: "#EF4444",
+    alignItems: "center", justifyContent: "center",
+    paddingHorizontal: 4,
+  },
+  toolBadgeText: { color: "#fff", fontSize: 9, fontWeight: "900" },
 
   recentCard: {
     flexDirection: "row", alignItems: "center",
@@ -1710,7 +2077,9 @@ const st = StyleSheet.create({
   orderItemName: { color: C.textPrimary, fontSize: 13, fontWeight: "700" },
   orderItemMeta: { color: C.textSecondary, fontSize: 11, fontWeight: "500", marginTop: 1 },
   orderBuyerRow: { flexDirection: "row", alignItems: "center", gap: 4, marginTop: 3 },
-  orderBuyerName: { color: C.textAccent, fontSize: 11, fontWeight: "600" },
+  orderBuyerName: { color: C.textAccent, fontSize: 11, fontWeight: "700" },
+  orderBuyerHandle: { color: C.textMuted, fontSize: 10, fontWeight: "600" },
+  orderBuyerId: { color: C.textMuted, fontSize: 9, fontWeight: "600", marginTop: 1 },
   orderPriceCol: { alignItems: "flex-end", gap: 4 },
   orderPrice: { color: C.accent, fontSize: 14, fontWeight: "900" },
   orderDate: { color: C.textMuted, fontSize: 10, fontWeight: "500" },
@@ -1871,6 +2240,74 @@ const st = StyleSheet.create({
   },
   editorSaveText: { color: "#fff", fontSize: 12, fontWeight: "800" },
 
+  // ══ PERFORMANCE ══
+  perfHero: {
+    backgroundColor: C.surface, borderRadius: S.radiusCard, borderWidth: 1, borderColor: C.border,
+    padding: 24, alignItems: "center", marginBottom: 16,
+  },
+  perfHeroLabel: { color: C.textSecondary, fontSize: 12, fontWeight: "600", marginBottom: 4, textTransform: "uppercase", letterSpacing: 1 },
+  perfHeroValue: { color: C.success, fontSize: 36, fontWeight: "900" },
+  perfHeroPending: { color: "#F59E0B", fontSize: 13, fontWeight: "600", marginTop: 4 },
+
+  perfMetricsRow: { flexDirection: "row" as const, gap: 10, marginBottom: 16 },
+  perfMetricCard: {
+    flex: 1, backgroundColor: C.surface, borderRadius: 14, borderWidth: 1, borderColor: C.border,
+    padding: 14, alignItems: "center" as const, gap: 4,
+  },
+  perfMetricValue: { color: C.textPrimary, fontSize: 18, fontWeight: "900" },
+  perfMetricLabel: { color: C.textSecondary, fontSize: 10, fontWeight: "600", textAlign: "center" as const },
+
+  perfConversion: {
+    flexDirection: "row" as const, alignItems: "center" as const, justifyContent: "space-between" as const,
+    backgroundColor: C.surface, borderRadius: 14, borderWidth: 1, borderColor: C.border,
+    padding: 16, marginBottom: 20,
+  },
+  perfConvLeft: { flexDirection: "row" as const, alignItems: "center" as const, gap: 8 },
+  perfConvLabel: { color: C.textPrimary, fontSize: 14, fontWeight: "700" },
+  perfConvValue: { color: C.success, fontSize: 22, fontWeight: "900" },
+
+  perfSectionTitle: {
+    color: C.textPrimary, fontSize: 16, fontWeight: "800", marginBottom: 12, marginTop: 4,
+  },
+
+  perfPeriodGrid: { flexDirection: "row" as const, flexWrap: "wrap" as const, gap: 10, marginBottom: 20 },
+  perfPeriodCard: {
+    width: "47%" as any, backgroundColor: C.surface, borderRadius: 14, borderWidth: 1, borderColor: C.border,
+    padding: 14,
+  },
+  perfPeriodHeader: { flexDirection: "row" as const, alignItems: "center" as const, gap: 6, marginBottom: 8 },
+  perfPeriodLabel: { color: C.textSecondary, fontSize: 12, fontWeight: "600" },
+  perfPeriodValue: { color: C.textPrimary, fontSize: 20, fontWeight: "900" },
+  perfPeriodSales: { color: C.textSecondary, fontSize: 11, fontWeight: "500", marginTop: 2 },
+
+  perfStatusList: {
+    backgroundColor: C.surface, borderRadius: 14, borderWidth: 1, borderColor: C.border,
+    padding: 4, marginBottom: 20,
+  },
+  perfStatusRow: {
+    flexDirection: "row" as const, alignItems: "center" as const, justifyContent: "space-between" as const,
+    paddingHorizontal: 14, paddingVertical: 12,
+  },
+  perfStatusLeft: { flexDirection: "row" as const, alignItems: "center" as const, gap: 8 },
+  perfStatusDot: { width: 8, height: 8, borderRadius: 4 },
+  perfStatusLabel: { color: C.textPrimary, fontSize: 13, fontWeight: "600" },
+  perfStatusCount: { fontSize: 16, fontWeight: "900" },
+
+  perfTopRow: {
+    flexDirection: "row" as const, alignItems: "center" as const,
+    backgroundColor: C.surface, borderRadius: 14, borderWidth: 1, borderColor: C.border,
+    padding: 12, marginBottom: 8, gap: 10,
+  },
+  perfTopRank: {
+    width: 30, height: 30, borderRadius: 8, backgroundColor: C.accentGlow,
+    alignItems: "center" as const, justifyContent: "center" as const,
+  },
+  perfTopRankText: { color: C.accent, fontSize: 12, fontWeight: "900" },
+  perfTopInfo: { flex: 1 },
+  perfTopName: { color: C.textPrimary, fontSize: 13, fontWeight: "700" },
+  perfTopMeta: { color: C.textSecondary, fontSize: 11, fontWeight: "500", marginTop: 1 },
+  perfTopRevenue: { color: C.success, fontSize: 14, fontWeight: "800" },
+
   // ══ STORE SETTINGS ══
   storeScroll: { paddingHorizontal: S.screenPadding, paddingBottom: 60, paddingTop: S.lg },
 
@@ -1878,12 +2315,12 @@ const st = StyleSheet.create({
     borderRadius: S.radiusCard, borderWidth: 1, backgroundColor: C.surface,
     overflow: "hidden", marginBottom: S.xl,
   },
-  previewBanner: { height: 100, width: "100%" },
+  previewBanner: { height: 100, width: "100%", alignItems: "center" as const, justifyContent: "center" as const },
   previewBody: { padding: S.lg },
-  previewLogoRow: { flexDirection: "row", alignItems: "center", gap: S.md, marginTop: -36 },
+  previewLogoRow: { flexDirection: "row" as const, alignItems: "center" as const, gap: S.md, marginTop: -36 },
   previewLogo: {
-    width: 52, height: 52, borderRadius: 26, borderWidth: 2,
-    alignItems: "center", justifyContent: "center", backgroundColor: C.bg,
+    width: 52, height: 52, borderRadius: 26, borderWidth: 2, overflow: "hidden" as const,
+    alignItems: "center" as const, justifyContent: "center" as const, backgroundColor: C.bg,
   },
   previewInfo: { flex: 1, paddingTop: 14 },
   previewName: { color: C.textPrimary, fontSize: 16, fontWeight: "800" },
@@ -1891,56 +2328,116 @@ const st = StyleSheet.create({
 
   formLabel: {
     color: C.textSecondary, fontSize: 11, fontWeight: "700", letterSpacing: 0.8,
-    textTransform: "uppercase", marginBottom: S.sm, marginLeft: 4,
+    textTransform: "uppercase" as const, marginBottom: S.sm, marginLeft: 4,
   },
   formCard: {
     backgroundColor: C.surface, borderRadius: S.radiusCard, borderWidth: 1,
     borderColor: C.border, padding: S.lg, gap: S.lg, marginBottom: S.xl,
   },
   field: { gap: 6 },
-  fieldLabel: { color: C.textSecondary, fontSize: 11, fontWeight: "700", letterSpacing: 0.5, textTransform: "uppercase" },
+  fieldLabel: { color: C.textSecondary, fontSize: 11, fontWeight: "700", letterSpacing: 0.5, textTransform: "uppercase" as const },
   fieldInput: {
     backgroundColor: C.elevated, borderRadius: S.radiusSmall, borderWidth: 1, borderColor: C.border,
     paddingHorizontal: 12, paddingVertical: 10, color: C.textPrimary, fontSize: 14, fontWeight: "500",
   },
-  fieldMulti: { minHeight: 72, textAlignVertical: "top" },
+  fieldMulti: { minHeight: 72, textAlignVertical: "top" as const },
   uploadBtn: {
-    flexDirection: "row", alignItems: "center", gap: 8,
+    flexDirection: "row" as const, alignItems: "center" as const, gap: 10,
     backgroundColor: C.elevated, borderRadius: S.radiusSmall, borderWidth: 1, borderColor: C.border,
-    paddingHorizontal: 12, paddingVertical: 12,
+    paddingHorizontal: 12, paddingVertical: 10,
   },
   uploadBtnText: { color: C.textPrimary, fontSize: 13, fontWeight: "600" },
+  uploadThumb: { width: 36, height: 36, borderRadius: 18, overflow: "hidden" as const },
+  uploadThumbWide: { width: 48, height: 28, borderRadius: 6, overflow: "hidden" as const },
+  uploadThumbEmpty: {
+    width: 36, height: 36, borderRadius: 18,
+    backgroundColor: C.elevated, borderWidth: 1, borderColor: C.border,
+    alignItems: "center" as const, justifyContent: "center" as const,
+  },
 
-  colorRow: { flexDirection: "row", gap: 12, flexWrap: "wrap", marginBottom: S.xl },
-  colorDot: { width: 36, height: 36, borderRadius: 18, alignItems: "center", justifyContent: "center" },
+  colorRow: { flexDirection: "row" as const, gap: 10, flexWrap: "wrap" as const, marginTop: 4 },
+  colorDot: { width: 32, height: 32, borderRadius: 16, alignItems: "center" as const, justifyContent: "center" as const },
   colorDotActive: { borderWidth: 3, borderColor: "#fff" },
 
-  saveBtn: { borderRadius: 14, paddingVertical: 14, alignItems: "center", justifyContent: "center", marginBottom: 24 },
+  saveBtn: { borderRadius: 14, paddingVertical: 14, alignItems: "center" as const, justifyContent: "center" as const, marginBottom: 28 },
   saveBtnText: { color: "#fff", fontSize: 15, fontWeight: "800" },
 
-  displayHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 2 },
-  displayCount: { color: C.accent, fontSize: 13, fontWeight: "800" },
-  displayHint: { color: C.textSecondary, fontSize: 12, fontWeight: "500", marginBottom: S.lg },
+  displaySectionHeader: {
+    flexDirection: "row" as const, alignItems: "flex-start" as const, justifyContent: "space-between" as const,
+    marginBottom: 12,
+  },
+  displayCount: { color: C.accent, fontSize: 14, fontWeight: "900", marginTop: 2 },
+  displayHint: { color: C.textSecondary, fontSize: 12, fontWeight: "500", marginTop: 2 },
+
+  displayCard: {
+    backgroundColor: C.surface, borderRadius: S.radiusCard, borderWidth: 1, borderColor: C.border,
+    overflow: "hidden" as const,
+  },
+  displayEmpty: {
+    alignItems: "center" as const, justifyContent: "center" as const,
+    paddingVertical: 32, gap: 6,
+  },
+  displayEmptyText: { color: C.textMuted, fontSize: 13, fontWeight: "600" },
 
   displayRow: {
-    flexDirection: "row", alignItems: "center",
-    backgroundColor: C.surface, borderRadius: 14, borderWidth: 1, borderColor: C.border,
-    padding: 12, gap: 10, marginBottom: 8,
+    flexDirection: "row" as const, alignItems: "center" as const,
+    paddingHorizontal: 12, paddingVertical: 10, gap: 10,
   },
-  displayOrder: {
-    width: 28, height: 28, borderRadius: 8, backgroundColor: C.accentGlow,
-    alignItems: "center", justifyContent: "center",
-  },
-  displayOrderText: { color: C.accent, fontSize: 12, fontWeight: "900" },
+  displayRowBorder: { borderBottomWidth: 1, borderBottomColor: C.border },
+  displayThumb: { width: 44, height: 44, borderRadius: 8, overflow: "hidden" as const },
   displayInfo: { flex: 1 },
   displayName: { color: C.textPrimary, fontSize: 13, fontWeight: "700" },
-  displayMeta: { color: C.textSecondary, fontSize: 11, fontWeight: "500", marginTop: 2 },
-  displayPrice: { color: C.accent, fontSize: 12, fontWeight: "800", marginTop: 3 },
-  displayActions: { flexDirection: "row", gap: 6 },
+  displayMeta: { color: C.textSecondary, fontSize: 11, fontWeight: "500", marginTop: 1 },
+  displayPrice: { color: C.accent, fontSize: 12, fontWeight: "800", marginTop: 2 },
+  displayActions: { flexDirection: "row" as const, gap: 4 },
   miniBtn: {
-    width: 32, height: 32, borderRadius: 8,
+    width: 30, height: 30, borderRadius: 8,
     backgroundColor: C.elevated, borderWidth: 1, borderColor: C.border,
-    alignItems: "center", justifyContent: "center",
+    alignItems: "center" as const, justifyContent: "center" as const,
+  },
+  addDisplayBtn: {
+    flexDirection: "row" as const, alignItems: "center" as const, justifyContent: "center" as const,
+    gap: 6, paddingVertical: 14,
+    borderTopWidth: 1, borderTopColor: C.border,
+  },
+  addDisplayBtnText: { color: C.accent, fontSize: 14, fontWeight: "700" },
+
+  // ══ LISTING PICKER MODAL ══
+  pickerOverlay: {
+    flex: 1, backgroundColor: "rgba(0,0,0,0.55)",
+    justifyContent: "center" as const, alignItems: "center" as const,
+    padding: 24,
+  },
+  pickerSheet: {
+    backgroundColor: C.bg, borderRadius: 20,
+    width: "100%", maxHeight: "75%" as any, paddingBottom: 16,
+    overflow: "hidden" as const,
+  },
+  pickerHeader: {
+    flexDirection: "row" as const, alignItems: "center" as const, justifyContent: "space-between" as const,
+    paddingHorizontal: 20, paddingTop: 18, paddingBottom: 12,
+  },
+  pickerTitle: { color: C.textPrimary, fontSize: 17, fontWeight: "800" },
+  pickerSearchWrap: {
+    flexDirection: "row" as const, alignItems: "center" as const, gap: 8,
+    backgroundColor: C.surface, borderRadius: 12, borderWidth: 1, borderColor: C.border,
+    marginHorizontal: 20, marginBottom: 12, paddingHorizontal: 12, paddingVertical: 10,
+  },
+  pickerSearchInput: { flex: 1, color: C.textPrimary, fontSize: 14, fontWeight: "500", padding: 0 },
+  pickerEmpty: { alignItems: "center" as const, justifyContent: "center" as const, paddingVertical: 40, gap: 8 },
+  pickerEmptyText: { color: C.textMuted, fontSize: 13, fontWeight: "600" },
+  pickerRow: {
+    flexDirection: "row" as const, alignItems: "center" as const, gap: 12,
+    paddingHorizontal: 20, paddingVertical: 10,
+  },
+  pickerThumb: { width: 50, height: 50, borderRadius: 10, overflow: "hidden" as const },
+  pickerInfo: { flex: 1 },
+  pickerName: { color: C.textPrimary, fontSize: 14, fontWeight: "700" },
+  pickerMeta: { color: C.textSecondary, fontSize: 12, fontWeight: "500", marginTop: 1 },
+  pickerPrice: { color: C.accent, fontSize: 13, fontWeight: "800", marginTop: 2 },
+  pickerAddIcon: {
+    width: 32, height: 32, borderRadius: 16, backgroundColor: C.accentGlow,
+    alignItems: "center" as const, justifyContent: "center" as const,
   },
 
   // ── Shared ──

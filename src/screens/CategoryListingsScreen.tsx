@@ -16,6 +16,7 @@ import { C, S } from "../theme";
 import { supabase } from "../lib/supabase";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import { formatListingPrice, timeAgo } from "../data/market";
+import ErrorState from "../components/ErrorState";
 import { StyleSheet } from "react-native";
 
 const SCREEN_W = Dimensions.get("window").width;
@@ -77,6 +78,7 @@ export default function CategoryListingsScreen({
   const [listings, setListings] = useState<ListingRow[]>([]);
   const [vendorStoreNames, setVendorStoreNames] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("newest");
 
@@ -84,6 +86,7 @@ export default function CategoryListingsScreen({
 
   const load = useCallback(async () => {
     setLoading(true);
+    setLoadError(false);
     let query = supabase
       .from("listings")
       .select(`
@@ -99,7 +102,13 @@ export default function CategoryListingsScreen({
       query = query.eq("category", category);
     }
 
-    const { data } = await query;
+    const { data, error } = await query;
+    if (error) {
+      console.warn("CategoryListings load error:", error.message);
+      setLoadError(true);
+      setLoading(false);
+      return;
+    }
     if (data) {
       const mapped = (data as any[]).map((r) => ({
         ...r,
@@ -309,6 +318,11 @@ export default function CategoryListingsScreen({
         <View style={st.loadingWrap}>
           <ActivityIndicator size="large" color={meta.color} />
         </View>
+      ) : loadError ? (
+        <ErrorState
+          message="Failed to load listings. Check your connection and try again."
+          onRetry={load}
+        />
       ) : (
         <FlatList
           data={filtered}
