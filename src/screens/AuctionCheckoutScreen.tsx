@@ -40,7 +40,8 @@ type Props = { winId: string; onBack: () => void };
 
 type WinData = {
   id: string;
-  auction_id: string;
+  auction_id: string | null;
+  flash_pin_id: string | null;
   winning_bid: number;
   payment_deadline: string;
   payment_status: string;
@@ -51,6 +52,10 @@ type WinData = {
   images: string[];
   seller_name: string;
   seller_avatar: string | null;
+  isFlash: boolean;
+  created_at: string;
+  streamer_name: string | null;
+  stream_title: string | null;
 };
 
 function normalizeImages(value: unknown): string[] {
@@ -90,8 +95,12 @@ export default function AuctionCheckoutScreen({ winId, onBack }: Props) {
       const { data, error } = await supabase
         .from("auction_wins")
         .select(`
-          id, auction_id, winning_bid, payment_deadline, payment_status, seller_id,
+          id, auction_id, flash_pin_id, winning_bid, payment_deadline, payment_status, seller_id, created_at,
           auction:auction_items!auction_id(card_name, edition, grade, condition, images),
+          flash_pin:live_stream_pins!flash_pin_id(flash_name, flash_image_url, host_id, stream_id,
+            host:profiles!host_id(username, display_name),
+            stream:live_streams!stream_id(title)
+          ),
           seller:profiles!seller_id(username, display_name, avatar_url)
         `)
         .eq("id", winId)
@@ -107,23 +116,38 @@ export default function AuctionCheckoutScreen({ winId, onBack }: Props) {
       const auction = Array.isArray((data as any).auction)
         ? (data as any).auction[0]
         : (data as any).auction;
+      const flashPin = Array.isArray((data as any).flash_pin)
+        ? (data as any).flash_pin[0]
+        : (data as any).flash_pin;
       const seller = Array.isArray((data as any).seller)
         ? (data as any).seller[0]
         : (data as any).seller;
 
+      const isFlash = !auction && !!flashPin;
+      const host = flashPin ? (Array.isArray(flashPin.host) ? flashPin.host[0] : flashPin.host) : null;
+      const stream = flashPin ? (Array.isArray(flashPin.stream) ? flashPin.stream[0] : flashPin.stream) : null;
       setWin({
         id: data.id,
         auction_id: (data as any).auction_id,
+        flash_pin_id: (data as any).flash_pin_id,
         winning_bid: Number((data as any).winning_bid),
         payment_deadline: (data as any).payment_deadline,
         payment_status: (data as any).payment_status,
         seller_id: (data as any).seller_id,
-        card_name: auction?.card_name ?? "Auction Item",
-        edition: auction?.edition ?? null,
-        grade: auction?.grade ?? auction?.condition ?? null,
-        images: normalizeImages(auction?.images),
+        created_at: (data as any).created_at,
+        card_name: isFlash
+          ? flashPin.flash_name ?? "Flash Auction Item"
+          : auction?.card_name ?? "Auction Item",
+        edition: isFlash ? null : auction?.edition ?? null,
+        grade: isFlash ? null : auction?.grade ?? auction?.condition ?? null,
+        images: isFlash
+          ? (flashPin.flash_image_url ? [flashPin.flash_image_url] : [])
+          : normalizeImages(auction?.images),
         seller_name: seller?.display_name ?? seller?.username ?? "Seller",
         seller_avatar: seller?.avatar_url ?? null,
+        isFlash,
+        streamer_name: host?.display_name ?? host?.username ?? null,
+        stream_title: stream?.title ?? null,
       });
     } catch (e) {
       console.warn("AuctionCheckout loadWin exception:", e);
@@ -291,8 +315,8 @@ export default function AuctionCheckoutScreen({ winId, onBack }: Props) {
       >
         {/* Auction badge */}
         <View style={st.auctionBadge}>
-          <Ionicons name="hammer" size={14} color="#F59E0B" />
-          <Text style={st.auctionBadgeText}>Auction Win</Text>
+          <Ionicons name={win.isFlash ? "flash" : "hammer"} size={14} color={win.isFlash ? "#FFD700" : "#F59E0B"} />
+          <Text style={st.auctionBadgeText}>{win.isFlash ? "Flash Auction Win" : "Auction Win"}</Text>
         </View>
 
         {/* Item card */}
@@ -315,6 +339,32 @@ export default function AuctionCheckoutScreen({ winId, onBack }: Props) {
             {win.grade && <Text style={st.itemGrade}>{win.grade}</Text>}
           </View>
           <Text style={st.itemPrice}>{formatPrice(win.winning_bid)}</Text>
+        </View>
+
+        {/* Source */}
+        <Text style={st.sectionTitle}>Source</Text>
+        <View style={st.sourceCard}>
+          <Ionicons
+            name={win.isFlash ? "flash" : "hammer"}
+            size={16}
+            color={win.isFlash ? "#FFD700" : "#F59E0B"}
+          />
+          <View style={st.sourceInfo}>
+            <Text style={st.sourceLabel}>
+              {win.isFlash ? "Won in Flash Auction" : "Won in Auction"}
+            </Text>
+            {win.isFlash && win.streamer_name && (
+              <Text style={st.sourceDetail}>
+                from {win.streamer_name}'s live stream
+                {win.stream_title ? ` — "${win.stream_title}"` : ""}
+              </Text>
+            )}
+            <Text style={st.sourceDate}>
+              {new Date(win.created_at).toLocaleDateString("en-MY", {
+                day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit",
+              })}
+            </Text>
+          </View>
         </View>
 
         {/* Seller */}
@@ -549,6 +599,21 @@ const st = StyleSheet.create({
     borderColor: C.border,
     padding: S.lg,
   },
+  sourceCard: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: S.md,
+    backgroundColor: C.surface,
+    borderRadius: S.radiusCard,
+    borderWidth: 1,
+    borderColor: C.border,
+    padding: S.lg,
+  },
+  sourceInfo: { flex: 1, gap: 2 },
+  sourceLabel: { color: C.textPrimary, fontSize: 13, fontWeight: "700" },
+  sourceDetail: { color: C.textSecondary, fontSize: 12, fontWeight: "500" },
+  sourceDate: { color: C.textMuted, fontSize: 11, fontWeight: "500", marginTop: 2 },
+
   sellerAvatar: {
     width: 36,
     height: 36,

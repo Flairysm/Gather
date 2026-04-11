@@ -401,8 +401,9 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
       const { data: wins } = await supabase
         .from("auction_wins")
         .select(`
-          id, winner_id, seller_id, winning_bid, payment_status, created_at,
+          id, winner_id, seller_id, winning_bid, payment_status, created_at, flash_pin_id,
           auction:auction_items!auction_id(id, card_name, edition, grade, condition, images),
+          flash_pin:live_stream_pins!flash_pin_id(flash_name, flash_image_url),
           winner:profiles!winner_id(username, display_name)
         `)
         .eq("seller_id", userId)
@@ -412,7 +413,9 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
 
       const auctionMapped: SellerOrderItem[] = (wins ?? []).map((row: any) => {
         const auction = Array.isArray(row.auction) ? row.auction[0] : row.auction;
+        const flashPin = Array.isArray(row.flash_pin) ? row.flash_pin[0] : row.flash_pin;
         const winner = Array.isArray(row.winner) ? row.winner[0] : row.winner;
+        const isFlash = !auction && !!flashPin;
         return {
           id: `auction-${row.id}`,
           order_id: `auction-${row.id}`,
@@ -424,6 +427,8 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
           tracking_number: null,
           listing: auction
             ? { card_name: auction.card_name, edition: auction.edition, grade: auction.grade ?? auction.condition ?? null, images: normalizeImages(auction.images) }
+            : isFlash
+            ? { card_name: flashPin.flash_name ?? "Flash Auction Item", edition: null, grade: null, images: flashPin.flash_image_url ? [flashPin.flash_image_url] : [] }
             : null,
           order: { id: `auction-${row.id}`, buyer_id: row.winner_id, total: Number(row.winning_bid), created_at: row.created_at, buyer: winner ?? null },
           source: "auction",

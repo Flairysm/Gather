@@ -6,7 +6,7 @@ import {
   Dimensions,
   FlatList,
   Image,
-  KeyboardAvoidingView,
+  Keyboard,
   Platform,
   Pressable,
   ScrollView,
@@ -25,16 +25,10 @@ import {
   useMicrophonePermissions,
   type CameraType,
 } from "expo-camera";
-import {
-  RtcSurfaceView,
-  RenderModeType,
-  VideoSourceType,
-  type IRtcEngine,
-  type IRtcEngineEventHandler,
-} from "react-native-agora";
 import * as ImagePicker from "expo-image-picker";
 
 import { C, S } from "../theme";
+import { AGORA_DISABLED } from "../lib/agoraFlag";
 import { supabase } from "../lib/supabase";
 import {
   fetchRecentChats,
@@ -44,8 +38,17 @@ import {
   endStream,
   type ChatMessage,
 } from "../data/live";
-import { createHostEngine, destroyEngine, fetchAgoraToken } from "../lib/agora";
+import {
+  fetchHostListings,
+  pinProduct,
+  unpinProduct,
+  fetchActivePin,
+  subscribePinUpdates,
+  type LiveStreamPin,
+} from "../data/liveCommerce";
+import { createHostEngine, destroyEngine, fetchAgoraToken, type IRtcEngine, type IRtcEngineEventHandler } from "../lib/agora";
 import CachedImage from "../components/CachedImage";
+import HostAgoraLocalVideo from "../components/HostAgoraLocalVideo";
 
 type Props = { onBack: () => void };
 
@@ -477,10 +480,51 @@ function LiveHostView({
   const [shareCount, setShareCount] = useState(0);
   const [duration, setDuration] = useState(0);
   const [ending, setEnding] = useState(false);
+  const endedRef = useRef(false);
+  const streamIdRef = useRef(streamId);
+  streamIdRef.current = streamId;
 
   // Control hub
   const [hubVisible, setHubVisible] = useState(false);
   const hubAnim = useRef(new Animated.Value(0)).current;
+
+  // Product pinning
+  const [pickerVisible, setPickerVisible] = useState(false);
+  const pickerAnim = useRef(new Animated.Value(0)).current;
+  const kbOffset = useRef(new Animated.Value(0)).current;
+  const [activePin, setActivePin] = useState<LiveStreamPin | null>(null);
+  const [hostListings, setHostListings] = useState<any[]>([]);
+  const [pickerTab, setPickerTab] = useState<"listing" | "flash">("listing");
+  const [pinning, setPinning] = useState(false);
+  const [auctionDuration, setAuctionDuration] = useState("300");
+  const [customDuration, setCustomDuration] = useState("");
+  // Flash auction fields
+  const [flashName, setFlashName] = useState("");
+  const [flashPrice, setFlashPrice] = useState("");
+  const [flashImage, setFlashImage] = useState<string | null>(null);
+  const [flashIncrement, setFlashIncrement] = useState("");
+  const [flashReserve, setFlashReserve] = useState("");
+
+  // Slide picker sheet up when keyboard opens
+  useEffect(() => {
+    const showEvent = Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
+    const hideEvent = Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
+    const onShow = Keyboard.addListener(showEvent, (e) => {
+      Animated.timing(kbOffset, {
+        toValue: -e.endCoordinates.height,
+        duration: Platform.OS === "ios" ? e.duration : 250,
+        useNativeDriver: true,
+      }).start();
+    });
+    const onHide = Keyboard.addListener(hideEvent, () => {
+      Animated.timing(kbOffset, {
+        toValue: 0,
+        duration: Platform.OS === "ios" ? 250 : 200,
+        useNativeDriver: true,
+      }).start();
+    });
+    return () => { onShow.remove(); onHide.remove(); };
+  }, [kbOffset]);
 
   useEffect(() => {
     let cancelled = false;
@@ -495,6 +539,12 @@ function LiveHostView({
           "Permissions Required",
           "Camera and microphone access are needed to go live. Please grant them in Settings.",
         );
+        return;
+      }
+
+      if (AGORA_DISABLED) {
+        setAgoraReady(true);
+        setLocalUid(1);
         return;
       }
 
@@ -560,12 +610,23 @@ function LiveHostView({
 
   useEffect(() => {
     fetchRecentChats(streamId).then(setChats).catch(() => {});
-
-    // If the host view unmounts without pressing END, auto-end the stream
-    return () => {
-      endStream(streamId).catch(() => {});
-    };
   }, [streamId]);
+
+  // Auto-end the stream on true unmount (deferred so strict-mode re-mount can cancel)
+  const endTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  useEffect(() => {
+    endedRef.current = false;
+    if (endTimerRef.current) clearTimeout(endTimerRef.current);
+    return () => {
+      endTimerRef.current = setTimeout(() => {
+        if (!endedRef.current) {
+          endedRef.current = true;
+          endStream(streamIdRef.current).catch(() => {});
+        }
+      }, 1000);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     const interval = setInterval(() => setDuration((d) => d + 1), 1000);
@@ -587,6 +648,135 @@ function LiveHostView({
       supabase.removeChannel(streamSub);
     };
   }, [streamId]);
+
+  // Load active pin + host products
+  useEffect(() => {
+    fetchActivePin(streamId).then(setActivePin).catch(() => {});
+    supabase.auth.getUser().then(({ data }) => {
+      const uid = data.user?.id;
+      if (!uid) return;
+      fetchHostListings(uid).then(setHostListings).catch(() => {});
+    });
+  }, [streamId]);
+
+  // Realtime pin updates
+  useEffect(() => {
+    const sub = subscribePinUpdates(streamId, (update) => {
+      if (update.is_active === false) {
+        setActivePin(null);
+      } else {
+        setActivePin((prev) => prev ? { ...prev, ...update } as LiveStreamPin : null);
+        if (update.id && !activePin) {
+          fetchActivePin(streamId).then(setActivePin).catch(() => {});
+        }
+      }
+    });
+    return () => { supabase.removeChannel(sub); };
+  }, [streamId]);
+
+  const togglePicker = useCallback(() => {
+    const next = !pickerVisible;
+    setPickerVisible(next);
+    Animated.spring(pickerAnim, {
+      toValue: next ? 1 : 0,
+      useNativeDriver: true,
+      tension: 65,
+      friction: 10,
+    }).start();
+  }, [pickerVisible, pickerAnim]);
+
+  const handlePin = useCallback(async (_type: "listing", itemId: string) => {
+    setPinning(true);
+    try {
+      await pinProduct({
+        streamId,
+        pinType: "listing",
+        listingId: itemId,
+      });
+      const pin = await fetchActivePin(streamId);
+      setActivePin(pin);
+      togglePicker();
+    } catch (e: any) {
+      Alert.alert("Pin Failed", e.message);
+    }
+    setPinning(false);
+  }, [streamId, togglePicker]);
+
+  const handleUnpin = useCallback(async () => {
+    try {
+      await unpinProduct(streamId);
+      setActivePin(null);
+    } catch (e: any) {
+      Alert.alert("Unpin Failed", e.message);
+    }
+  }, [streamId]);
+
+  const pickFlashImage = useCallback(async () => {
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      quality: 0.8,
+      allowsEditing: true,
+      aspect: [1, 1],
+    });
+    if (!result.canceled && result.assets[0]) {
+      setFlashImage(result.assets[0].uri);
+    }
+  }, []);
+
+  const uploadFlashImage = useCallback(async (localUri: string, userId: string): Promise<string> => {
+    const extMatch = localUri.match(/\.(\w+)(\?|$)/);
+    const ext = extMatch?.[1]?.toLowerCase() ?? "jpg";
+    const mimeTypes: Record<string, string> = {
+      jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
+      gif: "image/gif", webp: "image/webp",
+    };
+    const contentType = mimeTypes[ext] ?? "image/jpeg";
+    const filePath = `flash/${userId}/${Date.now()}.${ext}`;
+    const resp = await fetch(localUri);
+    const arrayBuf = await resp.arrayBuffer();
+    const { error } = await supabase.storage
+      .from("listing-images")
+      .upload(filePath, arrayBuf, { upsert: true, contentType });
+    if (error) throw error;
+    const { data } = supabase.storage.from("listing-images").getPublicUrl(filePath);
+    return data.publicUrl;
+  }, []);
+
+  const handleFlashAuction = useCallback(async () => {
+    if (!flashName.trim()) return;
+    setPinning(true);
+    try {
+      let imageUrl: string | undefined;
+      if (flashImage) {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user) imageUrl = await uploadFlashImage(flashImage, user.id);
+      }
+      const durationSec = parseInt(auctionDuration) || 300;
+      const increment = parseFloat(flashIncrement) || undefined;
+      const reserve = parseFloat(flashReserve) || undefined;
+      await pinProduct({
+        streamId,
+        pinType: "flash",
+        startingPrice: parseFloat(flashPrice) || 1,
+        durationSeconds: durationSec,
+        flashName: flashName.trim(),
+        flashImageUrl: imageUrl,
+        bidIncrement: increment,
+        reservePrice: reserve,
+      });
+      const pin = await fetchActivePin(streamId);
+      setActivePin(pin);
+      togglePicker();
+      setFlashName("");
+      setFlashPrice("");
+      setFlashImage(null);
+      setFlashIncrement("");
+      setFlashReserve("");
+    } catch (e: any) {
+      Alert.alert("Flash Auction Failed", e.message);
+    }
+    setPinning(false);
+  }, [streamId, flashName, flashPrice, flashImage, auctionDuration, togglePicker, uploadFlashImage]);
 
   const toggleHub = useCallback(() => {
     const next = !hubVisible;
@@ -620,6 +810,7 @@ function LiveHostView({
         style: "destructive",
         onPress: async () => {
           setEnding(true);
+          endedRef.current = true;
           try {
             await endStream(streamId);
           } catch {}
@@ -636,17 +827,17 @@ function LiveHostView({
   }, []);
 
   const flipCamera = () => {
-    engineRef.current?.switchCamera();
+    if (!AGORA_DISABLED) engineRef.current?.switchCamera();
     setFacing((f) => (f === "back" ? "front" : "back"));
   };
   const toggleTorch = () => {
     const next = !torch;
-    engineRef.current?.setCameraTorchOn(next);
+    if (!AGORA_DISABLED) engineRef.current?.setCameraTorchOn(next);
     setTorch(next);
   };
   const toggleMic = () => {
     const next = !micMuted;
-    engineRef.current?.muteLocalAudioStream(next);
+    if (!AGORA_DISABLED) engineRef.current?.muteLocalAudioStream(next);
     setMicMuted(next);
   };
 
@@ -661,21 +852,23 @@ function LiveHostView({
     <View style={st.root}>
       <StatusBar style="light" />
 
-      {/* Full-screen Agora host video */}
-      <RtcSurfaceView
-        style={StyleSheet.absoluteFill}
-        canvas={{
-          uid: localUid,
-          renderMode: RenderModeType.RenderModeHidden,
-          sourceType: VideoSourceType.VideoSourceCamera,
-        }}
-      />
+      {/* Full-screen video: Expo Camera preview (no Agora) or Agora publisher */}
+      {AGORA_DISABLED ? (
+        <CameraView style={StyleSheet.absoluteFill} facing={facing} enableTorch={torch} />
+      ) : (
+        <HostAgoraLocalVideo localUid={localUid} />
+      )}
       {!agoraReady && (
         <View style={st.agoraLoading}>
           <ActivityIndicator size="large" color="#fff" />
           <Text style={st.agoraLoadingText}>
             {agoraFatalError ? "Live video failed to start." : "Connecting live stream..."}
           </Text>
+        </View>
+      )}
+      {AGORA_DISABLED && agoraReady && (
+        <View style={st.previewModeBanner}>
+          <Text style={st.previewModeText}>Preview mode · local camera only (dev build streams with Agora)</Text>
         </View>
       )}
 
@@ -718,6 +911,10 @@ function LiveHostView({
           <Ionicons name="share-outline" size={22} color="#fff" />
           <Text style={st.camCtrlLabel}>Share</Text>
         </Pressable>
+        <Pressable style={[st.camCtrlBtn, activePin && st.camCtrlBtnActive]} onPress={togglePicker}>
+          <Ionicons name="pricetag" size={22} color={activePin ? C.accent : "#fff"} />
+          <Text style={st.camCtrlLabel}>Products</Text>
+        </Pressable>
         <Pressable style={st.camCtrlBtn} onPress={toggleHub}>
           <Ionicons name="grid-outline" size={22} color="#fff" />
           <Text style={st.camCtrlLabel}>Hub</Text>
@@ -755,6 +952,211 @@ function LiveHostView({
           )}
         </Pressable>
       </View>
+
+      {/* ── Active Pin Indicator ── */}
+      {activePin && (
+        <View style={[st.activePinBar, { bottom: insets.bottom + 66 }]}>
+          <View style={st.activePinLeft}>
+            <Ionicons name="pricetag" size={14} color={C.accent} />
+            <Text style={st.activePinText} numberOfLines={1}>
+              {activePin.pin_type === "listing"
+                ? activePin.listing?.card_name ?? "Product"
+                : activePin.flash_name ?? "Flash Auction"}
+            </Text>
+            {activePin.pin_type === "flash" && (
+              <Text style={st.activePinBid}>
+                RM{activePin.current_bid?.toFixed(0)} · {activePin.bid_count} bids
+              </Text>
+            )}
+          </View>
+          <Pressable style={st.unpinBtn} onPress={handleUnpin}>
+            <Ionicons name="close-circle" size={18} color={C.live} />
+          </Pressable>
+        </View>
+      )}
+
+      {/* ── Product Picker Sheet ── */}
+      {pickerVisible && (
+        <Pressable style={st.hubBackdrop} onPress={togglePicker} />
+      )}
+      <Animated.View
+        style={[
+          st.pickerSheet,
+          {
+            paddingBottom: insets.bottom + 16,
+            transform: [{
+              translateY: Animated.add(
+                pickerAnim.interpolate({ inputRange: [0, 1], outputRange: [600, 0] }),
+                kbOffset,
+              ),
+            }],
+          },
+        ]}
+        pointerEvents={pickerVisible ? "auto" : "none"}
+      >
+        <View style={st.hubHandle} />
+        <Text style={st.hubTitle}>Pin a Product</Text>
+
+        <View style={st.pickerTabs}>
+          {(["listing", "flash"] as const).map((tab) => (
+            <Pressable
+              key={tab}
+              style={[st.pickerTab, pickerTab === tab && st.pickerTabActive]}
+              onPress={() => setPickerTab(tab)}
+            >
+              <Text style={[st.pickerTabText, pickerTab === tab && st.pickerTabTextActive]}>
+                {tab === "listing" ? "Listings" : "Flash Auction"}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+
+        {/* ── Flash Auction form ── */}
+        {pickerTab === "flash" && (
+          <ScrollView
+            style={{ flex: 1 }}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
+            <View style={st.auctionFields}>
+              <Pressable style={st.flashImagePicker} onPress={pickFlashImage}>
+                {flashImage ? (
+                  <Image source={{ uri: flashImage }} style={st.flashImagePreview} />
+                ) : (
+                  <View style={st.flashImagePlaceholder}>
+                    <Ionicons name="camera-outline" size={24} color={C.textMuted} />
+                    <Text style={st.flashImageText}>Add Photo</Text>
+                  </View>
+                )}
+              </Pressable>
+              <Text style={st.flashImageHint}>
+                Tip: you can screenshot your live feed and pick that photo—buyers see the same shot as on stream.
+              </Text>
+              <View style={st.auctionFieldRow}>
+                <Text style={st.auctionFieldLabel}>Item Name</Text>
+                <TextInput
+                  style={st.auctionFieldInput}
+                  placeholder="e.g. Charizard PSA 10"
+                  placeholderTextColor={C.textMuted}
+                  value={flashName}
+                  onChangeText={setFlashName}
+                />
+              </View>
+              <View style={st.auctionFieldRow}>
+                <Text style={st.auctionFieldLabel}>Starting Price (RM)</Text>
+                <TextInput
+                  style={st.auctionFieldInput}
+                  placeholder="1.00"
+                  placeholderTextColor={C.textMuted}
+                  keyboardType="numeric"
+                  value={flashPrice}
+                  onChangeText={setFlashPrice}
+                />
+              </View>
+              <View style={st.auctionFieldRow}>
+                <Text style={st.auctionFieldLabel}>Bid Increment (RM)</Text>
+                <TextInput
+                  style={st.auctionFieldInput}
+                  placeholder="e.g. 5 (optional)"
+                  placeholderTextColor={C.textMuted}
+                  keyboardType="numeric"
+                  value={flashIncrement}
+                  onChangeText={setFlashIncrement}
+                />
+              </View>
+              <View style={st.auctionFieldRow}>
+                <Text style={st.auctionFieldLabel}>Reserve Price (RM)</Text>
+                <TextInput
+                  style={st.auctionFieldInput}
+                  placeholder="optional"
+                  placeholderTextColor={C.textMuted}
+                  keyboardType="numeric"
+                  value={flashReserve}
+                  onChangeText={setFlashReserve}
+                />
+              </View>
+              <View style={st.auctionFieldRow}>
+                <Text style={st.auctionFieldLabel}>Duration</Text>
+                <View style={st.durationRow}>
+                  {["60", "120", "300", "600"].map((d) => (
+                    <Pressable
+                      key={d}
+                      style={[st.durationChip, auctionDuration === d && !customDuration && st.durationChipActive]}
+                      onPress={() => { setAuctionDuration(d); setCustomDuration(""); }}
+                    >
+                      <Text style={[st.durationChipText, auctionDuration === d && !customDuration && st.durationChipTextActive]}>
+                        {parseInt(d) >= 60 ? `${parseInt(d) / 60}m` : `${d}s`}
+                      </Text>
+                    </Pressable>
+                  ))}
+                  <TextInput
+                    style={[st.durationCustomInput, customDuration ? st.durationCustomInputActive : null]}
+                    placeholder="min"
+                    placeholderTextColor={C.textMuted}
+                    keyboardType="numeric"
+                    value={customDuration}
+                    onChangeText={(v) => { setCustomDuration(v); if (v) setAuctionDuration(String(parseFloat(v) * 60 || 300)); }}
+                  />
+                </View>
+              </View>
+
+              <Pressable
+                style={[st.flashStartBtn, (!flashName.trim() || pinning) && st.flashStartBtnDisabled]}
+                onPress={handleFlashAuction}
+                disabled={!flashName.trim() || pinning}
+              >
+                {pinning ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <>
+                    <Ionicons name="flash" size={16} color="#fff" />
+                    <Text style={st.flashStartBtnText}>Start Flash Auction</Text>
+                  </>
+                )}
+              </Pressable>
+            </View>
+          </ScrollView>
+        )}
+
+        {/* ── Listings list ── */}
+        {pickerTab === "listing" && (
+          <FlatList
+            data={hostListings}
+            keyExtractor={(item) => item.id}
+            style={st.pickerList}
+            keyboardShouldPersistTaps="handled"
+            renderItem={({ item }) => (
+              <Pressable
+                style={st.pickerItem}
+                onPress={() => handlePin("listing", item.id)}
+                disabled={pinning}
+              >
+                {item.images?.[0] ? (
+                  <CachedImage source={{ uri: item.images[0] }} style={st.pickerItemImg} />
+                ) : (
+                  <View style={[st.pickerItemImg, st.pickerItemImgFallback]}>
+                    <Ionicons name="cube-outline" size={18} color={C.textMuted} />
+                  </View>
+                )}
+                <View style={st.pickerItemMeta}>
+                  <Text style={st.pickerItemName} numberOfLines={1}>{item.card_name}</Text>
+                  <Text style={st.pickerItemPrice}>RM{item.price?.toFixed(2)}</Text>
+                </View>
+                <View style={st.pickerPinBtn}>
+                  <Ionicons name="pricetag-outline" size={16} color={C.accent} />
+                </View>
+              </Pressable>
+            )}
+            ListEmptyComponent={
+              <View style={st.pickerEmpty}>
+                <Text style={st.pickerEmptyText}>
+                  No active listings. Create one from your Vendor Hub.
+                </Text>
+              </View>
+            }
+          />
+        )}
+      </Animated.View>
 
       {/* ── Control Hub Bottom Sheet ── */}
       {hubVisible && (
@@ -887,6 +1289,23 @@ const st = StyleSheet.create({
     color: "#fff",
     fontSize: 13,
     fontWeight: "700",
+  },
+  previewModeBanner: {
+    position: "absolute",
+    top: 120,
+    left: S.screenPadding,
+    right: S.screenPadding,
+    backgroundColor: "rgba(0,0,0,0.65)",
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    zIndex: 12,
+  },
+  previewModeText: {
+    color: C.textSecondary,
+    fontSize: 11,
+    fontWeight: "600",
+    textAlign: "center",
   },
 
   /* ── Setup ── */
@@ -1281,4 +1700,163 @@ const st = StyleSheet.create({
     marginTop: 4,
   },
   hubEndBtnText: { color: "#fff", fontSize: 14, fontWeight: "800" },
+
+  /* ── Active Pin Bar ── */
+  activePinBar: {
+    position: "absolute",
+    left: S.screenPadding,
+    right: S.screenPadding,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "rgba(0,0,0,0.7)",
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    zIndex: 15,
+  },
+  activePinLeft: { flex: 1, flexDirection: "row", alignItems: "center", gap: 6 },
+  activePinText: { color: C.textPrimary, fontSize: 12, fontWeight: "700", flexShrink: 1 },
+  activePinBid: { color: C.textAccent, fontSize: 11, fontWeight: "700" },
+  unpinBtn: { padding: 4 },
+
+  /* ── Product Picker Sheet ── */
+  pickerSheet: {
+    position: "absolute",
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: C.card,
+    borderTopLeftRadius: 22,
+    borderTopRightRadius: 22,
+    paddingHorizontal: S.screenPadding,
+    paddingTop: 12,
+    maxHeight: "70%",
+    zIndex: 30,
+    borderTopWidth: 1,
+    borderTopColor: C.borderCard,
+  },
+  pickerTabs: {
+    flexDirection: "row",
+    gap: 8,
+    marginBottom: 14,
+  },
+  pickerTab: {
+    flex: 1,
+    paddingVertical: 10,
+    borderRadius: 10,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border,
+    alignItems: "center",
+  },
+  pickerTabActive: { backgroundColor: C.accent, borderColor: C.accent },
+  pickerTabText: { color: C.textSecondary, fontSize: 12, fontWeight: "700" },
+  pickerTabTextActive: { color: "#fff" },
+  pickerList: { flex: 1 },
+  pickerItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: C.border,
+  },
+  pickerItemImg: { width: 48, height: 48, borderRadius: 8 },
+  pickerItemImgFallback: {
+    backgroundColor: C.surface,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  pickerItemMeta: { flex: 1, gap: 2 },
+  pickerItemName: { color: C.textPrimary, fontSize: 13, fontWeight: "700" },
+  pickerItemPrice: { color: C.textAccent, fontSize: 12, fontWeight: "600" },
+  pickerPinBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: "rgba(44,128,255,0.12)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  pickerEmpty: { paddingVertical: 24, alignItems: "center" },
+  pickerEmptyText: { color: C.textMuted, fontSize: 12, fontWeight: "500", textAlign: "center" },
+  auctionFields: { gap: 10, marginBottom: 12 },
+  auctionFieldRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  auctionFieldLabel: { color: C.textSecondary, fontSize: 11, fontWeight: "700", width: 110 },
+  auctionFieldInput: {
+    flex: 1,
+    backgroundColor: C.surface,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: C.border,
+    paddingHorizontal: 10,
+    height: 36,
+    color: C.textPrimary,
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  durationRow: { flex: 1, flexDirection: "row", flexWrap: "wrap", gap: 6 },
+  durationChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border,
+  },
+  durationChipActive: { backgroundColor: C.accent, borderColor: C.accent },
+  durationChipText: { color: C.textSecondary, fontSize: 11, fontWeight: "700" },
+  durationChipTextActive: { color: "#fff" },
+  durationCustomInput: {
+    width: 48,
+    height: 30,
+    borderRadius: 999,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border,
+    textAlign: "center",
+    color: C.textPrimary,
+    fontSize: 11,
+    fontWeight: "700",
+    paddingHorizontal: 4,
+    paddingVertical: 0,
+  },
+  durationCustomInputActive: { borderColor: C.accent, backgroundColor: "rgba(44,128,255,0.12)" },
+  // Flash auction
+  flashImagePicker: { alignSelf: "center", marginBottom: 4 },
+  flashImagePreview: { width: 80, height: 80, borderRadius: 12 },
+  flashImagePlaceholder: {
+    width: 80,
+    height: 80,
+    borderRadius: 12,
+    backgroundColor: C.surface,
+    borderWidth: 1.5,
+    borderColor: C.border,
+    borderStyle: "dashed",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 4,
+  },
+  flashImageText: { color: C.textMuted, fontSize: 10, fontWeight: "600" },
+  flashImageHint: {
+    color: C.textSecondary,
+    fontSize: 11,
+    fontWeight: "500",
+    lineHeight: 15,
+    textAlign: "center",
+    marginBottom: 4,
+    paddingHorizontal: 10,
+  },
+  flashStartBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    backgroundColor: C.live,
+    paddingVertical: 12,
+    borderRadius: 12,
+    marginTop: 4,
+  },
+  flashStartBtnDisabled: { opacity: 0.5 },
+  flashStartBtnText: { color: "#fff", fontSize: 14, fontWeight: "800" },
 });

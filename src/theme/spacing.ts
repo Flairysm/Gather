@@ -43,6 +43,11 @@ export const S = {
   playCircleSize: 60,
   arrowBtnSize: 34,
 
+  fabSize: 56,
+  fabRadius: 28,
+  fabBottom: 120,
+  fabRight: 14,
+
   heroHeight: 170,
   streamHeight: 260,
   vaultArtHeight: 180,

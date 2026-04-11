@@ -41,13 +41,20 @@ const STREAM_SELECT = `
   streamer:profiles!streamer_id(username, display_name, avatar_url)
 `;
 
-export async function fetchLiveStreams(): Promise<LiveStream[]> {
+export async function fetchLiveStreams(opts?: {
+  limit?: number;
+  offset?: number;
+}): Promise<LiveStream[]> {
+  const limit = opts?.limit ?? 20;
+  const offset = opts?.offset ?? 0;
+
   const { data } = await supabase
     .from("live_streams")
     .select(STREAM_SELECT)
     .eq("is_live", true)
     .order("viewer_count", { ascending: false })
-    .limit(50);
+    .order("started_at", { ascending: false })
+    .range(offset, offset + limit - 1);
 
   return (data ?? []).map((r: any) => ({
     ...r,

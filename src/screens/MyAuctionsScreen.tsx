@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   FlatList,
+  Image,
+  Modal,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -53,13 +55,20 @@ type AuctionInfo = {
 
 type WinRow = {
   id: string;
-  auction_id: string;
+  auction_id: string | null;
+  flash_pin_id: string | null;
   winning_bid: number;
   payment_deadline: string;
   payment_status: string;
   paid_at: string | null;
   created_at: string;
   auction: AuctionInfo | null;
+  flash_pin: {
+    flash_name: string | null;
+    flash_image_url: string | null;
+    streamer_name: string | null;
+    stream_title: string | null;
+  } | null;
 };
 
 type BidRow = {
@@ -145,6 +154,7 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
   const [wins, setWins] = useState<WinRow[]>([]);
   const [allBids, setAllBids] = useState<BidRow[]>([]);
   const [watched, setWatched] = useState<WatchRow[]>([]);
+  const [selectedWin, setSelectedWin] = useState<WinRow | null>(null);
 
   const [, setTick] = useState(0);
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -172,8 +182,12 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
       supabase
         .from("auction_wins")
         .select(`
-          id, auction_id, winning_bid, payment_deadline, payment_status, paid_at, created_at,
-          auction:auction_items!auction_id(${AUCTION_SELECT})
+          id, auction_id, flash_pin_id, winning_bid, payment_deadline, payment_status, paid_at, created_at,
+          auction:auction_items!auction_id(${AUCTION_SELECT}),
+          flash_pin:live_stream_pins!flash_pin_id(flash_name, flash_image_url,
+            host:profiles!host_id(username, display_name),
+            stream:live_streams!stream_id(title)
+          )
         `)
         .eq("winner_id", user.id)
         .order("created_at", { ascending: false })
@@ -205,10 +219,21 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
       return;
     }
 
-    const mapRow = (row: any) => ({
-      ...row,
-      auction: Array.isArray(row.auction) ? row.auction[0] : row.auction,
-    });
+    const mapRow = (row: any) => {
+      const fp = Array.isArray(row.flash_pin) ? row.flash_pin[0] : row.flash_pin;
+      const host = fp ? (Array.isArray(fp.host) ? fp.host[0] : fp.host) : null;
+      const stream = fp ? (Array.isArray(fp.stream) ? fp.stream[0] : fp.stream) : null;
+      return {
+        ...row,
+        auction: Array.isArray(row.auction) ? row.auction[0] : row.auction,
+        flash_pin: fp ? {
+          flash_name: fp.flash_name,
+          flash_image_url: fp.flash_image_url,
+          streamer_name: host?.display_name ?? host?.username ?? null,
+          stream_title: stream?.title ?? null,
+        } : null,
+      };
+    };
 
     setWins((winsResult.data ?? []).map(mapRow));
     setAllBids((bidsResult.data ?? []).map(mapRow));
@@ -331,7 +356,13 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
         windowSize={5}
         removeClippedSubviews
         renderItem={({ item: win }) => {
-          const img = auctionThumb(win.auction);
+          const isFlash = !win.auction && !!win.flash_pin;
+          const img = isFlash
+            ? win.flash_pin?.flash_image_url ?? null
+            : auctionThumb(win.auction);
+          const itemName = isFlash
+            ? win.flash_pin?.flash_name ?? "Flash Auction"
+            : win.auction?.card_name ?? "Auction";
           const isPaid = win.payment_status === "paid";
           const isExpired = win.payment_status === "expired";
           const countdown = !isPaid && !isExpired ? formatCountdown(win.payment_deadline) : null;
@@ -340,24 +371,25 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
           return (
             <Pressable
               style={st.card}
-              onPress={() => win.auction && push({ type: "AUCTION_DETAIL", auctionId: win.auction_id })}
+              onPress={() => setSelectedWin(win)}
             >
               <View style={st.cardRow}>
                 <View style={st.thumb}>
                   {img ? (
                     <CachedImage source={{ uri: img }} style={st.thumbImg} />
                   ) : (
-                    <Ionicons name="hammer-outline" size={18} color={C.textMuted} />
+                    <Ionicons name={isFlash ? "flash" : "hammer-outline"} size={18} color={isFlash ? "#FFD700" : C.textMuted} />
                   )}
                 </View>
                 <View style={st.cardInfo}>
                   <Text style={st.cardName} numberOfLines={1}>
-                    {win.auction?.card_name ?? "Auction"}
+                    {isFlash && <Text style={{ color: "#FFD700" }}>⚡ </Text>}
+                    {itemName}
                   </Text>
                   <Text style={st.cardMeta} numberOfLines={1}>
-                    {win.auction?.edition ?? ""}{win.auction?.grade ? ` · ${win.auction.grade}` : ""}
+                    {isFlash ? "Flash Auction" : `${win.auction?.edition ?? ""}${win.auction?.grade ? ` · ${win.auction.grade}` : ""}`}
                   </Text>
-                  <Text style={st.cardSeller}>from {sellerName(win.auction)}</Text>
+                  <Text style={st.cardSeller}>from {isFlash ? "Live Stream" : sellerName(win.auction)}</Text>
                 </View>
                 <View style={st.cardRight}>
                   <Text style={st.winPrice}>{formatPrice(win.winning_bid)}</Text>
@@ -769,6 +801,101 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
           {tab === "watching" && renderWatchingTab()}
         </FadeIn>
       )}
+
+      {/* Win Detail Modal */}
+      <Modal visible={!!selectedWin} transparent animationType="fade" onRequestClose={() => setSelectedWin(null)}>
+        {selectedWin && (() => {
+          const w = selectedWin;
+          const isFlash = !w.auction && !!w.flash_pin;
+          const img = isFlash
+            ? w.flash_pin?.flash_image_url ?? null
+            : auctionThumb(w.auction);
+          const name = isFlash
+            ? w.flash_pin?.flash_name ?? "Flash Auction"
+            : w.auction?.card_name ?? "Auction";
+          const isPaid = w.payment_status === "paid";
+          const isExpired = w.payment_status === "expired";
+          return (
+            <View style={st.modalOverlay}>
+              <Pressable style={StyleSheet.absoluteFill} onPress={() => setSelectedWin(null)} />
+              <View style={st.modalCard}>
+                {/* Image */}
+                <View style={st.modalImgWrap}>
+                  {img ? (
+                    <Image source={{ uri: img }} style={st.modalImg} resizeMode="cover" />
+                  ) : (
+                    <Ionicons name={isFlash ? "flash" : "hammer-outline"} size={36} color={isFlash ? "#FFD700" : C.textMuted} />
+                  )}
+                </View>
+                {/* Name + price */}
+                <Text style={st.modalName} numberOfLines={2}>{name}</Text>
+                <Text style={st.modalPrice}>{formatPrice(w.winning_bid)}</Text>
+
+                {/* Details */}
+                {!isFlash && w.auction?.edition && (
+                  <Text style={st.modalMeta}>{w.auction.edition}{w.auction.grade ? ` · ${w.auction.grade}` : ""}</Text>
+                )}
+
+                {/* Source */}
+                <View style={st.modalSource}>
+                  <Ionicons name={isFlash ? "flash" : "hammer"} size={14} color={isFlash ? "#FFD700" : "#F59E0B"} />
+                  <View style={{ flex: 1, gap: 2 }}>
+                    <Text style={st.modalSourceLabel}>
+                      {isFlash ? "Won in Flash Auction" : "Won in Auction"}
+                    </Text>
+                    {isFlash && w.flash_pin?.streamer_name && (
+                      <Text style={st.modalSourceDetail}>
+                        from {w.flash_pin.streamer_name}'s live stream
+                        {w.flash_pin.stream_title ? ` — "${w.flash_pin.stream_title}"` : ""}
+                      </Text>
+                    )}
+                    {!isFlash && w.auction?.seller && (
+                      <Text style={st.modalSourceDetail}>from {sellerName(w.auction)}</Text>
+                    )}
+                  </View>
+                </View>
+
+                {/* Date */}
+                <Text style={st.modalDate}>
+                  Won on {new Date(w.created_at).toLocaleDateString("en-MY", {
+                    day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit",
+                  })}
+                </Text>
+
+                {/* Status */}
+                <View style={[st.modalStatusRow, isPaid ? st.modalStatusPaid : isExpired ? st.modalStatusExpired : st.modalStatusPending]}>
+                  <Ionicons
+                    name={isPaid ? "checkmark-circle" : isExpired ? "close-circle" : "time-outline"}
+                    size={16}
+                    color={isPaid ? C.success : isExpired ? C.danger : "#F59E0B"}
+                  />
+                  <Text style={[st.modalStatusText, { color: isPaid ? C.success : isExpired ? C.danger : "#F59E0B" }]}>
+                    {isPaid ? "Paid" : isExpired ? "Expired" : "Awaiting Payment"}
+                  </Text>
+                </View>
+
+                {/* Actions */}
+                <View style={st.modalActions}>
+                  {!isPaid && !isExpired && (
+                    <Pressable style={st.modalPayBtn} onPress={() => { setSelectedWin(null); handlePayNow(w); }}>
+                      <Ionicons name="card" size={16} color="#fff" />
+                      <Text style={st.modalPayBtnText}>Pay Now</Text>
+                    </Pressable>
+                  )}
+                  {w.auction && w.auction_id && (
+                    <Pressable style={st.modalViewBtn} onPress={() => { setSelectedWin(null); push({ type: "AUCTION_DETAIL", auctionId: w.auction_id! }); }}>
+                      <Text style={st.modalViewBtnText}>View Auction</Text>
+                    </Pressable>
+                  )}
+                  <Pressable style={st.modalDismissBtn} onPress={() => setSelectedWin(null)}>
+                    <Text style={st.modalDismissBtnText}>Close</Text>
+                  </Pressable>
+                </View>
+              </View>
+            </View>
+          );
+        })()}
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -1078,4 +1205,56 @@ const st = StyleSheet.create({
     textAlign: "center",
     paddingHorizontal: 40,
   },
+
+  // ── Win detail modal ──
+  modalOverlay: {
+    flex: 1, backgroundColor: "rgba(0,0,0,0.7)",
+    justifyContent: "center", alignItems: "center",
+  },
+  modalCard: {
+    backgroundColor: C.surface, borderRadius: 20, borderWidth: 1, borderColor: C.border,
+    padding: 24, width: "85%", maxWidth: 360, alignItems: "center", gap: 8,
+  },
+  modalImgWrap: {
+    width: 100, height: 100, borderRadius: 16, backgroundColor: C.elevated,
+    borderWidth: 1, borderColor: C.border, overflow: "hidden",
+    alignItems: "center", justifyContent: "center", marginBottom: 4,
+  },
+  modalImg: { width: "100%", height: "100%" },
+  modalName: { color: C.textPrimary, fontSize: 16, fontWeight: "800", textAlign: "center" },
+  modalPrice: { color: C.link, fontSize: 20, fontWeight: "900" },
+  modalMeta: { color: C.textSecondary, fontSize: 12, fontWeight: "600" },
+  modalSource: {
+    flexDirection: "row", alignItems: "flex-start", gap: 8,
+    backgroundColor: C.elevated, borderRadius: 12,
+    padding: 12, width: "100%", marginTop: 4,
+  },
+  modalSourceLabel: { color: C.textPrimary, fontSize: 12, fontWeight: "700" },
+  modalSourceDetail: { color: C.textSecondary, fontSize: 11, fontWeight: "500" },
+  modalDate: { color: C.textMuted, fontSize: 11, fontWeight: "500" },
+  modalStatusRow: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    borderRadius: 10, paddingHorizontal: 12, paddingVertical: 6, width: "100%",
+    justifyContent: "center",
+  },
+  modalStatusPaid: { backgroundColor: "rgba(34,197,94,0.08)" },
+  modalStatusExpired: { backgroundColor: "rgba(239,68,68,0.08)" },
+  modalStatusPending: { backgroundColor: "rgba(245,158,11,0.08)" },
+  modalStatusText: { fontSize: 13, fontWeight: "700" },
+  modalActions: { gap: 8, width: "100%", marginTop: 4 },
+  modalPayBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center",
+    gap: 8, backgroundColor: C.accent, borderRadius: 12,
+    paddingVertical: 12, width: "100%",
+  },
+  modalPayBtnText: { color: "#fff", fontSize: 14, fontWeight: "800" },
+  modalViewBtn: {
+    alignItems: "center", justifyContent: "center",
+    backgroundColor: C.elevated, borderRadius: 12,
+    borderWidth: 1, borderColor: C.border,
+    paddingVertical: 10, width: "100%",
+  },
+  modalViewBtnText: { color: C.textPrimary, fontSize: 13, fontWeight: "700" },
+  modalDismissBtn: { alignItems: "center", paddingVertical: 6 },
+  modalDismissBtnText: { color: C.textSecondary, fontSize: 13, fontWeight: "600" },
 });

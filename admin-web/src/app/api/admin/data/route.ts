@@ -16,6 +16,10 @@ const ALLOWED_TABLES = new Set([
   "notifications",
   "audit_log",
   "reviews",
+  "live_streams",
+  "live_stream_pins",
+  "live_stream_alerts",
+  "live_auction_bids",
 ]);
 
 const ALLOWED_FILTER_OPS = new Set([

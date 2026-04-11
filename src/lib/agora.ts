@@ -1,16 +1,27 @@
-import {
-  ChannelProfileType,
-  ClientRoleType,
-  createAgoraRtcEngine,
-  type IRtcEngine,
-  type IRtcEngineEventHandler,
-} from "react-native-agora";
 import { supabase } from "./supabase";
+import { AGORA_DISABLED } from "./agoraFlag";
+
+/** Opaque handle; real type comes from react-native-agora when loaded. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type IRtcEngine = any;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type IRtcEngineEventHandler = any;
 
 export interface AgoraTokenResult {
   token: string;
   uid: number;
   appId: string;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function loadAgoraNative(): any {
+  if (AGORA_DISABLED) return null;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    return require("react-native-agora");
+  } catch {
+    return null;
+  }
 }
 
 export async function fetchAgoraToken(
@@ -20,7 +31,6 @@ export async function fetchAgoraToken(
   const { data: { session } } = await supabase.auth.getSession();
   if (!session?.access_token) throw new Error("Not authenticated");
 
-  // Use Supabase client invoke so auth headers/session handling are consistent.
   const { data, error } = await supabase.functions.invoke("agora-token", {
     body: { channelName, role },
   });
@@ -46,6 +56,15 @@ export function createHostEngine(
   uid: number,
   eventHandler: IRtcEngineEventHandler,
 ): IRtcEngine {
+  const agora = loadAgoraNative();
+  if (!agora) throw new Error("Agora native module not available");
+
+  const {
+    createAgoraRtcEngine,
+    ChannelProfileType,
+    ClientRoleType,
+  } = agora;
+
   const engine = createAgoraRtcEngine();
   engine.initialize({ appId });
   engine.registerEventHandler(eventHandler);
@@ -74,6 +93,15 @@ export function createAudienceEngine(
   uid: number,
   eventHandler: IRtcEngineEventHandler,
 ): IRtcEngine {
+  const agora = loadAgoraNative();
+  if (!agora) throw new Error("Agora native module not available");
+
+  const {
+    createAgoraRtcEngine,
+    ChannelProfileType,
+    ClientRoleType,
+  } = agora;
+
   const engine = createAgoraRtcEngine();
   engine.initialize({ appId });
   engine.registerEventHandler(eventHandler);
@@ -107,4 +135,3 @@ export function destroyEngine(
     engine.release();
   } catch {}
 }
-

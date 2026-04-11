@@ -795,8 +795,8 @@ export default function MarketScreen() {
               key={action.id}
               style={{
                 position: "absolute",
-                right: 18,
-                bottom: 72,
+                right: S.fabRight,
+                bottom: S.fabBottom,
                 flexDirection: "row",
                 alignItems: "center",
                 gap: 10,
@@ -844,17 +844,17 @@ export default function MarketScreen() {
           onPress={toggleFab}
           style={{
             position: "absolute",
-            right: 18,
-            bottom: 72,
-            width: 58,
-            height: 58,
-            borderRadius: 29,
+            right: S.fabRight,
+            bottom: S.fabBottom,
+            width: S.fabSize,
+            height: S.fabSize,
+            borderRadius: S.fabRadius,
             backgroundColor: C.accent,
             alignItems: "center",
             justifyContent: "center",
             shadowColor: C.accent,
-            shadowOffset: { width: 0, height: 6 },
-            shadowOpacity: 0.5,
+            shadowOffset: { width: 0, height: 4 },
+            shadowOpacity: 0.45,
             shadowRadius: 12,
             elevation: 8,
           }}

@@ -49,7 +49,12 @@ type OrderItemRow = {
     review_count: number;
   } | null;
   source?: "market" | "auction";
+  sourceLabel?: string;
   winId?: string;
+  /** `auction_items.id` — open AUCTION_DETAIL, not LISTING_DETAIL */
+  auctionDetailId?: string;
+  /** Paid flash purchase — no marketplace listing to open */
+  flashOrder?: boolean;
   tracking_number?: string | null;
   delivered_at?: string | null;
   received_at?: string | null;
@@ -203,6 +208,7 @@ export default function MyOrdersScreen({
       const SELECT = `
         id, order_id, listing_id, seller_id, quantity, unit_price, fulfillment_status, created_at,
         tracking_number, delivered_at, received_at, dispute_deadline,
+        flash_pin_id, item_name, item_image_url,
         listing:listings(id, card_name, edition, grade, images),
         seller:profiles!seller_id(username, display_name, avatar_url, rating, review_count)
       `;
@@ -291,8 +297,11 @@ export default function MyOrdersScreen({
       const { data: wins } = await supabase
         .from("auction_wins")
         .select(`
-          id, auction_id, seller_id, winning_bid, payment_status, created_at,
+          id, auction_id, flash_pin_id, seller_id, winning_bid, payment_status, created_at,
           auction:auction_items!auction_id(id, card_name, edition, grade, condition, images),
+          flash_pin:live_stream_pins!flash_pin_id(flash_name, flash_image_url,
+            host:profiles!host_id(username, display_name)
+          ),
           seller:profiles!seller_id(username, display_name, avatar_url, rating, review_count)
         `)
         .eq("winner_id", user.id)
@@ -302,7 +311,11 @@ export default function MyOrdersScreen({
 
       const auctionRows: OrderItemRow[] = (wins ?? []).map((w: any) => {
         const auction = Array.isArray(w.auction) ? w.auction[0] : w.auction;
+        const flashPin = Array.isArray(w.flash_pin) ? w.flash_pin[0] : w.flash_pin;
         const seller = Array.isArray(w.seller) ? w.seller[0] : w.seller;
+        const isFlash = !auction && !!flashPin;
+        const host = flashPin ? (Array.isArray(flashPin.host) ? flashPin.host[0] : flashPin.host) : null;
+        const streamerName = host?.display_name ?? host?.username ?? null;
         return {
           id: `auction-${w.id}`,
           order_id: `auction-${w.id}`,
@@ -320,9 +333,20 @@ export default function MyOrdersScreen({
                 grade: auction.grade ?? auction.condition ?? null,
                 images: normalizeImages(auction.images),
               }
+            : isFlash
+            ? {
+                id: w.flash_pin_id ?? "",
+                card_name: flashPin.flash_name ?? "Flash Auction Item",
+                edition: null,
+                grade: null,
+                images: flashPin.flash_image_url ? [flashPin.flash_image_url] : [],
+              }
             : null,
           seller: seller ?? null,
           source: "auction",
+          sourceLabel: isFlash
+            ? `⚡ Flash Auction${streamerName ? ` · ${streamerName}'s live` : ""}`
+            : "Auction Win",
           winId: w.id,
         };
       });
@@ -368,6 +392,7 @@ export default function MyOrdersScreen({
 
       // For real order_items that reference auction_items (listing_id points to
       // auction_items.id), hydrate listing data from auction_items table.
+      const auctionItemIdsHydrated = new Set<string>();
       const missingListingIds = [
         ...new Set(
           hydratedMapped
@@ -381,6 +406,7 @@ export default function MyOrdersScreen({
           .select("id, card_name, edition, grade, condition, images")
           .in("id", missingListingIds);
         for (const a of aiRows ?? []) {
+          auctionItemIdsHydrated.add((a as any).id);
           if (!marketListingMap.has((a as any).id)) {
             marketListingMap.set((a as any).id, {
               id: (a as any).id,
@@ -392,11 +418,28 @@ export default function MyOrdersScreen({
           }
         }
       }
-      const finalMapped: OrderItemRow[] = hydratedMapped.map((m) =>
-        !m.listing && m.listing_id && marketListingMap.has(m.listing_id)
+      const finalMapped: OrderItemRow[] = hydratedMapped.map((m: any) => {
+        let row: OrderItemRow = !m.listing && m.listing_id && marketListingMap.has(m.listing_id)
           ? { ...m, listing: marketListingMap.get(m.listing_id) }
-          : m,
-      );
+          : m;
+        if (row.listing_id && auctionItemIdsHydrated.has(row.listing_id)) {
+          row = { ...row, auctionDetailId: row.listing_id };
+        }
+        if (m.flash_pin_id) {
+          row = {
+            ...row,
+            flashOrder: true,
+            listing: row.listing ?? {
+              id: "",
+              card_name: m.item_name ?? "Flash auction item",
+              edition: null,
+              grade: null,
+              images: m.item_image_url ? [m.item_image_url] : [],
+            },
+          };
+        }
+        return row;
+      });
 
       setRawItems([...finalMapped, ...hydratedAuctionRows].sort(
         (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
@@ -715,6 +758,9 @@ export default function MyOrdersScreen({
                   onViewItem={(listingId) =>
                     push({ type: "LISTING_DETAIL", listingId })
                   }
+                  onViewAuction={(auctionId) =>
+                    push({ type: "AUCTION_DETAIL", auctionId })
+                  }
                   onReview={() =>
                     handleReview(order.orderId, order.sellerId)
                   }
@@ -827,6 +873,7 @@ function OrderCard({
   order,
   vendorLogoUrl,
   onViewItem,
+  onViewAuction,
   onReview,
   onPayNow,
   onReceived,
@@ -835,6 +882,7 @@ function OrderCard({
   order: GroupedOrder;
   vendorLogoUrl: string | null;
   onViewItem: (listingId: string) => void;
+  onViewAuction?: (auctionId: string) => void;
   onReview: () => void;
   onPayNow?: (winId: string) => void;
   onReceived?: (itemIds: string[]) => void;
@@ -903,7 +951,26 @@ function OrderCard({
             <Pressable
               key={oi.id}
               style={st.itemRow}
-              onPress={() => oi.listing?.id && onViewItem(oi.listing.id)}
+              onPress={() => {
+                if (oi.source === "auction" && oi.winId) {
+                  onPayNow?.(oi.winId);
+                  return;
+                }
+                if (oi.auctionDetailId) {
+                  onViewAuction?.(oi.auctionDetailId);
+                  return;
+                }
+                if (oi.flashOrder) {
+                  Alert.alert(
+                    "Flash auction item",
+                    "This purchase was from a live flash auction. There is no separate product listing.",
+                  );
+                  return;
+                }
+                if (oi.listing?.id) {
+                  onViewItem(oi.listing.id);
+                }
+              }}
             >
               <View style={st.itemThumb}>
                 {imgUrl ? (
@@ -920,10 +987,14 @@ function OrderCard({
                 <Text style={st.itemName} numberOfLines={1}>
                   {oi.listing?.card_name ?? "Item"}
                 </Text>
-                <Text style={st.itemMeta} numberOfLines={1}>
-                  {oi.listing?.edition ?? ""}
-                  {oi.listing?.grade ? ` · ${oi.listing.grade}` : ""}
-                </Text>
+                {oi.sourceLabel ? (
+                  <Text style={st.itemSource} numberOfLines={1}>{oi.sourceLabel}</Text>
+                ) : (
+                  <Text style={st.itemMeta} numberOfLines={1}>
+                    {oi.listing?.edition ?? ""}
+                    {oi.listing?.grade ? ` · ${oi.listing.grade}` : ""}
+                  </Text>
+                )}
               </View>
               <View style={st.itemRight}>
                 <Text style={st.itemPrice}>
@@ -1191,6 +1262,7 @@ const st = StyleSheet.create({
   itemInfo: { flex: 1, gap: 3 },
   itemName: { color: C.textPrimary, fontSize: 14, fontWeight: "700" },
   itemMeta: { color: C.textSecondary, fontSize: 12, fontWeight: "500" },
+  itemSource: { color: "#FFD700", fontSize: 11, fontWeight: "600" },
   itemRight: { alignItems: "flex-end", gap: 2 },
   itemPrice: { color: C.link, fontSize: 14, fontWeight: "900" },
   itemQty: { color: C.textSecondary, fontSize: 11, fontWeight: "600" },

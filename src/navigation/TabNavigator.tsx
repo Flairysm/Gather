@@ -45,7 +45,6 @@ import OrderReviewScreen from "../screens/OrderReviewScreen";
 import MyAuctionsScreen from "../screens/MyAuctionsScreen";
 import AuctionCheckoutScreen from "../screens/AuctionCheckoutScreen";
 import { UserContext, fetchVendorStatus, type VendorStatus } from "../data/user";
-import { AGORA_DISABLED } from "../lib/agoraFlag";
 import { FeedPrefsProvider } from "../data/feedPreferences";
 import { supabase } from "../lib/supabase";
 import { useBadgeCounts, BadgeContext } from "../hooks/useBadgeCounts";
@@ -148,20 +147,10 @@ function renderOverlay(screen: AppScreen, pop: () => void) {
     case "MY_AUCTIONS":
       return <MyAuctionsScreen onBack={pop} />;
     case "LIVE_VIEWER": {
-      if (AGORA_DISABLED) {
-        Alert.alert("Live video unavailable", "Use a dev build to watch live streams.");
-        pop();
-        return null;
-      }
       const LiveViewerScreen = require("../screens/LiveViewerScreen").default;
       return <LiveViewerScreen streamId={screen.streamId} onBack={pop} />;
     }
     case "GO_LIVE": {
-      if (AGORA_DISABLED) {
-        Alert.alert("Go Live unavailable", "Use a dev build to start a live stream.");
-        pop();
-        return null;
-      }
       const GoLiveScreen = require("../screens/GoLiveScreen").default;
       return <GoLiveScreen onBack={pop} />;
     }
