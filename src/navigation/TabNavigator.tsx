@@ -226,11 +226,17 @@ function useCartState() {
     }
   }, [items, hydrated]);
 
-  const addItem = useCallback((listing: Listing, quantity: number = 1) => {
+  const addItem = useCallback((listing: Listing, quantity: number = 1, offerId?: string) => {
     if (!hydrated) return;
     setItems((prev) => {
       const maxStock = listing.quantity ?? 99;
       const safeQty = Math.max(1, quantity);
+      // Accepted-offer items are single-unit at the agreed price — replace any
+      // existing line for this listing so the negotiated price/qty are exact.
+      if (offerId) {
+        const without = prev.filter((ci) => ci.listing.id !== listing.id);
+        return [...without, { listing, quantity: 1, addedAt: Date.now(), offerId }];
+      }
       const existing = prev.find((ci) => ci.listing.id === listing.id);
       if (existing) {
         return prev.map((ci) =>

@@ -721,6 +721,19 @@ export async function updateOfferStatus(
   if (error) throw error;
 }
 
+// Accept/decline an offer. Server-enforced: only the offer's recipient (the
+// counterparty, never the sender) can respond, and only while it's pending.
+export async function respondToOffer(
+  messageId: string,
+  status: "accepted" | "declined",
+): Promise<void> {
+  const { error } = await supabase.rpc("respond_to_offer", {
+    p_message_id: messageId,
+    p_status: status,
+  });
+  if (error) throw error;
+}
+
 export async function updateOfferAmount(
   messageId: string,
   newAmount: number,

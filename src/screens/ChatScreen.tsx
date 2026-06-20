@@ -25,6 +25,7 @@ import {
   sendImageMessage,
   sendWantedShareMessage,
   updateOfferStatus,
+  respondToOffer,
   updateOfferAmount,
   subscribeToMessages,
   markConversationRead,
@@ -696,15 +697,20 @@ export default function ChatScreen({
 
   function confirmOfferAction(msgId: string, action: "accepted" | "declined") {
     const isAccept = action === "accepted";
+    const offer = messages.find(
+      (m) => m.id === msgId && m.kind === "offer",
+    ) as OfferMessage | undefined;
+    const amountLabel = offer?.amount ?? "this amount";
+    const itemLabel = offer?.cardName ? ` for "${offer.cardName}"` : "";
     Alert.alert(
-      isAccept ? "Accept Offer" : "Decline Offer",
+      isAccept ? `Accept ${amountLabel}?` : "Decline Offer",
       isAccept
-        ? "Accept this offer? The buyer will be able to add the item to their cart at the agreed price."
+        ? `You're accepting the offer of ${amountLabel}${itemLabel}. The buyer will be able to check out at this exact price — this can't be undone.`
         : "Decline this offer? This can't be undone.",
       [
         { text: "Cancel", style: "cancel" },
         {
-          text: isAccept ? "Accept" : "Decline",
+          text: isAccept ? `Accept ${amountLabel}` : "Decline",
           style: isAccept ? "default" : "destructive",
           onPress: () => handleOfferAction(msgId, action),
         },
@@ -735,8 +741,9 @@ export default function ChatScreen({
       ),
     );
     try {
-      await updateOfferStatus(msgId, action);
-    } catch {
+      await respondToOffer(msgId, action);
+    } catch (e: any) {
+      Alert.alert("Couldn't update offer", e?.message ?? "Please try again.");
       setMessages((prev) =>
         prev.map((m) =>
           m.id === msgId && m.kind === "offer"
@@ -857,7 +864,7 @@ export default function ChatScreen({
           status: "active",
           created_at: new Date().toISOString(),
         };
-    addItem(cartListing, 1);
+    addItem(cartListing, 1, offerMsg.id);
   }
 
   async function uploadChatMedia(localUri: string, index: number): Promise<string> {

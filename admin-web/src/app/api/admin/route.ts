@@ -324,10 +324,10 @@ export async function POST(req: NextRequest) {
       case "dispute.resolve": {
         const { id, status: newStatus, resolution_notes } = params;
 
-        // Read buyer/seller IDs from the DB row — never trust the request body for notification targets
+        // Read buyer/seller/order IDs from the DB row — never trust the request body for notification targets
         const { data: disputeRow, error: fetchErr } = await admin
           .from("disputes")
-          .select("buyer_id, seller_id")
+          .select("buyer_id, seller_id, order_id")
           .eq("id", id)
           .single();
         if (fetchErr || !disputeRow) {
@@ -344,16 +344,48 @@ export async function POST(req: NextRequest) {
           .eq("id", id);
         if (error) return NextResponse.json({ error: error.message }, { status: 400 });
 
+        // Resolved in the buyer's favor → auto-refund the order to its original
+        // source (card via Stripe, voucher/wallet restored). Safe to call even if
+        // already refunded/not-held; refund-order is idempotent.
+        let refundOutcome: string | null = null;
+        if (newStatus === "resolved" && disputeRow.order_id) {
+          const { data: refundData, error: refundErr } = await admin.functions.invoke("refund-order", {
+            body: { order_id: disputeRow.order_id },
+          });
+          if (refundErr) {
+            console.error("dispute.resolve auto-refund failed:", refundErr.message);
+            refundOutcome = "refund_failed";
+          } else {
+            refundOutcome = (refundData?.status as string) ?? "refunded";
+          }
+
+          // Dispute resolved in the buyer's favor → strike the seller.
+          if (disputeRow.seller_id) {
+            const { error: strikeErr } = await admin.rpc("add_strike", {
+              p_user_id: disputeRow.seller_id,
+              p_kind: "dispute_lost",
+              p_reason: "A dispute was resolved in the buyer's favor",
+              p_ref_type: "dispute",
+              p_ref_id: id,
+            });
+            if (strikeErr) console.error("dispute.resolve add_strike failed:", strikeErr.message);
+          }
+        }
+
         const icon = newStatus === "resolved" ? "checkmark-circle-outline" : "close-circle-outline";
         const color = newStatus === "resolved" ? "#22C55E" : "#EF4444";
         const title = newStatus === "resolved" ? "Dispute Resolved" : "Dispute Rejected";
+        const refunded = refundOutcome === "refunded" || refundOutcome === "already_refunded";
+        const buyerBody = newStatus === "resolved" && refunded
+          ? `Resolved in your favor — your refund is on its way to your original payment method. ${(resolution_notes ?? "").slice(0, 160)}`.trim()
+          : (resolution_notes ?? "").slice(0, 200);
 
         const { error: notifErr } = await admin.from("notifications").insert([
-          { user_id: disputeRow.buyer_id, type: "dispute_resolved", title, body: (resolution_notes ?? '').slice(0, 200), icon, color, reference_type: "dispute", reference_id: id },
+          { user_id: disputeRow.buyer_id, type: "dispute_resolved", title, body: buyerBody, icon, color, reference_type: "dispute", reference_id: id },
           { user_id: disputeRow.seller_id, type: "dispute_resolved", title, body: (resolution_notes ?? '').slice(0, 200), icon, color, reference_type: "dispute", reference_id: id },
         ]);
         if (notifErr) console.error("dispute.resolve notification insert failed:", notifErr.message);
-        return NextResponse.json({ ok: true });
+        return NextResponse.json({ ok: true, refund: refundOutcome });
       }
 
       // ─── Vendor Applications ───

@@ -1135,7 +1135,7 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
             <Text style={st.paymentBannerDeadline}>
               Pay by {new Date(winRecord.payment_deadline).toLocaleDateString("en-MY", {
                 month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit",
-              })} or your account will be banned from transactions.
+              })}. Missing the deadline adds a strike — 3 strikes in 90 days restricts your account.
             </Text>
             <Pressable style={st.payNowBtn} onPress={handlePayNow}>
               <Ionicons name="card" size={16} color={C.textHero} />
@@ -1157,7 +1157,7 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
           <View style={st.expiredBanner}>
             <Ionicons name="warning" size={18} color={C.danger} />
             <Text style={st.expiredBannerText}>
-              Payment deadline expired. Your account has been restricted from transactions.
+              Payment deadline expired — this added a strike to your account. 3 strikes in 90 days restricts you from transactions.
             </Text>
           </View>
         )}

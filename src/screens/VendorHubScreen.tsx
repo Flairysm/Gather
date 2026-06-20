@@ -36,6 +36,7 @@ import {
   type PayoutAccount,
   type SellerPayout,
 } from "../data/payouts";
+import { sellerCancelOrder } from "../data/payments";
 
 type ViewId = "home" | "orders" | "listings" | "auctions" | "store" | "performance" | "disputes" | "payouts";
 
@@ -107,6 +108,7 @@ type SellerOrderItem = {
   fulfillment_status: FulfillmentStatus;
   created_at: string;
   tracking_number: string | null;
+  ship_deadline?: string | null;
   listing: {
     card_name: string;
     edition: string | null;
@@ -491,7 +493,7 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
       const { data, error } = await supabase
         .from("order_items")
         .select(`
-          id, order_id, listing_id, quantity, unit_price, fulfillment_status, tracking_number, created_at,
+          id, order_id, listing_id, quantity, unit_price, fulfillment_status, tracking_number, ship_deadline, created_at,
           order:orders(id, buyer_id, total, created_at, shipping_address)
         `)
         .eq("seller_id", userId)
@@ -695,6 +697,25 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
       showToast(`Order ${FULFILLMENT_CONFIG[newStatus].label.toLowerCase()}`);
     } catch (e) {
       showToast(errMsg(e, "Failed to update order"));
+    } finally {
+      setUpdatingOrderId(null);
+    }
+  }
+
+  async function handleCancelOrder(itemId: string, orderId: string) {
+    setUpdatingOrderId(itemId);
+    try {
+      await sellerCancelOrder(orderId);
+      // Refund/void flips the whole order to refunded (or removes it). Reflect it.
+      setOrderItems((prev) =>
+        prev.map((oi) =>
+          oi.order_id === orderId ? { ...oi, fulfillment_status: "refunded" as FulfillmentStatus } : oi,
+        ),
+      );
+      showToast("Order cancelled and buyer refunded");
+      loadOrderItems();
+    } catch (e) {
+      showToast(errMsg(e, "Failed to cancel order"));
     } finally {
       setUpdatingOrderId(null);
     }
@@ -1303,6 +1324,27 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
                     </View>
                   </View>
 
+                  {/* Ship-by deadline for confirmed (paid, unshipped) orders */}
+                  {oi.fulfillment_status === "confirmed" && oi.ship_deadline && oi.source !== "auction" && (() => {
+                    const ms = new Date(oi.ship_deadline).getTime() - Date.now();
+                    const overdue = ms < 0;
+                    const days = Math.ceil(Math.abs(ms) / (24 * 60 * 60 * 1000));
+                    return (
+                      <View style={[st.shipByRow, overdue && st.shipByOverdue]}>
+                        <Ionicons
+                          name={overdue ? "alert-circle-outline" : "time-outline"}
+                          size={13}
+                          color={overdue ? "#EF4444" : "#F59E0B"}
+                        />
+                        <Text style={[st.shipByText, { color: overdue ? "#EF4444" : "#F59E0B" }]}>
+                          {overdue
+                            ? `Overdue by ${days} day${days !== 1 ? "s" : ""} — ship now or the buyer can cancel`
+                            : `Ship within ${days} day${days !== 1 ? "s" : ""}`}
+                        </Text>
+                      </View>
+                    );
+                  })()}
+
                   {/* Tracking number display */}
                   {oi.tracking_number && (
                     <View style={st.trackingRow}>
@@ -1385,18 +1427,18 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
                     </View>
                   )}
 
-                  {oi.source !== "auction" && (action || oi.fulfillment_status === "pending") && (
+                  {oi.source !== "auction" && (action || oi.fulfillment_status === "pending" || oi.fulfillment_status === "confirmed") && (
                     <View style={st.orderActions}>
-                      {oi.fulfillment_status === "pending" && (
+                      {(oi.fulfillment_status === "pending" || oi.fulfillment_status === "confirmed") && (
                         <Pressable
                           style={[st.orderActionBtn, st.orderActionDanger]}
                           onPress={() => {
                             Alert.alert(
                               "Cancel Order?",
-                              "This cancels the order for the buyer. Any payment they've made will be refunded to their original payment method. This can't be undone.",
+                              "This cancels the order for the buyer and refunds their payment to its original source (card, voucher, or wallet). Stock is returned to your listing. This can't be undone.",
                               [
                                 { text: "Keep", style: "cancel" },
-                                { text: "Cancel Order", style: "destructive", onPress: () => updateFulfillment(oi.id, "cancelled") },
+                                { text: "Cancel Order", style: "destructive", onPress: () => handleCancelOrder(oi.id, oi.order_id) },
                               ],
                             );
                           }}
@@ -2843,6 +2885,13 @@ const st = StyleSheet.create({
   },
   trackingLabel: { color: C.textSecondary, fontSize: 11, fontWeight: "600" },
   trackingNumber: { color: C.textAccent, fontSize: 11, fontWeight: "800", letterSpacing: 0.5 },
+
+  shipByRow: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    paddingHorizontal: 12, paddingBottom: 10,
+  },
+  shipByOverdue: {},
+  shipByText: { flex: 1, fontSize: 11, fontWeight: "700" },
 
   shipAddrRow: {
     flexDirection: "row",

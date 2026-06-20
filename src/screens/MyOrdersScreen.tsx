@@ -19,6 +19,7 @@ import * as ImagePicker from "expo-image-picker";
 import * as Clipboard from "expo-clipboard";
 import { C, S } from "../theme";
 import { supabase } from "../lib/supabase";
+import { buyerCancelOverdueOrder } from "../data/payments";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import TruncationNotice from "../components/TruncationNotice";
 import ErrorState from "../components/ErrorState";
@@ -59,6 +60,15 @@ type OrderItemRow = {
   delivered_at?: string | null;
   received_at?: string | null;
   dispute_deadline?: string | null;
+  ship_deadline?: string | null;
+};
+
+type OrderPaymentInfo = {
+  funding_source: string;
+  amount: number;
+  voucher_amount: number;
+  escrow_status: string;
+  refunded_at: string | null;
 };
 
 type GroupedOrder = {
@@ -72,6 +82,8 @@ type GroupedOrder = {
   createdAt: string;
   hasReview: boolean;
   reviewRating: number | null;
+  payment?: OrderPaymentInfo | null;
+  shipDeadline?: string | null;
 };
 
 const FILTERS: { id: FilterId; label: string }[] = [
@@ -180,9 +192,10 @@ export default function MyOrdersScreen({
   const [reviewedOrders, setReviewedOrders] = useState<
     Record<string, { rating: number }>
   >({});
+  const [orderPayments, setOrderPayments] = useState<Record<string, OrderPaymentInfo>>({});
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
-  const [disputeModal, setDisputeModal] = useState<{ orderId: string; itemId: string; sellerId: string } | null>(null);
+  const [disputeModal, setDisputeModal] = useState<{ orderId: string; itemId: string; sellerId: string; preDelivery?: boolean } | null>(null);
   const [disputeReason, setDisputeReason] = useState("");
   const [disputeDesc, setDisputeDesc] = useState("");
   const [disputeImages, setDisputeImages] = useState<string[]>([]);
@@ -211,7 +224,7 @@ export default function MyOrdersScreen({
       // hydrated below by listing_id (covers both market + auction sources).
       const SELECT = `
         id, order_id, listing_id, seller_id, quantity, unit_price, fulfillment_status, created_at,
-        tracking_number, delivered_at, received_at, dispute_deadline,
+        tracking_number, delivered_at, received_at, dispute_deadline, ship_deadline,
         seller:profiles!seller_id(username, display_name, avatar_url, rating, review_count)
       `;
 
@@ -451,6 +464,23 @@ export default function MyOrdersScreen({
           reviewMap[r.order_id] = { rating: r.rating };
         }
         setReviewedOrders(reviewMap);
+
+        // Payment/escrow info per order (refund visibility + overdue checks).
+        const { data: pays } = await supabase
+          .from("order_payments")
+          .select("order_id, funding_source, amount, voucher_amount, escrow_status, refunded_at")
+          .in("order_id", uniqueOrderIds);
+        const payMap: Record<string, OrderPaymentInfo> = {};
+        for (const p of pays ?? []) {
+          payMap[(p as any).order_id] = {
+            funding_source: (p as any).funding_source,
+            amount: Number((p as any).amount),
+            voucher_amount: Number((p as any).voucher_amount ?? 0),
+            escrow_status: (p as any).escrow_status,
+            refunded_at: (p as any).refunded_at ?? null,
+          };
+        }
+        setOrderPayments(payMap);
       }
     } catch {
       setLoadError(true);
@@ -491,6 +521,10 @@ export default function MyOrdersScreen({
       ) ?? items[0].fulfillment_status;
 
       const review = reviewedOrders[orderId];
+      const shipDeadline = items
+        .map((i) => i.ship_deadline)
+        .filter((d): d is string => !!d)
+        .sort()[0] ?? null;
 
       result.push({
         orderId,
@@ -503,6 +537,8 @@ export default function MyOrdersScreen({
         createdAt: items[0].created_at,
         hasReview: !!review,
         reviewRating: review?.rating ?? null,
+        payment: orderPayments[orderId] ?? null,
+        shipDeadline,
       });
     }
 
@@ -510,7 +546,7 @@ export default function MyOrdersScreen({
       (a, b) =>
         new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
     );
-  }, [rawItems, reviewedOrders]);
+  }, [rawItems, reviewedOrders, orderPayments]);
 
   const filtered = useMemo(() => {
     if (filter === "all") return grouped;
@@ -539,6 +575,29 @@ export default function MyOrdersScreen({
 
   function handleReview(orderId: string, sellerId: string) {
     push({ type: "ORDER_REVIEW", orderId, sellerId });
+  }
+
+  function handleCancelOverdue(orderId: string) {
+    Alert.alert(
+      "Cancel & Refund?",
+      "The seller missed the 5-day ship deadline. Cancelling refunds your payment to its original source. This can't be undone.",
+      [
+        { text: "Keep Waiting", style: "cancel" },
+        {
+          text: "Cancel & Refund",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              await buyerCancelOverdueOrder(orderId);
+              Alert.alert("Order Cancelled", "Your refund is on its way to your original payment method.");
+              loadOrders();
+            } catch (e: any) {
+              Alert.alert("Couldn't cancel", e?.message ?? "Please try again.");
+            }
+          },
+        },
+      ],
+    );
   }
 
   async function handleOrderReceived(orderItemIds: string[]) {
@@ -621,7 +680,10 @@ export default function MyOrdersScreen({
 
   async function handleFileDispute() {
     if (!disputeModal || !disputeReason || !userId) return;
-    if (disputeImages.length < 3) {
+    // "Item not received" (pre-delivery) reports can't show photos of the item,
+    // so photos are optional there; condition disputes still require evidence.
+    const requirePhotos = !disputeModal.preDelivery;
+    if (requirePhotos && disputeImages.length < 3) {
       Alert.alert("Photos Required", "Please attach at least 3 photos as evidence.");
       return;
     }
@@ -642,7 +704,7 @@ export default function MyOrdersScreen({
         }
       }
 
-      if (uploadedUrls.length < 3) {
+      if (requirePhotos && uploadedUrls.length < 3) {
         Alert.alert("Upload Failed", `Only ${uploadedUrls.length} of ${disputeImages.length} photos uploaded successfully. Please try again.`);
         setFilingDispute(false);
         return;
@@ -784,9 +846,10 @@ export default function MyOrdersScreen({
                       ],
                     );
                   }}
-                  onDispute={(orderId, itemId, sellerId) =>
-                    setDisputeModal({ orderId, itemId, sellerId })
+                  onDispute={(orderId, itemId, sellerId, preDelivery) =>
+                    setDisputeModal({ orderId, itemId, sellerId, preDelivery })
                   }
+                  onCancelOverdue={(orderId) => handleCancelOverdue(orderId)}
                 />
               )}
               ListFooterComponent={<TruncationNotice count={rawItems.length} limit={500} label="order items" />}
@@ -885,6 +948,7 @@ function OrderCard({
   onPayNow,
   onReceived,
   onDispute,
+  onCancelOverdue,
 }: {
   order: GroupedOrder;
   vendorLogoUrl: string | null;
@@ -893,7 +957,8 @@ function OrderCard({
   onReview: () => void;
   onPayNow?: (winId: string) => void;
   onReceived?: (itemIds: string[]) => void;
-  onDispute?: (orderId: string, itemId: string, sellerId: string) => void;
+  onDispute?: (orderId: string, itemId: string, sellerId: string, preDelivery?: boolean) => void;
+  onCancelOverdue?: (orderId: string) => void;
 }) {
   const [trackingCopied, setTrackingCopied] = useState(false);
   const cfg = STATUS_CONFIG[order.status];
@@ -902,6 +967,21 @@ function OrderCard({
   const sellerInitial = sellerName.charAt(0).toUpperCase();
   const isDelivered = order.status === "delivered";
   const isShipped = order.status === "shipped";
+  const isConfirmed = order.status === "confirmed";
+  const isRefunded = order.status === "refunded";
+  const shipOverdue =
+    isConfirmed &&
+    order.payment?.escrow_status === "held" &&
+    !!order.shipDeadline &&
+    new Date(order.shipDeadline).getTime() < Date.now();
+  const refundMethodLabel =
+    order.payment?.funding_source === "wallet"
+      ? "your wallet"
+      : order.payment?.funding_source === "voucher"
+        ? "your voucher"
+        : order.payment?.funding_source === "mixed"
+          ? "your card & voucher"
+          : "your card";
   const isPendingAuction =
     order.status === "pending" &&
     order.items.some((i) => i.source === "auction");
@@ -1072,6 +1152,47 @@ function OrderCard({
         >
           <Ionicons name="checkmark-circle" size={16} color={C.textHero} />
           <Text style={st.receivedBtnText}>Order Received</Text>
+        </Pressable>
+      )}
+
+      {/* Seller missed the ship deadline — buyer can cancel for a full refund */}
+      {shipOverdue && onCancelOverdue && (
+        <View style={st.overdueBox}>
+          <View style={st.overdueInfo}>
+            <Ionicons name="time-outline" size={14} color="#F59E0B" />
+            <Text style={st.overdueText}>
+              The seller hasn't shipped within 5 days. You can cancel for a full refund to {refundMethodLabel}.
+            </Text>
+          </View>
+          <Pressable style={st.overdueBtn} onPress={() => onCancelOverdue(order.orderId)}>
+            <Ionicons name="close-circle-outline" size={14} color={C.danger} />
+            <Text style={st.overdueBtnText}>Cancel & Refund</Text>
+          </Pressable>
+        </View>
+      )}
+
+      {/* Refund confirmation for refunded orders */}
+      {isRefunded && (
+        <View style={st.refundBox}>
+          <Ionicons name="checkmark-circle" size={14} color={C.success} />
+          <Text style={st.refundText}>
+            Refunded {formatPrice(order.payment?.amount ?? order.total)} to {refundMethodLabel}
+            {order.payment?.refunded_at ? ` · ${relativeTime(order.payment.refunded_at)}` : ""}
+          </Text>
+        </View>
+      )}
+
+      {/* Pre-delivery escalation: item shipped but hasn't arrived */}
+      {isShipped && onDispute && (
+        <Pressable
+          style={st.notReceivedBtn}
+          onPress={() => {
+            const item = order.items.find((i) => i.fulfillment_status === "shipped");
+            if (item) onDispute(order.orderId, item.id, order.sellerId, true);
+          }}
+        >
+          <Ionicons name="help-circle-outline" size={14} color={C.textMuted} />
+          <Text style={st.notReceivedText}>Item not received? Report a problem</Text>
         </Pressable>
       )}
 
@@ -1362,6 +1483,35 @@ const st = StyleSheet.create({
     borderTopColor: C.border,
     backgroundColor: "rgba(34,197,94,0.05)",
   },
+  overdueBox: {
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderTopWidth: 1,
+    borderTopColor: C.border,
+    backgroundColor: "rgba(245,158,11,0.06)",
+    gap: 8,
+  },
+  overdueInfo: { flexDirection: "row", alignItems: "flex-start", gap: 6 },
+  overdueText: { flex: 1, color: "#F59E0B", fontSize: 12, fontWeight: "600", lineHeight: 16 },
+  overdueBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6,
+    borderWidth: 1, borderColor: "rgba(239,68,68,0.35)", borderRadius: 10, paddingVertical: 9,
+    backgroundColor: C.dangerBg,
+  },
+  overdueBtnText: { color: C.danger, fontSize: 13, fontWeight: "800" },
+  refundBox: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    paddingHorizontal: 16, paddingVertical: 10,
+    borderTopWidth: 1, borderTopColor: C.border,
+    backgroundColor: "rgba(34,197,94,0.05)",
+  },
+  refundText: { flex: 1, color: C.success, fontSize: 12, fontWeight: "700" },
+  notReceivedBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6,
+    paddingHorizontal: 16, paddingVertical: 10,
+    borderTopWidth: 1, borderTopColor: C.border,
+  },
+  notReceivedText: { color: C.textMuted, fontSize: 12, fontWeight: "700" },
   disputeInfo: {
     flexDirection: "row",
     alignItems: "center",

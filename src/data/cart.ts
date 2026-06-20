@@ -5,11 +5,15 @@ export type CartItem = {
   listing: Listing;
   quantity: number;
   addedAt: number;
+  // Set when this item came from an accepted negotiation offer. The agreed price
+  // lives in `listing.price`; the server re-validates this offer and charges that
+  // exact amount at checkout (see create_card_checkout).
+  offerId?: string;
 };
 
 export type CartContextValue = {
   items: CartItem[];
-  addItem: (listing: Listing, quantity?: number) => void;
+  addItem: (listing: Listing, quantity?: number, offerId?: string) => void;
   setQuantity: (listingId: string, quantity: number) => void;
   removeItem: (listingId: string) => void;
   clearCart: () => void;

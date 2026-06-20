@@ -5,7 +5,7 @@ import { supabase } from "../lib/supabase";
 // method for marketplace orders and auction wins. The buyer is charged on the
 // Evend platform balance; funds settle to per-order escrow once Stripe confirms.
 
-export type CartLineInput = { listing_id: string; quantity: number };
+export type CartLineInput = { listing_id: string; quantity: number; offer_id?: string };
 
 /** Snapshot of the buyer's shipping address, stored on the order for the seller. */
 export type ShippingAddressSnapshot = {
@@ -119,6 +119,28 @@ export async function createAuctionPayment(
 export async function cancelCardOrder(orderIds: string[]): Promise<void> {
   if (!orderIds.length) return;
   await supabase.rpc("cancel_card_order", { p_order_ids: orderIds });
+}
+
+/**
+ * Seller-initiated cancel of a paid, not-yet-shipped order. Refunds the buyer to
+ * their original source (card via Stripe, voucher/wallet restored) and restocks.
+ */
+export async function sellerCancelOrder(orderId: string): Promise<void> {
+  const { error } = await supabase.functions.invoke("cancel-order", {
+    body: { order_id: orderId },
+  });
+  if (error) throw new Error(await invokeError(error as any));
+}
+
+/**
+ * Buyer-initiated cancel of a paid order the seller failed to ship within the
+ * 5-day window. Server validates the deadline lapsed, then refunds to source.
+ */
+export async function buyerCancelOverdueOrder(orderId: string): Promise<void> {
+  const { error } = await supabase.functions.invoke("cancel-order", {
+    body: { order_id: orderId },
+  });
+  if (error) throw new Error(await invokeError(error as any));
 }
 
 export type PayResult = { status: "paid" | "canceled" | "failed"; message?: string };

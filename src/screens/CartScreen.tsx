@@ -168,40 +168,49 @@ export default function CartScreen({ onBack }: Props) {
                   <Text style={st.cardPrice}>
                     {formatPrice(parsePrice(ci.listing.price) * ci.quantity)}
                   </Text>
-                  <View style={st.qtyControl}>
-                    <Pressable
-                      style={[
-                        st.qtyBtn,
-                        ci.quantity <= 1 && st.qtyBtnDisabled,
-                      ]}
-                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                      onPress={(e) => {
-                        e.stopPropagation();
-                        setQuantity(ci.listing.id, ci.quantity - 1);
-                      }}
-                      disabled={ci.quantity <= 1}
-                    >
-                      <Feather name="minus" size={12} color={C.textPrimary} />
-                    </Pressable>
-                    <Text style={st.qtyValue}>{ci.quantity}</Text>
-                    <Pressable
-                      style={[
-                        st.qtyBtn,
-                        ci.quantity >= (ci.listing.quantity ?? 99) && st.qtyBtnDisabled,
-                      ]}
-                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                      onPress={(e) => {
-                        e.stopPropagation();
-                        setQuantity(ci.listing.id, ci.quantity + 1);
-                      }}
-                      disabled={ci.quantity >= (ci.listing.quantity ?? 99)}
-                    >
-                      <Feather name="plus" size={12} color={C.textPrimary} />
-                    </Pressable>
-                  </View>
-                  <Text style={st.stockHint}>
-                    {ci.listing.quantity ?? "?"} in stock
-                  </Text>
+                  {ci.offerId ? (
+                    <View style={st.offerBadge}>
+                      <Feather name="tag" size={11} color={C.textAccent} />
+                      <Text style={st.offerBadgeText}>Agreed price</Text>
+                    </View>
+                  ) : (
+                    <>
+                      <View style={st.qtyControl}>
+                        <Pressable
+                          style={[
+                            st.qtyBtn,
+                            ci.quantity <= 1 && st.qtyBtnDisabled,
+                          ]}
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                          onPress={(e) => {
+                            e.stopPropagation();
+                            setQuantity(ci.listing.id, ci.quantity - 1);
+                          }}
+                          disabled={ci.quantity <= 1}
+                        >
+                          <Feather name="minus" size={12} color={C.textPrimary} />
+                        </Pressable>
+                        <Text style={st.qtyValue}>{ci.quantity}</Text>
+                        <Pressable
+                          style={[
+                            st.qtyBtn,
+                            ci.quantity >= (ci.listing.quantity ?? 99) && st.qtyBtnDisabled,
+                          ]}
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                          onPress={(e) => {
+                            e.stopPropagation();
+                            setQuantity(ci.listing.id, ci.quantity + 1);
+                          }}
+                          disabled={ci.quantity >= (ci.listing.quantity ?? 99)}
+                        >
+                          <Feather name="plus" size={12} color={C.textPrimary} />
+                        </Pressable>
+                      </View>
+                      <Text style={st.stockHint}>
+                        {ci.listing.quantity ?? "?"} in stock
+                      </Text>
+                    </>
+                  )}
                   <Pressable
                     style={st.removeBtn}
                     hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
@@ -343,6 +352,18 @@ const st = StyleSheet.create({
     alignItems: "center",
     gap: 6,
   },
+  offerBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: C.accentGlow,
+    borderWidth: 1,
+    borderColor: C.borderStream,
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  offerBadgeText: { color: C.textAccent, fontSize: 10, fontWeight: "800" },
   qtyBtn: {
     width: 24,
     height: 24,

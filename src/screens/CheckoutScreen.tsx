@@ -180,6 +180,9 @@ export default function CheckoutScreen({ onBack }: Props) {
       const dbMap = new Map(data.map((r: any) => [r.id, r]));
       const staleItems: string[] = [];
       for (const ci of selected) {
+        // Accepted-offer items keep their agreed price (the server re-validates
+        // and charges that exact amount); never overwrite it with the list price.
+        if (ci.offerId) continue;
         const db = dbMap.get(ci.listing.id);
         if (!db) continue;
         if (parsePrice(db.price) !== parsePrice(ci.listing.price)) {
@@ -228,7 +231,11 @@ export default function CheckoutScreen({ onBack }: Props) {
       }
 
       // 1. Reserve stock + create the PaymentIntent (server-authoritative pricing).
-      const lines = checkoutItems.map((ci) => ({ listing_id: ci.listing.id, quantity: ci.quantity }));
+      const lines = checkoutItems.map((ci) => ({
+        listing_id: ci.listing.id,
+        quantity: ci.quantity,
+        ...(ci.offerId ? { offer_id: ci.offerId } : {}),
+      }));
       const shippingFee = getShippingFee(address.state);
       const shippingAddress = {
         full_name: address.full_name,
