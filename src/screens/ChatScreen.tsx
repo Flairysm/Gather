@@ -43,6 +43,7 @@ import { useAppNavigation } from "../navigation/NavigationContext";
 import { useCart } from "../data/cart";
 import { useBadgeContext } from "../hooks/useBadgeCounts";
 import type { Listing } from "../data/market";
+import { formatBudget } from "../data/market";
 import { supabase } from "../lib/supabase";
 import { requireNetwork } from "../lib/network";
 
@@ -1187,7 +1188,7 @@ export default function ChatScreen({
                       </Text>
                       {wsMsg.sharedWanted?.offer_price != null && (
                         <Text style={st.listingSharePrice}>
-                          Budget: RM{Number(wsMsg.sharedWanted.offer_price).toLocaleString("en-MY", { maximumFractionDigits: 0 })}
+                          Budget: {formatBudget(wsMsg.sharedWanted.offer_price, wsMsg.sharedWanted.offer_price_max)}
                         </Text>
                       )}
                     </View>

@@ -1,3 +1,5 @@
+import { ALL_CATEGORIES } from "./categories";
+
 export type Listing = {
   id: string;
   seller_id: string;
@@ -32,7 +34,9 @@ export type WantedPost = {
   grade_wanted: string | null;
   grading_company_wanted: string | null;
   grade_value_wanted: string | null;
+  grades_wanted?: { company: string; value: string | null }[] | null;
   offer_price: number;
+  offer_price_max?: number | null;
   category: string;
   description: string | null;
   image_url: string | null;
@@ -49,10 +53,19 @@ export type WantedPost = {
   };
 };
 
-export const MARKET_FILTERS = ["All", "Pokémon", "MTG", "Sports", "YGO"];
+export const MARKET_FILTERS = ["All", ...ALL_CATEGORIES.map((c) => c.key)];
 
 export function formatListingPrice(price: number): string {
   return `RM${price.toLocaleString("en-MY", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+}
+
+// Budget for a WTB post — a single price or a "RM100 – RM200" range when a
+// distinct upper bound is set.
+export function formatBudget(min: number, max?: number | null): string {
+  if (max != null && Number(max) > Number(min)) {
+    return `${formatListingPrice(Number(min))} – ${formatListingPrice(Number(max))}`;
+  }
+  return formatListingPrice(Number(min));
 }
 
 export function timeAgo(dateStr: string): string {

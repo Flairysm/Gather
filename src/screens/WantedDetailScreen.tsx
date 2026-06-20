@@ -15,7 +15,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { C, S } from "../theme";
 import { wd } from "../styles/wantedDetail.styles";
-import { formatListingPrice, timeAgo, type WantedPost } from "../data/market";
+import { formatBudget, formatListingPrice, timeAgo, type WantedPost } from "../data/market";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import { supabase } from "../lib/supabase";
 import ErrorState from "../components/ErrorState";
@@ -56,7 +56,7 @@ export default function WantedDetailScreen({ wantedId, onBack }: Props) {
     const { data, error } = await supabase
       .from("wanted_posts")
       .select(`
-        id, buyer_id, card_name, edition, grade_wanted, offer_price,
+        id, buyer_id, card_name, edition, grade_wanted, offer_price, offer_price_max,
         category, description, image_url, views, status, created_at, expires_at,
         buyer:profiles!buyer_id(username, display_name, rating, total_purchases, avatar_url)
       `)
@@ -90,7 +90,7 @@ export default function WantedDetailScreen({ wantedId, onBack }: Props) {
       const { data: sim } = await supabase
         .from("wanted_posts")
         .select(`
-          id, buyer_id, card_name, edition, grade_wanted, offer_price,
+          id, buyer_id, card_name, edition, grade_wanted, offer_price, offer_price_max,
           category, description, image_url, views, status, created_at, expires_at,
           buyer:profiles!buyer_id(username, display_name, rating, total_purchases, avatar_url)
         `)
@@ -134,7 +134,7 @@ export default function WantedDetailScreen({ wantedId, onBack }: Props) {
   function handleShare() {
     if (!item) return;
     Share.share({
-      message: `Looking for "${item.card_name}" on Evend — offering ${formatListingPrice(item.offer_price)}!`,
+      message: `Looking for "${item.card_name}" on Evend — offering ${formatBudget(item.offer_price, item.offer_price_max)}!`,
     });
   }
 
@@ -278,9 +278,11 @@ export default function WantedDetailScreen({ wantedId, onBack }: Props) {
 
         {/* Offer Price Row */}
         <View style={wd.priceRow}>
-          <View>
+          <View style={{ flexShrink: 1, marginRight: 10 }}>
             <Text style={wd.priceLabel}>Offering</Text>
-            <Text style={wd.price}>{formatListingPrice(item.offer_price)}</Text>
+            <Text style={wd.price} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>
+              {formatBudget(item.offer_price, item.offer_price_max)}
+            </Text>
           </View>
           {item.grade_wanted && (
             <View style={wd.gradeChip}>
@@ -353,7 +355,7 @@ export default function WantedDetailScreen({ wantedId, onBack }: Props) {
                 )}
                 <View style={wd.detailChip}>
                   <Text style={wd.detailChipLabel}>Budget</Text>
-                  <Text style={wd.detailChipValue}>{formatListingPrice(item.offer_price)}</Text>
+                  <Text style={wd.detailChipValue}>{formatBudget(item.offer_price, item.offer_price_max)}</Text>
                 </View>
                 <View style={wd.detailChip}>
                   <Text style={wd.detailChipLabel}>Posted</Text>
@@ -397,7 +399,7 @@ export default function WantedDetailScreen({ wantedId, onBack }: Props) {
                     {s.card_name}
                   </Text>
                   <Text style={wd.similarEdition}>{s.edition ?? "—"}</Text>
-                  <Text style={wd.similarPrice}>{formatListingPrice(s.offer_price)}</Text>
+                  <Text style={wd.similarPrice}>{formatBudget(s.offer_price, s.offer_price_max)}</Text>
                 </Pressable>
               ))}
             </ScrollView>

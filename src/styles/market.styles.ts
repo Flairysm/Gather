@@ -362,10 +362,14 @@ export const market = StyleSheet.create({
     fontWeight: "700",
     letterSpacing: 0.5,
     textTransform: "uppercase",
+    flexShrink: 0,
   },
   offerPrice: {
     ...T.priceSmall,
     fontSize: 14,
+    flexShrink: 1,
+    textAlign: "right",
+    marginLeft: 6,
   },
   wantedMeta: {
     flexDirection: "row",

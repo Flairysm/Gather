@@ -6,6 +6,8 @@ export type Voucher = {
   display_name: string | null;
   avatar_url: string | null;
   note: string | null;
+  created_at: string;
+  is_me: boolean;
   is_followed: boolean;
 };
 

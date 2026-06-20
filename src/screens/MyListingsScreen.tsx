@@ -19,6 +19,7 @@ import { supabase } from "../lib/supabase";
 import { requireNetwork } from "../lib/network";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import type { Listing, WantedPost } from "../data/market";
+import { formatBudget } from "../data/market";
 import Shimmer, { ShimmerGroup, FadeIn } from "../components/Shimmer";
 import ErrorState from "../components/ErrorState";
 import ScreenHeader from "../components/ScreenHeader";
@@ -103,7 +104,7 @@ export default function MyListingsScreen({ onBack }: Props) {
     const { data: wantedData } = await supabase
       .from("wanted_posts")
       .select(
-        "id, buyer_id, card_name, edition, grade_wanted, offer_price, category, description, image_url, views, status, created_at",
+        "id, buyer_id, card_name, edition, grade_wanted, offer_price, offer_price_max, category, description, image_url, views, status, created_at",
       )
       .eq("buyer_id", user.id)
       .order("created_at", { ascending: false })
@@ -377,7 +378,7 @@ export default function MyListingsScreen({ onBack }: Props) {
                       {[item.edition, item.grade_wanted].filter(Boolean).join(" · ")}
                     </Text>
                     <Text style={st.prodPrice}>
-                      RM{Number(item.offer_price).toLocaleString("en-MY", { maximumFractionDigits: 0 })}
+                      {formatBudget(item.offer_price, item.offer_price_max)}
                     </Text>
                   </View>
                 </View>

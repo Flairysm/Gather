@@ -6,8 +6,13 @@ export type CategoryDef = {
 export const ALL_CATEGORIES: CategoryDef[] = [
   { key: "Pokémon", label: "Pokémon" },
   { key: "MTG", label: "Magic: The Gathering" },
-  { key: "Sports", label: "Sports Cards" },
   { key: "YGO", label: "Yu-Gi-Oh!" },
+  { key: "One Piece", label: "One Piece" },
+  { key: "Lorcana", label: "Disney Lorcana" },
+  { key: "Dragon Ball", label: "Dragon Ball" },
+  { key: "Digimon", label: "Digimon" },
+  { key: "Sports", label: "Sports Cards" },
+  { key: "Others", label: "Others" },
 ];
 
 export const CATEGORY_MAP = Object.fromEntries(

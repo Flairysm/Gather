@@ -235,6 +235,14 @@ export const cf = StyleSheet.create({
     height: 54,
     marginBottom: S.xl,
   },
+  priceRangeCaption: {
+    color: C.textMuted,
+    fontSize: 11,
+    fontWeight: "700",
+    marginBottom: 6,
+    textTransform: "uppercase",
+    letterSpacing: 0.4,
+  },
   dollarSign: {
     color: C.textAccent,
     fontSize: 22,

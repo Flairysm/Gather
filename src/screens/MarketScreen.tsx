@@ -24,6 +24,7 @@ import { market as m } from "../styles/market.styles";
 import { shared as sh } from "../styles/shared.styles";
 import {
   MARKET_FILTERS,
+  formatBudget,
   formatListingPrice,
   timeAgo,
   type Listing,
@@ -38,6 +39,24 @@ type SortMode = "recommended" | "newest" | "price_low" | "price_high";
 
 const FILTER_COMPANIES = GRADING_COMPANIES.filter((c) => c.id !== "RAW");
 const RAW_COMPANY = GRADING_COMPANIES.find((c) => c.id === "RAW")!;
+
+// WTB posts can list multiple acceptable grades. Read from the structured
+// grades_wanted array when present, otherwise fall back to the legacy single
+// grading_company_wanted / grade_value_wanted columns (older posts).
+function wantedGradeEntries(item: WantedPost): { company: string; value: string | null }[] {
+  const arr = (item as any).grades_wanted as
+    | { company: string; value: string | null }[]
+    | null
+    | undefined;
+  if (Array.isArray(arr) && arr.length > 0) return arr;
+  const company = (item as any).grading_company_wanted ?? "";
+  if (!company) return [];
+  return [{ company, value: (item as any).grade_value_wanted ?? null }];
+}
+
+function wantedCompanies(item: WantedPost): string[] {
+  return wantedGradeEntries(item).map((g) => g.company);
+}
 
 
 const FAB_ACTIONS = [
@@ -319,22 +338,29 @@ export default function MarketScreen() {
 
     if (hasCompanyFilter || rawSelected) {
       next = next.filter((item) => {
-        const company = (item as any).grading_company_wanted ?? "";
-        const isRaw = !company || company === "RAW";
-        if (isRaw) return rawSelected;
-        return selectedCompanies.has(company);
+        const companies = wantedCompanies(item);
+        if (companies.length === 0) return rawSelected; // unspecified → treat as raw
+        return companies.some((c) =>
+          c === "RAW" ? rawSelected : selectedCompanies.has(c),
+        );
       });
     }
     if (hasGradeFilter) {
       next = next.filter((item) => {
-        const gc = (item as any).grading_company_wanted ?? "";
-        const isRaw = !gc || gc === "RAW";
-        if (isRaw) return true;
-        const gv = (item as any).grade_value_wanted ?? "";
-        return selectedGrades.has(`${gc}:${gv}`);
+        const grades = wantedGradeEntries(item);
+        if (grades.length === 0) return true; // unspecified → don't exclude
+        return grades.some(
+          ({ company, value }) =>
+            company === "RAW" || selectedGrades.has(`${company}:${value}`),
+        );
       });
     }
-    if (hasMinPrice) next = next.filter((item) => Number(item.offer_price) >= minPrice);
+    // Budget filters treat a WTB range [offer_price, offer_price_max] as an
+    // overlap test against the user's chosen min/max.
+    if (hasMinPrice)
+      next = next.filter(
+        (item) => Number(item.offer_price_max ?? item.offer_price) >= minPrice,
+      );
     if (hasMaxPrice) next = next.filter((item) => Number(item.offer_price) <= maxPrice);
 
     if (sortMode === "price_low") {
@@ -745,8 +771,13 @@ export default function MarketScreen() {
                     <View style={m.wantedDivider} />
                     <View style={m.offerRow}>
                       <Text style={m.offerLabel}>Offering</Text>
-                      <Text style={m.offerPrice}>
-                        {formatListingPrice(item.offer_price)}
+                      <Text
+                        style={m.offerPrice}
+                        numberOfLines={1}
+                        adjustsFontSizeToFit
+                        minimumFontScale={0.7}
+                      >
+                        {formatBudget(item.offer_price, item.offer_price_max)}
                       </Text>
                     </View>
                     <View style={m.wantedMeta}>

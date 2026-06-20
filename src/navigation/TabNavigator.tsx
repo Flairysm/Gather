@@ -51,6 +51,7 @@ import { FeedPrefsProvider } from "../data/feedPreferences";
 import { WalletProvider } from "../data/wallet";
 import WalletScreen from "../screens/WalletScreen";
 import VouchersScreen from "../screens/VouchersScreen";
+import SellerVouchesScreen from "../screens/SellerVouchesScreen";
 import HelpCentreScreen from "../screens/HelpCentreScreen";
 import { supabase } from "../lib/supabase";
 import { useBadgeCounts, BadgeContext } from "../hooks/useBadgeCounts";
@@ -178,6 +179,8 @@ function renderOverlay(screen: AppScreen, pop: () => void) {
       return <WalletScreen onBack={pop} />;
     case "VOUCHERS":
       return <VouchersScreen onBack={pop} />;
+    case "SELLER_VOUCHES":
+      return <SellerVouchesScreen sellerId={screen.sellerId} storeName={screen.storeName} onBack={pop} />;
     case "HELP_CENTRE":
       return <HelpCentreScreen onBack={pop} />;
   }

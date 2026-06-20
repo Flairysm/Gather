@@ -52,6 +52,7 @@ export type AppScreen =
   | { type: "AUCTION_CHECKOUT"; winId: string }
   | { type: "WALLET" }
   | { type: "VOUCHERS" }
+  | { type: "SELLER_VOUCHES"; sellerId: string; storeName?: string }
   | { type: "HELP_CENTRE" };
 
 type StackItem = { id: number; screen: AppScreen };

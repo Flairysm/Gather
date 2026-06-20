@@ -287,16 +287,12 @@ export default function PostDetailScreen({ postId, onBack }: Props) {
                     onPress={() => toggleReplies(row.rootId)}
                     hitSlop={8}
                   >
+                    <View style={f.repliesToggleLine} />
                     <Text style={f.repliesToggleText}>
                       {row.expanded
                         ? "Hide replies"
                         : `View ${row.count} ${row.count === 1 ? "reply" : "replies"}`}
                     </Text>
-                    <Feather
-                      name={row.expanded ? "chevron-up" : "chevron-down"}
-                      size={14}
-                      color={C.textSecondary}
-                    />
                   </Pressable>
                 );
               }
@@ -307,7 +303,9 @@ export default function PostDetailScreen({ postId, onBack }: Props) {
                 ? () => push({ type: "USER_PROFILE", userId: item.author_id! })
                 : undefined;
               const isReply = row.depth > 0;
-              const avatarSize = isReply ? 28 : 34;
+              const avatarSize = isReply ? 26 : 34;
+              const isPostAuthor =
+                !item.is_anonymous && !!item.author_id && item.author_id === post.author_id;
               return (
                 <View
                   style={[
@@ -340,19 +338,19 @@ export default function PostDetailScreen({ postId, onBack }: Props) {
                     ) : null}
                     <View style={f.authorRow}>
                       <Pressable onPress={openAuthor} disabled={!canOpenAuthor} hitSlop={6}>
-                        <Text style={f.authorName}>{authorLabel(item)}</Text>
+                        <Text style={f.commentAuthorName}>{authorLabel(item)}</Text>
                       </Pressable>
-                      <Text style={f.dot}>·</Text>
-                      <Text style={f.timeText}>{timeAgo(item.created_at)}</Text>
+                      {isPostAuthor ? <Text style={f.authorTag}>Author</Text> : null}
+                      <Text style={f.commentMetaText}>{timeAgo(item.created_at)}</Text>
                     </View>
                     <Text style={f.commentText}>{item.body}</Text>
-                    <View style={f.commentActionsRow}>
+                    <View style={f.commentMetaRow}>
                       <Pressable onPress={() => startReply(item)} hitSlop={8}>
-                        <Text style={f.replyBtnText}>Reply</Text>
+                        <Text style={f.commentMetaAction}>Reply</Text>
                       </Pressable>
                       {item.is_mine ? (
                         <Pressable onPress={() => confirmDeleteComment(item)} hitSlop={8}>
-                          <Text style={f.replyBtnText}>Delete</Text>
+                          <Text style={f.commentMetaAction}>Delete</Text>
                         </Pressable>
                       ) : null}
                     </View>

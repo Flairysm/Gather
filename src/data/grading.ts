@@ -211,6 +211,23 @@ export function formatGradeCombined(
   return `${company} ${gradeValue}`;
 }
 
+// A single acceptable grade on a WTB post (company + optional graded value).
+export type WantedGrade = { company: string; value: string | null };
+
+// Stable identity for a selected grade, used for toggling/dedupe.
+export function gradeKey(g: WantedGrade): string {
+  return g.company === "RAW" ? "RAW" : `${g.company}:${g.value ?? ""}`;
+}
+
+// Human-readable summary for a list of acceptable grades, e.g. "PSA 10, BGS 9.5".
+export function formatGradesList(grades: WantedGrade[]): string | null {
+  if (!grades || grades.length === 0) return null;
+  const labels = grades
+    .map((g) => formatGradeCombined(g.company, g.value))
+    .filter((l): l is string => !!l);
+  return labels.length ? labels.join(", ") : null;
+}
+
 export function formatConditionLabel(tier: string | null): string {
   if (!tier) return "";
   const found = CONDITION_TIERS.find((t) => t.tier === tier);

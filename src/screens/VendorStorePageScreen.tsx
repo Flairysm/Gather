@@ -5,6 +5,7 @@ import {
   Dimensions,
   FlatList,
   Image,
+  Modal,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -155,6 +156,8 @@ export default function VendorStorePageScreen({
   const [loadingReviews, setLoadingReviews] = useState(false);
   const [vouches, setVouches] = useState<SellerVouches | null>(null);
   const [vouchBusy, setVouchBusy] = useState(false);
+  const [vouchModalOpen, setVouchModalOpen] = useState(false);
+  const [vouchDraft, setVouchDraft] = useState("");
   const [trust, setTrust] = useState<SellerTrust | null>(null);
   const [replyingId, setReplyingId] = useState<string | null>(null);
   const [replyText, setReplyText] = useState("");
@@ -348,21 +351,44 @@ export default function VendorStorePageScreen({
     });
   }
 
-  async function handleToggleVouch() {
-    if (!store || !vouches || vouchBusy) return;
+  function openVouchComposer() {
+    const mine = vouches?.sample.find((v) => v.is_me);
+    setVouchDraft(mine?.note ?? "");
+    setVouchModalOpen(true);
+  }
+
+  async function handleSubmitVouch() {
+    if (!store || vouchBusy) return;
+    const text = vouchDraft.trim();
+    if (!text) {
+      Alert.alert("Write a vouch", "Add a short note about your experience with this seller.");
+      return;
+    }
     setVouchBusy(true);
-    const wasVouched = vouches.has_vouched;
     try {
-      const res = wasVouched
-        ? await removeVouch(store.profile_id)
-        : await addVouch(store.profile_id);
-      setVouches((prev) =>
-        prev
-          ? { ...prev, has_vouched: !wasVouched, total: res.vouch_count }
-          : prev,
-      );
+      await addVouch(store.profile_id, text);
+      const fresh = await fetchSellerVouches(store.profile_id);
+      setVouches(fresh);
+      setVouchModalOpen(false);
+      setVouchDraft("");
     } catch (e: any) {
-      Alert.alert("Couldn't update vouch", e?.message ?? "Please try again.");
+      Alert.alert("Couldn't post vouch", e?.message ?? "Please try again.");
+    } finally {
+      setVouchBusy(false);
+    }
+  }
+
+  async function handleRemoveVouch() {
+    if (!store || vouchBusy) return;
+    setVouchBusy(true);
+    try {
+      await removeVouch(store.profile_id);
+      const fresh = await fetchSellerVouches(store.profile_id);
+      setVouches(fresh);
+      setVouchModalOpen(false);
+      setVouchDraft("");
+    } catch (e: any) {
+      Alert.alert("Couldn't remove vouch", e?.message ?? "Please try again.");
     } finally {
       setVouchBusy(false);
     }
@@ -563,76 +589,6 @@ export default function VendorStorePageScreen({
           </View>
         )}
 
-        {/* ── Vouches ── */}
-        {vouches && (vouches.total > 0 || vouches.eligible) && (
-          <View style={st.vouchCard}>
-            <View style={st.vouchInfo}>
-              <View style={st.vouchHeaderRow}>
-                <Ionicons name="ribbon" size={15} color={tc} />
-                <Text style={st.vouchCount}>
-                  {vouches.total} vouch{vouches.total === 1 ? "" : "es"}
-                </Text>
-              </View>
-              {vouches.followed_count > 0 ? (
-                <View style={st.vouchAvatars}>
-                  {vouches.sample
-                    .filter((v) => v.is_followed)
-                    .slice(0, 4)
-                    .map((v, i) => (
-                      <View
-                        key={v.id}
-                        style={[st.vouchAvatar, { marginLeft: i === 0 ? 0 : -8 }]}
-                      >
-                        {v.avatar_url ? (
-                          <Image source={{ uri: v.avatar_url }} style={st.vouchAvatarImg} />
-                        ) : (
-                          <Ionicons name="person" size={11} color={C.textMuted} />
-                        )}
-                      </View>
-                    ))}
-                  <Text style={st.vouchFollowedText}>
-                    Vouched by {vouches.followed_count} you follow
-                  </Text>
-                </View>
-              ) : (
-                <Text style={st.vouchSub}>Peer endorsements from real buyers</Text>
-              )}
-            </View>
-            {!isOwner && vouches.eligible && (
-              <Pressable
-                style={[
-                  st.vouchBtn,
-                  vouches.has_vouched
-                    ? { backgroundColor: tc }
-                    : { borderWidth: 1, borderColor: tc },
-                ]}
-                onPress={handleToggleVouch}
-                disabled={vouchBusy}
-              >
-                {vouchBusy ? (
-                  <ActivityIndicator size="small" color={vouches.has_vouched ? "#fff" : tc} />
-                ) : (
-                  <>
-                    <Ionicons
-                      name={vouches.has_vouched ? "checkmark" : "add"}
-                      size={14}
-                      color={vouches.has_vouched ? "#fff" : tc}
-                    />
-                    <Text
-                      style={[
-                        st.vouchBtnText,
-                        { color: vouches.has_vouched ? "#fff" : tc },
-                      ]}
-                    >
-                      {vouches.has_vouched ? "Vouched" : "Vouch"}
-                    </Text>
-                  </>
-                )}
-              </Pressable>
-            )}
-          </View>
-        )}
-
         {/* ── Action Buttons ── */}
         <View style={st.actionRow}>
           {currentUserId !== store.profile_id && (
@@ -689,6 +645,88 @@ export default function VendorStorePageScreen({
           <Text style={st.statLabel}>Joined</Text>
         </View>
       </View>
+
+      {/* ── Vouches summary (opens full list) ── */}
+      {vouches && (vouches.total > 0 || vouches.eligible) && (
+        <View style={st.vouchCardWrap}>
+          <Pressable
+            style={st.vouchCard}
+            onPress={() =>
+              push({
+                type: "SELLER_VOUCHES",
+                sellerId: store.profile_id,
+                storeName: store.store_name,
+              })
+            }
+          >
+            <View style={st.vouchInfo}>
+              <View style={st.vouchHeaderRow}>
+                <Ionicons name="ribbon" size={15} color={tc} />
+                <Text style={st.vouchCount}>
+                  {vouches.total} vouch{vouches.total === 1 ? "" : "es"}
+                </Text>
+              </View>
+              {vouches.followed_count > 0 ? (
+                <View style={st.vouchAvatars}>
+                  {vouches.sample
+                    .filter((v) => v.is_followed)
+                    .slice(0, 4)
+                    .map((v, i) => (
+                      <View
+                        key={v.id}
+                        style={[st.vouchAvatar, { marginLeft: i === 0 ? 0 : -8 }]}
+                      >
+                        {v.avatar_url ? (
+                          <Image source={{ uri: v.avatar_url }} style={st.vouchAvatarImg} />
+                        ) : (
+                          <Ionicons name="person" size={11} color={C.textMuted} />
+                        )}
+                      </View>
+                    ))}
+                  <Text style={st.vouchFollowedText}>
+                    Vouched by {vouches.followed_count} you follow
+                  </Text>
+                </View>
+              ) : (
+                <Text style={st.vouchSub}>Peer endorsements from real buyers</Text>
+              )}
+            </View>
+            <Ionicons name="chevron-forward" size={18} color={C.textMuted} />
+          </Pressable>
+          {!isOwner && vouches.eligible && (
+            <Pressable
+              style={[
+                st.vouchBtn,
+                vouches.has_vouched
+                  ? { backgroundColor: tc }
+                  : { borderWidth: 1, borderColor: tc },
+              ]}
+              onPress={openVouchComposer}
+              disabled={vouchBusy}
+            >
+              {vouchBusy ? (
+                <ActivityIndicator size="small" color={vouches.has_vouched ? "#fff" : tc} />
+              ) : (
+                <>
+                  <Ionicons
+                    name={vouches.has_vouched ? "checkmark" : "add"}
+                    size={14}
+                    color={vouches.has_vouched ? "#fff" : tc}
+                  />
+                  <Text
+                    style={[
+                      st.vouchBtnText,
+                      { color: vouches.has_vouched ? "#fff" : tc },
+                    ]}
+                  >
+                    {vouches.has_vouched ? "Vouched" : "Vouch"}
+                  </Text>
+                </>
+              )}
+            </Pressable>
+          )}
+        </View>
+      )}
 
       {/* ── Tab Bar ── */}
       <View style={st.tabBar}>
@@ -1034,6 +1072,48 @@ export default function VendorStorePageScreen({
     return `${Math.floor(days / 30)}mo`;
   }
 
+  const VouchesSection = () => {
+    const noted = (vouches?.sample ?? []).filter((v) => v.note && v.note.trim());
+    if (!vouches || noted.length === 0) return null;
+    const preview = noted[0];
+    const previewName = preview.display_name || preview.username || "Buyer";
+    return (
+      <Pressable
+        style={st.vouchSection}
+        onPress={() =>
+          push({
+            type: "SELLER_VOUCHES",
+            sellerId: store.profile_id,
+            storeName: store.store_name,
+          })
+        }
+      >
+        <View style={st.vouchSectionHeader}>
+          <Ionicons name="ribbon" size={15} color={tc} />
+          <Text style={st.vouchSectionTitle}>Vouches</Text>
+          <Text style={st.vouchSectionCount}>{vouches.total}</Text>
+          <Ionicons name="chevron-forward" size={16} color={C.textMuted} />
+        </View>
+        <View style={st.vouchItem}>
+          {preview.avatar_url ? (
+            <Image source={{ uri: preview.avatar_url }} style={st.vouchItemAvatar} />
+          ) : (
+            <View style={[st.vouchItemAvatar, st.vouchItemAvatarEmpty]}>
+              <Ionicons name="person" size={13} color={C.textMuted} />
+            </View>
+          )}
+          <View style={st.vouchItemBody}>
+            <Text style={st.vouchItemName}>{previewName}</Text>
+            <Text style={st.vouchItemNote} numberOfLines={2}>{preview.note}</Text>
+          </View>
+        </View>
+        <Text style={[st.vouchSeeAll, { color: tc }]}>
+          See all {vouches.total} vouch{vouches.total === 1 ? "" : "es"}
+        </Text>
+      </Pressable>
+    );
+  };
+
   const ReviewsHeader = () => (
     <View style={st.reviewsSummary}>
       <View style={st.ratingBig}>
@@ -1078,6 +1158,7 @@ export default function VendorStorePageScreen({
           ListHeaderComponent={
             <>
               <ListHeader />
+              <VouchesSection />
               {loadingReviews ? (
                 <View style={st.emptyWrap}><ActivityIndicator size="large" color={C.accent} /></View>
               ) : reviews.length > 0 ? (
@@ -1145,6 +1226,70 @@ export default function VendorStorePageScreen({
           showsVerticalScrollIndicator={false}
         />
       )}
+
+      <Modal
+        visible={vouchModalOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setVouchModalOpen(false)}
+      >
+        <Pressable style={st.modalBackdrop} onPress={() => setVouchModalOpen(false)}>
+          <Pressable style={st.vouchModal} onPress={() => {}}>
+            <View style={st.vouchModalHeader}>
+              <Ionicons name="ribbon" size={18} color={tc} />
+              <Text style={st.vouchModalTitle}>
+                {vouches?.has_vouched ? "Edit your vouch" : `Vouch for ${store.store_name}`}
+              </Text>
+            </View>
+            <Text style={st.vouchModalSub}>
+              Share why you trust this seller. Your vouch is public.
+            </Text>
+            <TextInput
+              style={st.vouchModalInput}
+              value={vouchDraft}
+              onChangeText={setVouchDraft}
+              placeholder="e.g. Smooth deal, cards exactly as described, shipped fast."
+              placeholderTextColor={C.textMuted}
+              multiline
+              maxLength={280}
+              autoFocus
+            />
+            <Text style={st.vouchModalCount}>{vouchDraft.length}/280</Text>
+            <View style={st.vouchModalActions}>
+              {vouches?.has_vouched && (
+                <Pressable
+                  style={st.vouchRemoveBtn}
+                  onPress={handleRemoveVouch}
+                  disabled={vouchBusy}
+                >
+                  <Text style={st.vouchRemoveText}>Remove</Text>
+                </Pressable>
+              )}
+              <View style={{ flex: 1 }} />
+              <Pressable
+                style={st.vouchCancelBtn}
+                onPress={() => setVouchModalOpen(false)}
+                disabled={vouchBusy}
+              >
+                <Text style={st.vouchCancelText}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                style={[st.vouchSubmitBtn, { backgroundColor: tc }]}
+                onPress={handleSubmitVouch}
+                disabled={vouchBusy}
+              >
+                {vouchBusy ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <Text style={st.vouchSubmitText}>
+                    {vouches?.has_vouched ? "Update" : "Post vouch"}
+                  </Text>
+                )}
+              </Pressable>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -1338,12 +1483,16 @@ const st = StyleSheet.create({
     marginTop: 12,
   },
   responseText: { color: C.textSecondary, fontSize: 12, fontWeight: "600" },
+  vouchCardWrap: {
+    marginHorizontal: S.screenPadding,
+    marginTop: 12,
+    gap: 8,
+  },
   vouchCard: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
     gap: 12,
-    marginTop: 14,
     padding: 12,
     borderRadius: 14,
     backgroundColor: C.surface,
@@ -1376,12 +1525,101 @@ const st = StyleSheet.create({
   vouchBtn: {
     flexDirection: "row",
     alignItems: "center",
+    justifyContent: "center",
     gap: 5,
     paddingHorizontal: 14,
-    paddingVertical: 8,
+    paddingVertical: 10,
     borderRadius: 10,
   },
   vouchBtnText: { fontSize: 13, fontWeight: "800" },
+  vouchSection: {
+    marginHorizontal: S.screenPadding,
+    marginTop: 16,
+    padding: 14,
+    borderRadius: 16,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border,
+    gap: 12,
+  },
+  vouchSectionHeader: { flexDirection: "row", alignItems: "center", gap: 6 },
+  vouchSectionTitle: { color: C.textPrimary, fontSize: 15, fontWeight: "900", flex: 1 },
+  vouchSectionCount: { color: C.textMuted, fontSize: 13, fontWeight: "700" },
+  vouchItem: { flexDirection: "row", gap: 10, alignItems: "flex-start" },
+  vouchItemAvatar: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: C.elevated,
+  },
+  vouchItemAvatarEmpty: {
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: C.border,
+  },
+  vouchItemBody: { flex: 1, gap: 3 },
+  vouchItemNameRow: { flexDirection: "row", alignItems: "center", gap: 6 },
+  vouchItemName: { color: C.textPrimary, fontSize: 13, fontWeight: "800" },
+  vouchFollowTag: {
+    backgroundColor: C.elevated,
+    borderRadius: 999,
+    paddingHorizontal: 7,
+    paddingVertical: 1,
+  },
+  vouchFollowTagText: { color: C.textSecondary, fontSize: 9, fontWeight: "800" },
+  vouchItemNote: {
+    color: C.textSecondary,
+    fontSize: 13,
+    fontWeight: "500",
+    lineHeight: 18,
+  },
+  vouchSeeAll: {
+    fontSize: 12,
+    fontWeight: "800",
+  },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.6)",
+    justifyContent: "center",
+    paddingHorizontal: 24,
+  },
+  vouchModal: {
+    backgroundColor: C.surface,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: C.border,
+    padding: 18,
+    gap: 10,
+  },
+  vouchModalHeader: { flexDirection: "row", alignItems: "center", gap: 8 },
+  vouchModalTitle: { color: C.textPrimary, fontSize: 16, fontWeight: "900", flex: 1 },
+  vouchModalSub: { color: C.textSecondary, fontSize: 12, fontWeight: "500" },
+  vouchModalInput: {
+    backgroundColor: C.elevated,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: C.border,
+    padding: 12,
+    color: C.textPrimary,
+    fontSize: 14,
+    minHeight: 96,
+    textAlignVertical: "top",
+  },
+  vouchModalCount: { color: C.textMuted, fontSize: 11, fontWeight: "600", textAlign: "right" },
+  vouchModalActions: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 2 },
+  vouchRemoveBtn: { paddingHorizontal: 12, paddingVertical: 9 },
+  vouchRemoveText: { color: C.danger, fontSize: 13, fontWeight: "700" },
+  vouchCancelBtn: { paddingHorizontal: 14, paddingVertical: 9 },
+  vouchCancelText: { color: C.textMuted, fontSize: 13, fontWeight: "700" },
+  vouchSubmitBtn: {
+    paddingHorizontal: 18,
+    paddingVertical: 9,
+    borderRadius: 10,
+    minWidth: 96,
+    alignItems: "center",
+  },
+  vouchSubmitText: { color: "#fff", fontSize: 13, fontWeight: "800" },
   reviewPhotos: { gap: 8, paddingTop: 10 },
   reviewPhoto: {
     width: 72,

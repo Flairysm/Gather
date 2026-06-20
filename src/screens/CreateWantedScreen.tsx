@@ -19,11 +19,11 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { C } from "../theme";
 import { cf } from "../styles/createForm.styles";
-import { MARKET_FILTERS } from "../data/market";
+import { MARKET_FILTERS, formatBudget } from "../data/market";
 import { supabase } from "../lib/supabase";
 import { requireNetwork } from "../lib/network";
-import GradeConditionPicker from "../components/GradeConditionPicker";
-import { formatGradeCombined } from "../data/grading";
+import MultiGradePicker from "../components/MultiGradePicker";
+import { formatGradesList, type WantedGrade } from "../data/grading";
 
 const CATEGORIES = MARKET_FILTERS.filter((f) => f !== "All");
 
@@ -38,11 +38,17 @@ export default function CreateWantedScreen({ onBack }: Props) {
   const [cardName, setCardName] = useState("");
   const [edition, setEdition] = useState("");
   const [category, setCategory] = useState("");
-  const [gradingCompany, setGradingCompany] = useState<string | null>(null);
-  const [gradeValue, setGradeValue] = useState<string | null>(null);
+  const [grades, setGrades] = useState<WantedGrade[]>([]);
   const [offerPrice, setOfferPrice] = useState("");
+  const [offerPriceMax, setOfferPriceMax] = useState("");
   const [description, setDescription] = useState("");
   const [durationDays, setDurationDays] = useState(14);
+
+  const budgetMinNum = parseFloat(offerPrice.replace(/(RM|\$|,)/gi, ""));
+  const budgetMaxNum = parseFloat(offerPriceMax.replace(/(RM|\$|,)/gi, ""));
+  const budgetPreview = !isNaN(budgetMinNum)
+    ? formatBudget(budgetMinNum, !isNaN(budgetMaxNum) ? budgetMaxNum : null)
+    : "—";
 
   const stepTitles = ["Reference Image", "Card Details", "Set Budget"];
 
@@ -119,8 +125,24 @@ export default function CreateWantedScreen({ onBack }: Props) {
       const numericPrice = parseFloat(offerPrice.replace(/(RM|\$|,)/gi, ""));
       if (isNaN(numericPrice) || numericPrice <= 0) {
         setSubmitting(false);
-        Alert.alert("Error", "Please enter a valid offer price.");
+        Alert.alert("Error", "Please enter a valid budget.");
         return;
+      }
+
+      const maxRaw = offerPriceMax.trim();
+      let numericPriceMax: number | null = null;
+      if (maxRaw.length > 0) {
+        numericPriceMax = parseFloat(maxRaw.replace(/(RM|\$|,)/gi, ""));
+        if (isNaN(numericPriceMax) || numericPriceMax <= 0) {
+          setSubmitting(false);
+          Alert.alert("Error", "Please enter a valid maximum budget.");
+          return;
+        }
+        if (numericPriceMax < numericPrice) {
+          setSubmitting(false);
+          Alert.alert("Error", "Maximum budget must be greater than the minimum.");
+          return;
+        }
       }
 
       let imageUrl: string | null = null;
@@ -159,14 +181,17 @@ export default function CreateWantedScreen({ onBack }: Props) {
         Date.now() + durationDays * 24 * 60 * 60 * 1000,
       ).toISOString();
 
+      const primaryGrade = grades[0] ?? null;
       const { error } = await supabase.from("wanted_posts").insert({
         buyer_id: user.id,
         card_name: cardName.trim(),
         edition: edition.trim() || null,
-        grade_wanted: formatGradeCombined(gradingCompany, gradeValue),
-        grading_company_wanted: gradingCompany,
-        grade_value_wanted: gradeValue,
+        grade_wanted: formatGradesList(grades),
+        grading_company_wanted: primaryGrade?.company ?? null,
+        grade_value_wanted: primaryGrade?.value ?? null,
+        grades_wanted: grades,
         offer_price: numericPrice,
+        offer_price_max: numericPriceMax,
         category,
         description: description.trim() || null,
         image_url: imageUrl,
@@ -324,15 +349,7 @@ export default function CreateWantedScreen({ onBack }: Props) {
                 ))}
               </View>
 
-              <GradeConditionPicker
-                gradingCompany={gradingCompany}
-                gradeValue={gradeValue}
-                condition={null}
-                onChangeGradingCompany={setGradingCompany}
-                onChangeGradeValue={setGradeValue}
-                onChangeCondition={() => {}}
-                mode="grade-only"
-              />
+              <MultiGradePicker value={grades} onChange={setGrades} />
             </>
           )}
 
@@ -344,17 +361,39 @@ export default function CreateWantedScreen({ onBack }: Props) {
                 How much are you willing to pay?
               </Text>
 
-              <Text style={cf.fieldLabel}>Offer Price *</Text>
-              <View style={cf.priceInputRow}>
-                <Text style={cf.dollarSign}>RM</Text>
-                <TextInput
-                  style={cf.priceInput}
-                  value={offerPrice}
-                  onChangeText={setOfferPrice}
-                  placeholder="0.00"
-                  placeholderTextColor={C.textMuted}
-                  keyboardType="numeric"
-                />
+              <Text style={cf.fieldLabel}>Budget Range *</Text>
+              <Text style={cf.sectionSub}>
+                Set a minimum, and an optional maximum if you're flexible.
+              </Text>
+              <View style={{ flexDirection: "row", gap: 10 }}>
+                <View style={{ flex: 1 }}>
+                  <Text style={cf.priceRangeCaption}>Min</Text>
+                  <View style={cf.priceInputRow}>
+                    <Text style={cf.dollarSign}>RM</Text>
+                    <TextInput
+                      style={cf.priceInput}
+                      value={offerPrice}
+                      onChangeText={setOfferPrice}
+                      placeholder="0"
+                      placeholderTextColor={C.textMuted}
+                      keyboardType="numeric"
+                    />
+                  </View>
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={cf.priceRangeCaption}>Max (optional)</Text>
+                  <View style={cf.priceInputRow}>
+                    <Text style={cf.dollarSign}>RM</Text>
+                    <TextInput
+                      style={cf.priceInput}
+                      value={offerPriceMax}
+                      onChangeText={setOfferPriceMax}
+                      placeholder="—"
+                      placeholderTextColor={C.textMuted}
+                      keyboardType="numeric"
+                    />
+                  </View>
+                </View>
               </View>
 
               <Text style={cf.fieldLabel}>Bounty Duration</Text>
@@ -421,9 +460,9 @@ export default function CreateWantedScreen({ onBack }: Props) {
                   <Text style={cf.reviewValue}>{category || "—"}</Text>
                 </View>
                 <View style={cf.reviewRow}>
-                  <Text style={cf.reviewLabel}>Grade Wanted</Text>
-                  <Text style={cf.reviewValue}>
-                    {formatGradeCombined(gradingCompany, gradeValue) || "—"}
+                  <Text style={cf.reviewLabel}>Grades Wanted</Text>
+                  <Text style={cf.reviewValue} numberOfLines={2}>
+                    {formatGradesList(grades) || "Any"}
                   </Text>
                 </View>
                 <View style={cf.reviewRow}>
@@ -439,9 +478,7 @@ export default function CreateWantedScreen({ onBack }: Props) {
                       { color: C.live, fontSize: 18, fontWeight: "900" },
                     ]}
                   >
-                    {offerPrice
-                      ? `RM${offerPrice.replace(/^(RM|\$)/i, "")}`
-                      : "—"}
+                    {offerPrice ? budgetPreview : "—"}
                   </Text>
                 </View>
               </View>

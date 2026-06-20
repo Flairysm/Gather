@@ -49,6 +49,7 @@ export type WantedShareMessage = BaseMessage & {
     id: string;
     card_name: string;
     offer_price: number;
+    offer_price_max: number | null;
     image: string | null;
   };
 };
@@ -174,6 +175,10 @@ function dbRowToMessage(row: any, myId: string): Message {
         id: row._shared_wanted.id,
         card_name: row._shared_wanted.card_name,
         offer_price: Number(row._shared_wanted.offer_price),
+        offer_price_max:
+          row._shared_wanted.offer_price_max != null
+            ? Number(row._shared_wanted.offer_price_max)
+            : null,
         image: row._shared_wanted.image_url ?? null,
       },
     };
@@ -509,7 +514,7 @@ export async function loadMessages(
   if (allWantedIds.length > 0) {
     const { data: wanted } = await supabase
       .from("wanted_posts")
-      .select("id, card_name, offer_price, image_url")
+      .select("id, card_name, offer_price, offer_price_max, image_url")
       .in("id", allWantedIds);
     for (const w of wanted ?? []) wantedMap[w.id] = w;
   }
@@ -787,7 +792,7 @@ export function subscribeToMessages(
         if (row.kind === "wanted_share" && row.shared_wanted_id) {
           const { data: wanted } = await supabase
             .from("wanted_posts")
-            .select("id, card_name, offer_price, image_url")
+            .select("id, card_name, offer_price, offer_price_max, image_url")
             .eq("id", row.shared_wanted_id)
             .maybeSingle();
           if (wanted) row._shared_wanted = wanted;

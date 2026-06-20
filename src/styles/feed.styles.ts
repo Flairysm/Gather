@@ -252,12 +252,12 @@ export const feed = StyleSheet.create({
     flexDirection: "row",
     gap: 10,
     paddingHorizontal: S.screenPadding,
-    paddingVertical: 12,
+    paddingVertical: 10,
   },
-  // Separator between top-level comment threads (not between every row).
+  // Small breathing room above each top-level comment thread (no divider —
+  // Instagram-style clean list; replies are distinguished by indentation).
   commentThreadTop: {
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: C.border,
+    marginTop: 4,
   },
   commentAvatar: {
     width: 34,
@@ -268,9 +268,14 @@ export const feed = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  commentAvatarSmall: { width: 28, height: 28, borderRadius: 14 },
-  commentBody: { flex: 1, gap: 3 },
-  commentText: { color: C.textPrimary, fontSize: 14, lineHeight: 20 },
+  commentAvatarSmall: { width: 26, height: 26, borderRadius: 13 },
+  commentBody: { flex: 1, gap: 2 },
+  commentText: { color: C.textPrimary, fontSize: 14, lineHeight: 19 },
+  authorTag: {
+    color: C.accent,
+    fontSize: 11.5,
+    fontWeight: "700",
+  },
 
   commentBar: {
     flexDirection: "row",
@@ -301,22 +306,24 @@ export const feed = StyleSheet.create({
   },
   commentSendDisabled: { backgroundColor: C.muted },
 
+  // Comment author name + meta line (Instagram-style).
+  commentAuthorName: { color: C.textPrimary, fontWeight: "700", fontSize: 13.5 },
+  commentMetaRow: { flexDirection: "row", alignItems: "center", gap: 14, marginTop: 4 },
+  commentMetaText: { color: C.textMuted, fontSize: 12 },
+  commentMetaAction: { color: C.textSecondary, fontSize: 12, fontWeight: "700" },
+
   // ── Threaded replies ──
+  // Indented to sit under the parent's text; no divider bar (cleaner, IG-like).
   commentReplyIndent: {
-    marginLeft: 32,
-    borderLeftWidth: 2,
-    borderLeftColor: C.border,
-    paddingLeft: 12,
-    paddingVertical: 9,
+    marginLeft: 30,
+    paddingVertical: 7,
   },
-  replyParentLabel: { color: C.textMuted, fontSize: 11, marginBottom: 1 },
-  commentActionsRow: { flexDirection: "row", alignItems: "center", gap: 16, marginTop: 4 },
-  replyBtnText: { color: C.textSecondary, fontSize: 12, fontWeight: "700" },
+  replyParentLabel: { color: C.textMuted, fontSize: 11.5, marginBottom: 2 },
   commentLikeCol: {
     alignItems: "center",
     justifyContent: "flex-start",
-    paddingTop: 1,
-    minWidth: 26,
+    paddingTop: 2,
+    minWidth: 24,
     gap: 2,
   },
   commentLikeCount: {
@@ -329,14 +336,12 @@ export const feed = StyleSheet.create({
   repliesToggle: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
-    marginLeft: 32,
-    borderLeftWidth: 2,
-    borderLeftColor: C.border,
-    paddingLeft: 12,
+    gap: 10,
+    marginLeft: 30 + 26 + 10,
     paddingRight: S.screenPadding,
-    paddingVertical: 8,
+    paddingVertical: 6,
   },
+  repliesToggleLine: { width: 22, height: StyleSheet.hairlineWidth, backgroundColor: C.border },
   repliesToggleText: { color: C.textSecondary, fontSize: 12.5, fontWeight: "700" },
   replyingChip: {
     flexDirection: "row",

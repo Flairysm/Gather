@@ -18,7 +18,7 @@ import { supabase } from "../lib/supabase";
 import { useReconnect } from "../hooks/useReconnect";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import type { Listing, WantedPost } from "../data/market";
-import { formatListingPrice } from "../data/market";
+import { formatBudget, formatListingPrice } from "../data/market";
 import ErrorState from "../components/ErrorState";
 import EmptyState from "../components/EmptyState";
 import ScreenHeader from "../components/ScreenHeader";
@@ -112,7 +112,7 @@ export default function MyBookmarksScreen({ onBack }: Props) {
         ? supabase
             .from("wanted_posts")
             .select(
-              "id, buyer_id, card_name, edition, grade_wanted, offer_price, category, description, image_url, views, status, created_at, buyer:profiles!buyer_id(username, display_name, rating, total_purchases, avatar_url)"
+              "id, buyer_id, card_name, edition, grade_wanted, offer_price, offer_price_max, category, description, image_url, views, status, created_at, buyer:profiles!buyer_id(username, display_name, rating, total_purchases, avatar_url)"
             )
             .in("id", wantedIds)
         : Promise.resolve({ data: [] }),
@@ -349,7 +349,7 @@ export default function MyBookmarksScreen({ onBack }: Props) {
           <Text style={st.rowSub} numberOfLines={1}>
             {removed ? "This post is no longer available" : (w.edition ?? w.category)}
           </Text>
-          {!removed && <Text style={st.rowPrice}>{formatListingPrice(w.offer_price)}</Text>}
+          {!removed && <Text style={st.rowPrice}>{formatBudget(w.offer_price, w.offer_price_max)}</Text>}
         </View>
         {removed ? (
           <Pressable
