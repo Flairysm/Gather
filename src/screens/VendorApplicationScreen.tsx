@@ -1,6 +1,10 @@
 import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
+  Image,
+  KeyboardAvoidingView,
+  Platform,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -10,13 +14,16 @@ import {
   View,
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
-import { Feather, Ionicons } from "@expo/vector-icons";
+import * as ImagePicker from "expo-image-picker";
+import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { C, S } from "../theme";
 import { useUser } from "../data/user";
 import { supabase } from "../lib/supabase";
 import { requireNetwork } from "../lib/network";
+import { useAppNavigation } from "../navigation/NavigationContext";
+import ScreenHeader from "../components/ScreenHeader";
 
 type Props = { onBack: () => void };
 
@@ -24,12 +31,24 @@ const CATEGORIES = ["Pokémon", "MTG", "Sports", "YGO", "Other"];
 
 export default function VendorApplicationScreen({ onBack }: Props) {
   const { vendorStatus, setVendorStatus } = useUser();
+  const { push } = useAppNavigation();
   const insets = useSafeAreaInsets();
 
   const [storeName, setStoreName] = useState("");
   const [description, setDescription] = useState("");
   const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
   const [experience, setExperience] = useState("");
+  // ── Verification (KYC) ──
+  const [fullName, setFullName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [icNumber, setIcNumber] = useState("");
+  const [icFrontUri, setIcFrontUri] = useState<string | null>(null); // newly picked local image
+  const [selfieUri, setSelfieUri] = useState<string | null>(null);
+  const [icFrontOnFile, setIcFrontOnFile] = useState(false); // already uploaded on a prior submit
+  const [selfieOnFile, setSelfieOnFile] = useState(false);
+  const [existingIcPath, setExistingIcPath] = useState<string | null>(null);
+  const [existingSelfiePath, setExistingSelfiePath] = useState<string | null>(null);
+
   const [submitted, setSubmitted] = useState(vendorStatus === "pending");
   const [submitting, setSubmitting] = useState(false);
   const [loadingExisting, setLoadingExisting] = useState(true);
@@ -42,10 +61,48 @@ export default function VendorApplicationScreen({ onBack }: Props) {
     );
   }
 
-  const canSubmit =
-    storeName.trim().length > 0 &&
-    description.trim().length > 0 &&
-    selectedCategories.length > 0;
+  async function captureFor(target: "ic" | "selfie") {
+    const setter = target === "ic" ? setIcFrontUri : setSelfieUri;
+    const launchCamera = async () => {
+      const perm = await ImagePicker.requestCameraPermissionsAsync();
+      if (!perm.granted) {
+        Alert.alert(
+          "Camera Permission",
+          target === "ic"
+            ? "Allow camera access to take a photo of your IC."
+            : "Allow camera access to take a selfie holding your IC.",
+        );
+        return;
+      }
+      const res = await ImagePicker.launchCameraAsync({ quality: 0.7, allowsEditing: true });
+      if (!res.canceled && res.assets[0]) setter(res.assets[0].uri);
+    };
+    const launchLibrary = async () => {
+      const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], quality: 0.7, allowsEditing: true });
+      if (!res.canceled && res.assets[0]) setter(res.assets[0].uri);
+    };
+    Alert.alert(
+      target === "ic" ? "IC Photo" : "Selfie with IC",
+      "Take a clear photo or choose one from your library.",
+      [
+        { text: "Take Photo", onPress: launchCamera },
+        { text: "Choose from Library", onPress: launchLibrary },
+        { text: "Cancel", style: "cancel" },
+      ],
+    );
+  }
+
+  const missingFields = [
+    storeName.trim().length === 0 && "Store name",
+    description.trim().length === 0 && "About your store",
+    selectedCategories.length === 0 && "At least one card category",
+    fullName.trim().length === 0 && "Full name",
+    phone.trim().length === 0 && "Phone number",
+    icNumber.trim().length === 0 && "IC / NRIC number",
+    !icFrontUri && !icFrontOnFile && "IC photo (front)",
+  ].filter((v): v is string => typeof v === "string");
+
+  const canSubmit = missingFields.length === 0;
 
   useEffect(() => {
     let mounted = true;
@@ -63,7 +120,7 @@ export default function VendorApplicationScreen({ onBack }: Props) {
 
       const { data, error } = await supabase
         .from("vendor_applications")
-        .select("store_name, description, categories, status, notes, experience")
+        .select("store_name, description, categories, status, notes, experience, full_name, phone, ic_number, ic_front_path, selfie_path")
         .eq("profile_id", user.id)
         .maybeSingle();
 
@@ -80,6 +137,13 @@ export default function VendorApplicationScreen({ onBack }: Props) {
         setDescription(data.description ?? "");
         setSelectedCategories(data.categories ?? []);
         setExperience((data as any).experience ?? "");
+        setFullName((data as any).full_name ?? "");
+        setPhone((data as any).phone ?? "");
+        setIcNumber((data as any).ic_number ?? "");
+        setExistingIcPath((data as any).ic_front_path ?? null);
+        setExistingSelfiePath((data as any).selfie_path ?? null);
+        setIcFrontOnFile(!!(data as any).ic_front_path);
+        setSelfieOnFile(!!(data as any).selfie_path);
         setReviewNotes(data.notes ?? null);
         if (data.status === "approved") setVendorStatus("approved");
         if (data.status === "pending") {
@@ -117,12 +181,47 @@ export default function VendorApplicationScreen({ onBack }: Props) {
       return;
     }
 
+    async function uploadKyc(localUri: string, kind: "ic-front" | "selfie") {
+      const ext = (localUri.split(".").pop() || "jpg").toLowerCase().split("?")[0];
+      const contentType = ext === "png" ? "image/png" : ext === "webp" ? "image/webp" : "image/jpeg";
+      const path = `${user!.id}/${kind}-${Date.now()}.${ext}`;
+      const resp = await fetch(localUri);
+      const blob = await resp.blob();
+      const { error: upErr } = await supabase.storage
+        .from("vendor-kyc")
+        .upload(path, blob, { contentType, upsert: true });
+      if (upErr) throw upErr;
+      return path;
+    }
+
+    let icPath = existingIcPath;
+    let selfiePath = existingSelfiePath;
+    try {
+      if (icFrontUri) icPath = await uploadKyc(icFrontUri, "ic-front");
+    } catch (e: any) {
+      setSubmitting(false);
+      setFormError(e?.message ?? "Failed to upload your IC photo. Please try again.");
+      return;
+    }
+    try {
+      if (selfieUri) selfiePath = await uploadKyc(selfieUri, "selfie");
+    } catch (e: any) {
+      setSubmitting(false);
+      setFormError(e?.message ?? "Failed to upload your selfie. Please try again.");
+      return;
+    }
+
     const payload = {
       profile_id: user.id,
       store_name: storeName.trim(),
       description: description.trim(),
       categories: selectedCategories,
       experience: experience.trim() || null,
+      full_name: fullName.trim(),
+      phone: phone.trim(),
+      ic_number: icNumber.trim(),
+      ic_front_path: icPath,
+      selfie_path: selfiePath,
       status: "pending" as const,
       updated_at: new Date().toISOString(),
     };
@@ -146,6 +245,7 @@ export default function VendorApplicationScreen({ onBack }: Props) {
     return (
       <SafeAreaView style={st.safe}>
         <StatusBar style="light" />
+        <ScreenHeader title="Become a Vendor" onBack={onBack} />
         <View style={st.loadingWrap}>
           <ActivityIndicator size="large" color={C.accent} />
         </View>
@@ -157,13 +257,7 @@ export default function VendorApplicationScreen({ onBack }: Props) {
     return (
       <SafeAreaView style={st.safe}>
         <StatusBar style="light" />
-        <View style={st.header}>
-          <Pressable style={st.backBtn} onPress={onBack}>
-            <Feather name="arrow-left" size={20} color={C.textPrimary} />
-          </Pressable>
-          <Text style={st.headerTitle}>Vendor Application</Text>
-          <View style={{ width: 36 }} />
-        </View>
+        <ScreenHeader title="Vendor Application" onBack={onBack} />
         <View style={st.pendingState}>
           <View style={[st.pendingCircle, { backgroundColor: C.success }]}>
             <Ionicons name="checkmark" size={36} color={C.textHero} />
@@ -175,7 +269,7 @@ export default function VendorApplicationScreen({ onBack }: Props) {
           </Text>
           <Pressable
             style={[st.doneBtn, { marginBottom: Math.max(insets.bottom, 14) }]}
-            onPress={onBack}
+            onPress={() => push({ type: "VENDOR_HUB" })}
           >
             <Text style={st.doneBtnText}>Go to Vendor Hub</Text>
           </Pressable>
@@ -188,13 +282,7 @@ export default function VendorApplicationScreen({ onBack }: Props) {
     return (
       <SafeAreaView style={st.safe}>
         <StatusBar style="light" />
-        <View style={st.header}>
-          <Pressable style={st.backBtn} onPress={onBack}>
-            <Feather name="arrow-left" size={20} color={C.textPrimary} />
-          </Pressable>
-          <Text style={st.headerTitle}>Vendor Application</Text>
-          <View style={{ width: 36 }} />
-        </View>
+        <ScreenHeader title="Vendor Application" onBack={onBack} />
         <View style={st.pendingState}>
           <View style={st.pendingCircle}>
             <Ionicons name="time" size={36} color={C.textHero} />
@@ -227,17 +315,18 @@ export default function VendorApplicationScreen({ onBack }: Props) {
     <SafeAreaView style={st.safe}>
       <StatusBar style="light" />
 
-      <View style={st.header}>
-        <Pressable style={st.backBtn} onPress={onBack}>
-          <Feather name="arrow-left" size={20} color={C.textPrimary} />
-        </Pressable>
-        <Text style={st.headerTitle}>Become a Vendor</Text>
-        <View style={{ width: 36 }} />
-      </View>
+      <ScreenHeader title="Become a Vendor" onBack={onBack} />
 
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        keyboardVerticalOffset={Platform.OS === "ios" ? 8 : 0}
+      >
       <ScrollView
+        style={{ flex: 1 }}
         showsVerticalScrollIndicator={false}
         contentContainerStyle={st.scroll}
+        keyboardShouldPersistTaps="handled"
       >
         {/* ── Intro ── */}
         {vendorStatus === "rejected" && (
@@ -333,6 +422,79 @@ export default function VendorApplicationScreen({ onBack }: Props) {
           placeholderTextColor={C.textMuted}
         />
 
+        {/* ── Identity Verification ── */}
+        <Text style={[st.sectionTitle, { marginTop: S.xxl }]}>Identity Verification</Text>
+        <Text style={st.fieldHint}>
+          Required to verify sellers and keep buyers safe. Your details are private and
+          only used for verification.
+        </Text>
+
+        <Text style={st.fieldLabel}>Full Name (as on IC) *</Text>
+        <TextInput
+          style={st.textInput}
+          value={fullName}
+          onChangeText={setFullName}
+          placeholder="e.g. Ahmad bin Abdullah"
+          placeholderTextColor={C.textMuted}
+          autoCapitalize="words"
+        />
+
+        <Text style={st.fieldLabel}>Phone Number *</Text>
+        <TextInput
+          style={st.textInput}
+          value={phone}
+          onChangeText={setPhone}
+          placeholder="e.g. 012-345 6789"
+          placeholderTextColor={C.textMuted}
+          keyboardType="phone-pad"
+        />
+
+        <Text style={st.fieldLabel}>IC / NRIC Number *</Text>
+        <TextInput
+          style={st.textInput}
+          value={icNumber}
+          onChangeText={setIcNumber}
+          placeholder="e.g. 990101-14-5678"
+          placeholderTextColor={C.textMuted}
+          keyboardType="numbers-and-punctuation"
+        />
+
+        <Text style={st.fieldLabel}>IC Photo (front) *</Text>
+        <Text style={st.fieldHint}>Snap a clear photo of the front of your IC.</Text>
+        <Pressable style={st.uploadTile} onPress={() => captureFor("ic")}>
+          {icFrontUri ? (
+            <Image source={{ uri: icFrontUri }} style={st.uploadPreview} resizeMode="cover" />
+          ) : icFrontOnFile ? (
+            <View style={st.uploadInner}>
+              <Ionicons name="checkmark-circle" size={26} color={C.success} />
+              <Text style={st.uploadText}>IC on file — tap to replace</Text>
+            </View>
+          ) : (
+            <View style={st.uploadInner}>
+              <Ionicons name="camera" size={26} color={C.textAccent} />
+              <Text style={st.uploadText}>Tap to take IC photo</Text>
+            </View>
+          )}
+        </Pressable>
+
+        <Text style={st.fieldLabel}>Selfie holding your IC</Text>
+        <Text style={st.fieldHint}>Recommended — speeds up verification.</Text>
+        <Pressable style={st.uploadTile} onPress={() => captureFor("selfie")}>
+          {selfieUri ? (
+            <Image source={{ uri: selfieUri }} style={st.uploadPreview} resizeMode="cover" />
+          ) : selfieOnFile ? (
+            <View style={st.uploadInner}>
+              <Ionicons name="checkmark-circle" size={26} color={C.success} />
+              <Text style={st.uploadText}>Selfie on file — tap to replace</Text>
+            </View>
+          ) : (
+            <View style={st.uploadInner}>
+              <Ionicons name="person-circle-outline" size={26} color={C.textAccent} />
+              <Text style={st.uploadText}>Tap to take selfie with IC</Text>
+            </View>
+          )}
+        </Pressable>
+
         {formError && (
           <View style={st.errorBox}>
             <Text style={st.errorText}>{formError}</Text>
@@ -351,6 +513,17 @@ export default function VendorApplicationScreen({ onBack }: Props) {
 
       {/* ── Bottom Bar ── */}
       <View style={[st.bottomBar, { paddingBottom: Math.max(insets.bottom, 14) }]}>
+        {!canSubmit && (
+          <View style={st.checklistBox}>
+            <Text style={st.checklistLabel}>Complete these to submit:</Text>
+            {missingFields.map((f) => (
+              <View key={f} style={st.checklistRow}>
+                <Ionicons name="ellipse-outline" size={13} color={C.textMuted} />
+                <Text style={st.checklistText}>{f}</Text>
+              </View>
+            ))}
+          </View>
+        )}
         <Pressable
           style={[st.submitBtn, !canSubmit && st.submitBtnDisabled]}
           onPress={handleSubmit}
@@ -366,6 +539,7 @@ export default function VendorApplicationScreen({ onBack }: Props) {
           )}
         </Pressable>
       </View>
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
@@ -373,37 +547,10 @@ export default function VendorApplicationScreen({ onBack }: Props) {
 const st = StyleSheet.create({
   safe: { flex: 1, backgroundColor: C.bg },
 
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: S.screenPadding,
-    paddingVertical: S.md,
-    gap: S.md,
-    borderBottomWidth: 1,
-    borderBottomColor: C.border,
-  },
-  backBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: C.elevated,
-    borderWidth: 1,
-    borderColor: C.border,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  headerTitle: {
-    flex: 1,
-    color: C.textPrimary,
-    fontSize: 16,
-    fontWeight: "800",
-    textAlign: "center",
-  },
-
   scroll: {
     paddingHorizontal: S.screenPadding,
     paddingTop: S.xl,
-    paddingBottom: 120,
+    paddingBottom: S.xl,
   },
 
   introCard: {
@@ -484,6 +631,21 @@ const st = StyleSheet.create({
     lineHeight: 20,
   },
 
+  uploadTile: {
+    height: 150,
+    borderRadius: S.radiusSmall,
+    borderWidth: 1,
+    borderColor: C.border,
+    borderStyle: "dashed",
+    backgroundColor: C.surface,
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "hidden",
+  },
+  uploadInner: { alignItems: "center", gap: 8 },
+  uploadText: { color: C.textSecondary, fontSize: 12, fontWeight: "600" },
+  uploadPreview: { width: "100%", height: "100%" },
+
   catRow: {
     flexDirection: "row",
     flexWrap: "wrap",
@@ -524,10 +686,6 @@ const st = StyleSheet.create({
   },
 
   bottomBar: {
-    position: "absolute",
-    bottom: 0,
-    left: 0,
-    right: 0,
     paddingHorizontal: S.screenPadding,
     paddingTop: S.lg,
     backgroundColor: C.bg,
@@ -545,6 +703,26 @@ const st = StyleSheet.create({
   },
   submitBtnDisabled: { opacity: 0.4 },
   submitText: { color: C.textHero, fontSize: 15, fontWeight: "800" },
+
+  checklistBox: {
+    backgroundColor: C.surface,
+    borderRadius: S.radiusSmall,
+    borderWidth: 1,
+    borderColor: C.border,
+    padding: 12,
+    marginBottom: 10,
+    gap: 6,
+  },
+  checklistLabel: {
+    color: C.textSecondary,
+    fontSize: 11,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.3,
+    marginBottom: 2,
+  },
+  checklistRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  checklistText: { color: C.textPrimary, fontSize: 12, fontWeight: "600" },
 
   // ── Pending state ──
   pendingState: {

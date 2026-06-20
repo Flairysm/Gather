@@ -52,22 +52,13 @@ async function computeUnreadNotifications(userId: string): Promise<number> {
 }
 
 async function computePendingShipments(userId: string): Promise<number> {
-  const { data: sellerListings, error: listErr } = await supabase
-    .from("listings")
-    .select("id")
-    .eq("seller_id", userId)
-    .limit(500);
-  if (listErr) {
-    console.warn("Badge: seller listings error:", listErr.message);
-    return 0;
-  }
-  if (!sellerListings || sellerListings.length === 0) return 0;
-
-  const listingIds = sellerListings.map((l: any) => l.id);
+  // Count by order_items.seller_id directly. Joining via listings misses
+  // orders whose listing was since sold/deleted, and auction-origin items
+  // (listing_id points to auction_items, not listings).
   const { count, error } = await supabase
     .from("order_items")
     .select("id", { count: "exact", head: true })
-    .in("listing_id", listingIds)
+    .eq("seller_id", userId)
     .eq("fulfillment_status", "confirmed");
   if (error) console.warn("Badge: pending shipments error:", error.message);
 
@@ -123,6 +114,8 @@ async function computeMyOrdersBadges(userId: string): Promise<{
     const orderId = (row as any).order_id as string;
     if (!orderId) continue;
     const raw = ((row as any).fulfillment_status ?? "") as string;
+    // Orders awaiting card payment aren't real orders yet — don't count them.
+    if (raw === "pending_payment") continue;
     const st = raw === "pending" ? "confirmed" : raw;
     const set = orderStatuses.get(orderId) ?? new Set<string>();
     if (st) set.add(st);

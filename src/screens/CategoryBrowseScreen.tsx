@@ -1,50 +1,24 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
-  Dimensions,
-  Image,
   Pressable,
+  RefreshControl,
   SafeAreaView,
   ScrollView,
   Text,
   TextInput,
   View,
 } from "react-native";
-import { Feather, Ionicons } from "@expo/vector-icons";
+import { StatusBar } from "expo-status-bar";
+import { Feather } from "@expo/vector-icons";
 import { C, S } from "../theme";
 import { supabase } from "../lib/supabase";
 import { useAppNavigation } from "../navigation/NavigationContext";
-import { ALL_CATEGORIES, type CategoryDef } from "../data/categories";
+import { ALL_CATEGORIES } from "../data/categories";
 import ErrorState from "../components/ErrorState";
 import { StyleSheet } from "react-native";
 
-const SCREEN_W = Dimensions.get("window").width;
-const COL_GAP = 8;
-const COLS = 3;
-const CARD_W =
-  (SCREEN_W - S.screenPadding * 2 - COL_GAP * (COLS - 1)) / COLS;
-
 type SortMode = "recommended" | "popular" | "az";
-
-type CatStats = {
-  count: number;
-  image: string | null;
-};
-
-function normalizeImages(value: unknown): string[] {
-  if (Array.isArray(value))
-    return value.filter((v): v is string => typeof v === "string" && !!v);
-  if (typeof value === "string") {
-    try {
-      const parsed = JSON.parse(value);
-      if (Array.isArray(parsed))
-        return parsed.filter((v): v is string => typeof v === "string" && !!v);
-    } catch {
-      /* no-op */
-    }
-  }
-  return [];
-}
 
 export default function CategoryBrowseScreen({
   onBack,
@@ -52,8 +26,9 @@ export default function CategoryBrowseScreen({
   onBack: () => void;
 }) {
   const { push } = useAppNavigation();
-  const [stats, setStats] = useState<Record<string, CatStats>>({});
+  const [stats, setStats] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState(false);
   const [sortMode, setSortMode] = useState<SortMode>("recommended");
   const [search, setSearch] = useState("");
@@ -63,10 +38,9 @@ export default function CategoryBrowseScreen({
     setLoadError(false);
     const { data, error } = await supabase
       .from("listings")
-      .select("category, images")
+      .select("category")
       .eq("status", "active")
-      .order("created_at", { ascending: false })
-      .limit(500);
+      .limit(1000);
 
     if (error) {
       console.warn("CategoryBrowse load error:", error.message);
@@ -76,18 +50,11 @@ export default function CategoryBrowseScreen({
     }
 
     if (data) {
-      const map: Record<string, CatStats> = {};
-      for (const cat of ALL_CATEGORIES) {
-        map[cat.key] = { count: 0, image: null };
-      }
+      const map: Record<string, number> = {};
+      for (const cat of ALL_CATEGORIES) map[cat.key] = 0;
       for (const row of data as any[]) {
         const cat = row.category as string;
-        if (!map[cat]) map[cat] = { count: 0, image: null };
-        map[cat].count++;
-        if (!map[cat].image) {
-          const imgs = normalizeImages(row.images);
-          if (imgs.length > 0) map[cat].image = imgs[0];
-        }
+        map[cat] = (map[cat] ?? 0) + 1;
       }
       setStats(map);
     }
@@ -98,13 +65,19 @@ export default function CategoryBrowseScreen({
     load();
   }, [load]);
 
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await load();
+    setRefreshing(false);
+  }, [load]);
+
   const sorted = useMemo(() => {
     const q = search.trim().toLowerCase();
     let cats = [...ALL_CATEGORIES];
     if (q) cats = cats.filter((c) => c.label.toLowerCase().includes(q) || c.key.toLowerCase().includes(q));
 
     if (sortMode === "popular") {
-      cats.sort((a, b) => (stats[b.key]?.count ?? 0) - (stats[a.key]?.count ?? 0));
+      cats.sort((a, b) => (stats[b.key] ?? 0) - (stats[a.key] ?? 0));
     } else if (sortMode === "az") {
       cats.sort((a, b) => a.label.localeCompare(b.label));
     }
@@ -118,6 +91,7 @@ export default function CategoryBrowseScreen({
 
   return (
     <SafeAreaView style={st.safe}>
+      <StatusBar style="light" />
       {/* Header */}
       <View style={st.header}>
         <Pressable onPress={onBack} style={st.backBtn}>
@@ -145,7 +119,7 @@ export default function CategoryBrowseScreen({
       {/* Sort Pills */}
       <View style={st.sortRow}>
         {([
-          { key: "recommended" as SortMode, label: "Recommended" },
+          { key: "recommended" as SortMode, label: "Default" },
           { key: "popular" as SortMode, label: "Popular" },
           { key: "az" as SortMode, label: "A-Z" },
         ]).map((s) => (
@@ -178,44 +152,42 @@ export default function CategoryBrowseScreen({
       ) : (
         <ScrollView
           showsVerticalScrollIndicator={false}
-          contentContainerStyle={st.grid}
+          contentContainerStyle={st.list}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor={C.accent}
+            />
+          }
         >
           {sorted.map((cat) => {
-            const s = stats[cat.key];
-            const count = s?.count ?? 0;
+            const count = stats[cat.key] ?? 0;
+            const disabled = count === 0;
             return (
               <Pressable
                 key={cat.key}
-                style={st.card}
+                style={[st.row, disabled && st.rowDisabled]}
                 onPress={() =>
                   push({ type: "CATEGORY_LISTINGS", category: cat.key })
                 }
+                disabled={disabled}
               >
-                <View style={st.cardImgWrap}>
-                  {s?.image ? (
-                    <Image source={{ uri: s.image }} style={st.cardImg} />
-                  ) : (
-                    <View style={st.cardImgEmpty}>
-                      <Ionicons name={cat.icon} size={28} color={cat.color} />
-                    </View>
-                  )}
-                </View>
-                <Text style={st.cardLabel} numberOfLines={2}>
-                  {cat.label}
-                </Text>
-                <View style={st.countRow}>
-                  <View style={st.countDot} />
-                  <Text style={st.countText}>
+                <View style={{ flex: 1 }}>
+                  <Text style={st.rowLabel}>{cat.label}</Text>
+                  <Text style={st.rowCount}>
                     {formatCount(count)} Listing{count !== 1 ? "s" : ""}
                   </Text>
                 </View>
+                {!disabled && (
+                  <Feather name="chevron-right" size={16} color={C.textMuted} />
+                )}
               </Pressable>
             );
           })}
 
           {sorted.length === 0 && (
             <View style={st.emptyWrap}>
-              <Ionicons name="search-outline" size={28} color={C.textMuted} />
               <Text style={st.emptyText}>No matching categories</Text>
             </View>
           )}
@@ -298,59 +270,30 @@ const st = StyleSheet.create({
     justifyContent: "center",
   },
 
-  grid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
+  list: {
     paddingHorizontal: S.screenPadding,
-    gap: COL_GAP,
     paddingBottom: 40,
   },
-  card: {
-    width: CARD_W,
-    marginBottom: 6,
-  },
-  cardImgWrap: {
-    width: "100%",
-    aspectRatio: 1,
-    borderRadius: 14,
-    backgroundColor: C.surface,
-    borderWidth: 1,
-    borderColor: C.border,
-    overflow: "hidden",
-    marginBottom: 6,
-  },
-  cardImg: {
-    width: "100%",
-    height: "100%",
-  },
-  cardImgEmpty: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: C.elevated,
-  },
-  cardLabel: {
-    color: C.textPrimary,
-    fontSize: 12,
-    fontWeight: "800",
-    lineHeight: 15,
-  },
-  countRow: {
+  row: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 4,
-    marginTop: 3,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: C.border,
   },
-  countDot: {
-    width: 7,
-    height: 7,
-    borderRadius: 3.5,
-    backgroundColor: "#EF4444",
+  rowDisabled: {
+    opacity: 0.4,
   },
-  countText: {
-    color: C.textMuted,
-    fontSize: 10,
+  rowLabel: {
+    color: C.textPrimary,
+    fontSize: 16,
     fontWeight: "700",
+  },
+  rowCount: {
+    color: C.textMuted,
+    fontSize: 12,
+    fontWeight: "600",
+    marginTop: 3,
   },
 
   emptyWrap: {

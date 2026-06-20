@@ -26,7 +26,6 @@ import { useFeedPreferences } from "../data/feedPreferences";
 import { ALL_CATEGORIES } from "../data/categories";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "../lib/supabase";
-import { fetchLiveStreams, type LiveStream } from "../data/live";
 import { useBadgeContext } from "../hooks/useBadgeCounts";
 
 type FeaturedBanner = {
@@ -62,28 +61,6 @@ type VendorStoreRow = {
   }[];
 };
 
-function formatViewers(n: number): string {
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
-  return String(n);
-}
-
-function timeSince(started: string): string {
-  const mins = Math.floor((Date.now() - new Date(started).getTime()) / 60000);
-  if (mins < 1) return "Just started";
-  if (mins < 60) return `${mins}m`;
-  const hrs = Math.floor(mins / 60);
-  return `${hrs}h ${mins % 60}m`;
-}
-
-function hashString(value: string): number {
-  let h = 0;
-  for (let i = 0; i < value.length; i += 1) {
-    h = (h << 5) - h + value.charCodeAt(i);
-    h |= 0;
-  }
-  return Math.abs(h);
-}
-
 function resolveConditionLabel(
   condition: string | null | undefined,
   grade: string | null | undefined,
@@ -106,8 +83,6 @@ export default function HomeScreen() {
   const { selectedCategories } = useFeedPreferences();
   const [banner, setBanner] = useState<FeaturedBanner | null>(null);
   const [vendorStores, setVendorStores] = useState<VendorStoreRow[]>([]);
-  const [liveStreams, setLiveStreams] = useState<LiveStream[]>([]);
-  const [liveProfileIds, setLiveProfileIds] = useState<Set<string>>(new Set());
   const [searchQuery, setSearchQuery] = useState("");
   const [activeFilter, setActiveFilter] = useState("For You");
   const [refreshing, setRefreshing] = useState(false);
@@ -145,6 +120,27 @@ export default function HomeScreen() {
   }, []);
 
   const loadVendorStores = useCallback(async (): Promise<boolean> => {
+    const { data: ranked, error: rankError } = await supabase.rpc(
+      "get_ranked_vendor_stores",
+      { p_limit: 12 },
+    );
+
+    if (rankError) {
+      console.warn("get_ranked_vendor_stores failed:", rankError.message);
+      setVendorStores([]);
+      return false;
+    }
+
+    const rankedRows = (ranked as { store_id: string; slot: number }[]) ?? [];
+    const storeIds = rankedRows.map((r) => r.store_id);
+
+    if (storeIds.length === 0) {
+      setVendorStores([]);
+      return true;
+    }
+
+    const slotOrder = new Map(storeIds.map((id, index) => [id, index]));
+
     const { data, error } = await supabase
       .from("vendor_stores")
       .select(`
@@ -154,9 +150,7 @@ export default function HomeScreen() {
           listing:listings(id, card_name, edition, grade, condition, price, quantity, category, images)
         )
       `)
-      .eq("is_active", true)
-      .order("priority", { ascending: true })
-      .limit(10);
+      .in("id", storeIds);
 
     if (error) {
       console.warn("loadVendorStores failed:", error.message);
@@ -165,30 +159,26 @@ export default function HomeScreen() {
     }
     if (data) {
       setVendorStores(
-        (data as any[]).map((store) => ({
-          ...store,
-          display_items: (store.display_items ?? [])
-            .map((di: any) => ({
-              ...di,
-              listing: Array.isArray(di.listing) ? di.listing[0] : di.listing,
-            }))
-            .filter((di: any) => di.listing && (di.listing.quantity ?? 0) > 0)
-            .sort((a: any, b: any) => a.display_order - b.display_order),
-        })),
+        (data as any[])
+          .slice()
+          .sort(
+            (a, b) =>
+              (slotOrder.get(a.id) ?? Number.MAX_SAFE_INTEGER) -
+              (slotOrder.get(b.id) ?? Number.MAX_SAFE_INTEGER),
+          )
+          .map((store) => ({
+            ...store,
+            display_items: (store.display_items ?? [])
+              .map((di: any) => ({
+                ...di,
+                listing: Array.isArray(di.listing) ? di.listing[0] : di.listing,
+              }))
+              .filter((di: any) => di.listing && (di.listing.quantity ?? 0) > 0)
+              .sort((a: any, b: any) => a.display_order - b.display_order),
+          })),
       );
     }
     return true;
-  }, []);
-
-  const loadLiveStreams = useCallback(async (): Promise<boolean> => {
-    try {
-      const streams = await fetchLiveStreams();
-      setLiveStreams(streams);
-      setLiveProfileIds(new Set(streams.map((s) => s.streamer_id)));
-      return true;
-    } catch {
-      return false;
-    }
   }, []);
 
   const [partialError, setPartialError] = useState(false);
@@ -197,12 +187,11 @@ export default function HomeScreen() {
     const results = await Promise.all([
       loadFeaturedBanner(),
       loadVendorStores(),
-      loadLiveStreams(),
     ]);
     const failCount = results.filter((ok) => !ok).length;
     setLoadError(failCount === results.length);
     setPartialError(failCount > 0 && failCount < results.length);
-  }, [loadFeaturedBanner, loadVendorStores, loadLiveStreams]);
+  }, [loadFeaturedBanner, loadVendorStores]);
 
   useEffect(() => {
     loadAll().finally(() => setInitialLoading(false));
@@ -218,12 +207,6 @@ export default function HomeScreen() {
     await new Promise((resolve) => setTimeout(resolve, 700));
     setRefreshing(false);
   }
-
-  const liveStreamByProfileId = useMemo(() => {
-    const map = new Map<string, LiveStream>();
-    for (const s of liveStreams) map.set(s.streamer_id, s);
-    return map;
-  }, [liveStreams]);
 
   const normalizedQuery = searchQuery.trim().toLowerCase();
 
@@ -295,7 +278,7 @@ export default function HomeScreen() {
               )}
             </View>
             <View style={h.headerActions}>
-              <Pressable style={h.iconBtn} onPress={() => push({ type: "CART" })}>
+              <Pressable style={h.iconBtn} onPress={() => push({ type: "CART" })} hitSlop={8}>
                 <Feather name="shopping-cart" size={S.iconSize.lg} color={C.textSearch} />
                 {items.length > 0 && (
                   <View style={h.cartBadge}>
@@ -303,7 +286,7 @@ export default function HomeScreen() {
                   </View>
                 )}
               </Pressable>
-              <Pressable style={h.iconBtn} onPress={() => push({ type: "MESSAGES" })}>
+              <Pressable style={h.iconBtn} onPress={() => push({ type: "MESSAGES" })} hitSlop={8}>
                 <Feather name="message-circle" size={S.iconSize.lg} color={C.textSearch} />
                 {counts.unreadChats > 0 && (
                   <View style={h.cartBadge}>
@@ -313,7 +296,7 @@ export default function HomeScreen() {
                   </View>
                 )}
               </Pressable>
-              <Pressable style={h.iconBtn} onPress={() => push({ type: "NOTIFICATIONS_HUB" })}>
+              <Pressable style={h.iconBtn} onPress={() => push({ type: "NOTIFICATIONS_HUB" })} hitSlop={8}>
                 <Ionicons name="notifications-outline" size={S.iconSize.lg} color={C.textSearch} />
                 {counts.unreadNotifications > 0 && (
                   <View style={h.cartBadge}>
@@ -349,40 +332,39 @@ export default function HomeScreen() {
           {refreshing || initialLoading ? (
             <Shimmer width="100%" height={S.heroHeight} borderRadius={S.radiusCard} />
           ) : banner ? (
-            <Pressable
-              onPress={() => {
-                if (banner.target_url) {
-                  const url = banner.target_url;
-                  if (/^https?:\/\//i.test(url)) {
-                    Linking.openURL(url);
-                  } else {
-                    console.warn("Blocked non-http banner URL:", url);
-                  }
-                }
-              }}
-            >
-              <ImageBackground
-                source={{ uri: banner.image_url }}
-                imageStyle={h.heroImg}
-                style={h.hero}
-              >
-                <LinearGradient
-                  colors={["transparent", C.gradientHeroEnd]}
-                  style={h.heroGradient}
+            (() => {
+              const targetUrl =
+                banner.target_url && /^https?:\/\//i.test(banner.target_url)
+                  ? banner.target_url
+                  : null;
+              const heroContent = (
+                <ImageBackground
+                  source={{ uri: banner.image_url }}
+                  imageStyle={h.heroImg}
+                  style={h.hero}
                 >
-                  <Text style={h.heroTitle}>{banner.heading ?? "FEATURED"}</Text>
-                  <Text style={h.heroSub}>
-                    {banner.subheading ??
-                      (banner.target_url ? "Tap to learn more" : "Live promotion")}
-                  </Text>
-                </LinearGradient>
-              </ImageBackground>
-            </Pressable>
+                  <LinearGradient
+                    colors={["transparent", C.gradientHeroEnd]}
+                    style={h.heroGradient}
+                  >
+                    <Text style={h.heroTitle}>{banner.heading ?? "FEATURED"}</Text>
+                    <Text style={h.heroSub}>
+                      {banner.subheading ?? (targetUrl ? "Tap to learn more" : "Live promotion")}
+                    </Text>
+                  </LinearGradient>
+                </ImageBackground>
+              );
+              return targetUrl ? (
+                <Pressable onPress={() => Linking.openURL(targetUrl)}>{heroContent}</Pressable>
+              ) : (
+                heroContent
+              );
+            })()
           ) : (
             <View style={[h.hero, h.noBanner]}>
               <Text style={h.noBannerTitle}>No featured banner</Text>
               <Text style={h.noBannerSub}>
-                Admin can add banners from the dashboard.
+                Check back soon for promotions.
               </Text>
             </View>
           )}
@@ -442,11 +424,6 @@ export default function HomeScreen() {
                   </View>
                   <View>
                     <Text style={sh.sectionName}>{store.store_name}</Text>
-                    {liveProfileIds.has(store.profile_id) ? (
-                      <Text style={sh.liveTag}>● LIVE</Text>
-                    ) : (
-                      <Text style={sh.offlineTag}>● OFFLINE</Text>
-                    )}
                   </View>
                 </View>
                 <Pressable
@@ -459,13 +436,9 @@ export default function HomeScreen() {
                 </Pressable>
               </View>
 
-              {/* Display items — horizontal scroll; live card first if vendor is streaming */}
+              {/* Display items — horizontal scroll */}
               {(() => {
-                const vendorStream = liveStreamByProfileId.get(store.profile_id);
-                const hasItems = store.display_items.length > 0 || !!vendorStream;
-                const listingPreviewPool = store.display_items
-                  .flatMap((di) => di.listing?.images ?? [])
-                  .filter(Boolean);
+                const hasItems = store.display_items.length > 0;
 
                 if (!hasItems) {
                   return (
@@ -481,64 +454,6 @@ export default function HomeScreen() {
                     showsHorizontalScrollIndicator={false}
                     contentContainerStyle={h.vaultScroll}
                   >
-                    {/* Live stream card pinned first */}
-                    {vendorStream && (
-                      (() => {
-                        const randomIdx =
-                          listingPreviewPool.length > 0
-                            ? hashString(vendorStream.id) % listingPreviewPool.length
-                            : -1;
-                        const previewUri =
-                          vendorStream.thumbnail_url ??
-                          (randomIdx >= 0 ? listingPreviewPool[randomIdx] : null);
-
-                        return (
-                      <Pressable
-                        key={`live-${vendorStream.id}`}
-                        style={[h.vaultCard, h.liveInlineCard, { width: S.vaultCardW }]}
-                        onPress={() => push({ type: "LIVE_VIEWER", streamId: vendorStream.id })}
-                      >
-                        <View style={h.liveInlineThumbnail}>
-                          {previewUri ? (
-                            <CachedImage
-                              source={{ uri: previewUri }}
-                              style={h.liveInlineThumbImg}
-                            />
-                          ) : (
-                            <View style={h.liveInlineThumbPlaceholder}>
-                              <Feather name="play" size={20} color={C.accent} />
-                            </View>
-                          )}
-                          <View style={h.liveInlineBadge}>
-                            <View style={h.liveInlineDot} />
-                            <Text style={h.liveInlineBadgeText}>LIVE</Text>
-                          </View>
-                          <View style={h.liveInlineOverlay}>
-                            <Text style={h.liveInlineOverlayLive}>LIVE</Text>
-                            <Text style={h.liveInlineOverlayJoin}>JOIN NOW</Text>
-                          </View>
-                          <View style={h.liveInlineViewers}>
-                            <Ionicons name="eye-outline" size={9} color="#fff" />
-                            <Text style={h.liveInlineViewersText}>
-                              {formatViewers(vendorStream.viewer_count)}
-                            </Text>
-                          </View>
-                        </View>
-                        <Text style={h.vaultName} numberOfLines={1}>
-                          {vendorStream.title}
-                        </Text>
-                        <Text style={h.vaultEdition} numberOfLines={1}>
-                          {vendorStream.category} · {timeSince(vendorStream.started_at)}
-                        </Text>
-                        <View style={h.liveInlineJoinBtn}>
-                          <Ionicons name="radio" size={11} color="#fff" />
-                          <Text style={h.liveInlineJoinText}>Join Live</Text>
-                        </View>
-                      </Pressable>
-                        );
-                      })()
-                    )}
-
                     {/* Regular display items */}
                     {store.display_items.map((di) => {
                       if (!di.listing) return null;

@@ -20,6 +20,13 @@ type OrderItem = {
   listing: { card_name: string; images: string[] } | null;
   seller: { username: string; display_name: string | null } | null;
   order: { buyer_id: string; status: string; total: number; buyer: { username: string; display_name: string | null } | null } | null;
+  escrow_status?: string | null;
+};
+
+const ESCROW_STYLES: Record<string, string> = {
+  held: "bg-sky-500/20 text-sky-300",
+  released: "bg-emerald-500/20 text-emerald-300",
+  refunded: "bg-amber-500/20 text-amber-300",
 };
 
 const STATUS_STYLES: Record<string, string> = {
@@ -45,7 +52,7 @@ export default function OrdersAdminPage() {
   const [trackingInput, setTrackingInput] = useState("");
   const [orderPending, setOrderPending] = useState<{
     item: OrderItem;
-    kind: "cancel" | "refund";
+    kind: "cancel" | "refund" | "release";
   } | null>(null);
 
   const load = useCallback(async () => {
@@ -73,8 +80,22 @@ export default function OrdersAdminPage() {
         if (!o) return null;
         return { ...o, buyer: Array.isArray((o as any).buyer) ? (o as any).buyer[0] : (o as any).buyer };
       })(),
-    }));
-    setItems(mapped as OrderItem[]);
+    })) as OrderItem[];
+
+    // Merge escrow status (one order_payments row per order_id).
+    const orderIds = Array.from(new Set(mapped.map((m) => m.order_id)));
+    if (orderIds.length > 0) {
+      const { data: payments } = await adminQuery<{ order_id: string; escrow_status: string }>({
+        table: "order_payments",
+        select: "order_id, escrow_status",
+        filters: [{ column: "order_id", op: "in", value: `(${orderIds.join(",")})` }],
+        limit: 1000,
+      });
+      const escrowByOrder = new Map((payments ?? []).map((p) => [p.order_id, p.escrow_status]));
+      for (const m of mapped) m.escrow_status = escrowByOrder.get(m.order_id) ?? null;
+    }
+
+    setItems(mapped);
     setLoading(false);
   }, []);
 
@@ -109,6 +130,24 @@ export default function OrdersAdminPage() {
     if (trackingNumber) payload.tracking_number = trackingNumber;
     const { ok, error } = await adminAction("order.updateStatus", payload);
     if (!ok) setActionError(`Failed to update order: ${error}`);
+    await load();
+    setActionLoading(null);
+  }
+
+  async function refundOrder(item: OrderItem) {
+    setActionLoading(item.id);
+    setActionError(null);
+    const { ok, error } = await adminAction("order.refund", { order_id: item.order_id });
+    if (!ok) setActionError(`Refund failed: ${error}`);
+    await load();
+    setActionLoading(null);
+  }
+
+  async function releaseEscrow(item: OrderItem) {
+    setActionLoading(item.id);
+    setActionError(null);
+    const { ok, error } = await adminAction("order.releaseEscrow", { order_id: item.order_id });
+    if (!ok) setActionError(`Release failed: ${error}`);
     await load();
     setActionLoading(null);
   }
@@ -194,6 +233,7 @@ export default function OrdersAdminPage() {
                 <th className="pb-2 pr-4">Price</th>
                 <th className="pb-2 pr-4">Qty</th>
                 <th className="pb-2 pr-4">Status</th>
+                <th className="pb-2 pr-4">Escrow</th>
                 <th className="pb-2 pr-4">Buyer</th>
                 <th className="pb-2 pr-4">Seller</th>
                 <th className="pb-2 pr-4">Tracking</th>
@@ -223,6 +263,15 @@ export default function OrdersAdminPage() {
                     <span className={`rounded px-2 py-0.5 text-xs font-medium ${STATUS_STYLES[i.fulfillment_status] ?? STATUS_STYLES.pending}`}>
                       {i.fulfillment_status}
                     </span>
+                  </td>
+                  <td className="py-3 pr-4">
+                    {i.escrow_status ? (
+                      <span className={`rounded px-2 py-0.5 text-xs font-medium ${ESCROW_STYLES[i.escrow_status] ?? "bg-slate-700 text-slate-300"}`}>
+                        {i.escrow_status}
+                      </span>
+                    ) : (
+                      <span className="text-xs text-slate-600">—</span>
+                    )}
                   </td>
                   <td className="py-3 pr-4 text-xs text-slate-400">@{i.order?.buyer?.username ?? "?"}</td>
                   <td className="py-3 pr-4 text-xs text-slate-400">@{i.seller?.username ?? "?"}</td>
@@ -262,15 +311,15 @@ export default function OrdersAdminPage() {
                           </button>
                         </>
                       )}
-                      {!["cancelled", "refunded", "delivered"].includes(i.fulfillment_status) && (
+                      {i.escrow_status === "held" && (
                         <>
                           <button
                             type="button"
-                            onClick={() => setOrderPending({ item: i, kind: "cancel" })}
+                            onClick={() => setOrderPending({ item: i, kind: "release" })}
                             disabled={actionLoading === i.id}
-                            className="rounded bg-rose-500/20 px-2 py-1 text-xs font-medium text-rose-300 transition hover:bg-rose-500/30 disabled:opacity-50"
+                            className="rounded bg-emerald-500/20 px-2 py-1 text-xs font-medium text-emerald-300 transition hover:bg-emerald-500/30 disabled:opacity-50"
                           >
-                            Cancel
+                            Release Funds
                           </button>
                           <button
                             type="button"
@@ -281,6 +330,16 @@ export default function OrdersAdminPage() {
                             Refund
                           </button>
                         </>
+                      )}
+                      {!["cancelled", "refunded", "delivered"].includes(i.fulfillment_status) && (
+                        <button
+                          type="button"
+                          onClick={() => setOrderPending({ item: i, kind: "cancel" })}
+                          disabled={actionLoading === i.id}
+                          className="rounded bg-rose-500/20 px-2 py-1 text-xs font-medium text-rose-300 transition hover:bg-rose-500/30 disabled:opacity-50"
+                        >
+                          Cancel
+                        </button>
                       )}
                     </div>
                   </td>
@@ -296,23 +355,39 @@ export default function OrdersAdminPage() {
 
       <ConfirmModal
         open={orderPending !== null}
-        title={orderPending?.kind === "refund" ? "Refund order item" : "Cancel order item"}
+        title={
+          orderPending?.kind === "refund"
+            ? "Refund order"
+            : orderPending?.kind === "release"
+              ? "Release funds to seller"
+              : "Cancel order item"
+        }
         message={
           orderPending
             ? orderPending.kind === "refund"
-              ? `Mark “${orderPending.item.listing?.card_name ?? "this item"}” as refunded?`
-              : `Cancel “${orderPending.item.listing?.card_name ?? "this item"}”?`
+              ? `Refund the buyer for “${orderPending.item.listing?.card_name ?? "this item"}”? Wallet-funded orders are credited back to the buyer's wallet; card-funded orders are refunded to the card. Only works while funds are held in escrow.`
+              : orderPending.kind === "release"
+                ? `Release escrowed funds to the seller for “${orderPending.item.listing?.card_name ?? "this item"}”? This pays out the seller immediately, overriding the dispute window.`
+                : `Cancel “${orderPending.item.listing?.card_name ?? "this item"}”?`
             : ""
         }
-        confirmLabel={orderPending?.kind === "refund" ? "Refund" : "Cancel order"}
-        danger
+        confirmLabel={
+          orderPending?.kind === "refund"
+            ? "Refund"
+            : orderPending?.kind === "release"
+              ? "Release"
+              : "Cancel order"
+        }
+        danger={orderPending?.kind !== "release"}
         busy={orderPending !== null && actionLoading === orderPending.item.id}
         onCancel={() => setOrderPending(null)}
         onConfirm={async () => {
           if (!orderPending) return;
           const { item, kind } = orderPending;
           setOrderPending(null);
-          await updateStatus(item, kind === "refund" ? "refunded" : "cancelled");
+          if (kind === "refund") await refundOrder(item);
+          else if (kind === "release") await releaseEscrow(item);
+          else await updateStatus(item, "cancelled");
         }}
       />
 

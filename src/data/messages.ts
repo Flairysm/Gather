@@ -43,7 +43,22 @@ export type ListingShareMessage = BaseMessage & {
   };
 };
 
-export type Message = TextMessage | OfferMessage | ImageMessage | ListingShareMessage;
+export type WantedShareMessage = BaseMessage & {
+  kind: "wanted_share";
+  sharedWanted: {
+    id: string;
+    card_name: string;
+    offer_price: number;
+    image: string | null;
+  };
+};
+
+export type Message =
+  | TextMessage
+  | OfferMessage
+  | ImageMessage
+  | ListingShareMessage
+  | WantedShareMessage;
 
 export type Conversation = {
   id: string;
@@ -151,6 +166,19 @@ function dbRowToMessage(row: any, myId: string): Message {
     };
   }
 
+  if (row.kind === "wanted_share" && row._shared_wanted) {
+    return {
+      ...base,
+      kind: "wanted_share",
+      sharedWanted: {
+        id: row._shared_wanted.id,
+        card_name: row._shared_wanted.card_name,
+        offer_price: Number(row._shared_wanted.offer_price),
+        image: row._shared_wanted.image_url ?? null,
+      },
+    };
+  }
+
   return { ...base, kind: "text", text: row.text ?? "" };
 }
 
@@ -171,7 +199,7 @@ export async function loadConversations(
 
   const conversationIds = data.map((c: any) => c.id);
 
-  const [metaResult, readResult] = await Promise.all([
+  const [metaResult, readResult, blockResult] = await Promise.all([
     supabase
       .from("conversation_user_meta")
       .select("conversation_id, is_favorite, is_hidden")
@@ -182,11 +210,15 @@ export async function loadConversations(
       .select("conversation_id, last_read_at")
       .eq("user_id", userId)
       .in("conversation_id", conversationIds),
+    supabase.from("user_blocks").select("blocked_id"),
   ]);
   if (metaResult.error) console.warn("loadConversations meta error:", metaResult.error.message);
   if (readResult.error) console.warn("loadConversations reads error:", readResult.error.message);
   const metaRows = metaResult.data;
   const readRows = readResult.data;
+  const blockedIds = new Set(
+    (blockResult.data ?? []).map((r: any) => r.blocked_id as string),
+  );
 
   const metaMap = new Map<string, { is_favorite: boolean; is_hidden: boolean }>();
   for (const row of metaRows ?? []) {
@@ -260,6 +292,12 @@ export async function loadConversations(
 
   return data
     .filter((c: any) => !metaMap.get(c.id)?.is_hidden)
+    .filter(
+      (c: any) =>
+        !(c.participant_ids as string[]).some(
+          (pid: string) => pid !== userId && blockedIds.has(pid),
+        ),
+    )
     .map((c: any) => {
     const otherId = (c.participant_ids as string[]).find(
       (pid: string) => pid !== userId,
@@ -342,11 +380,48 @@ export async function hideConversationForUser(
   if (error) throw error;
 }
 
+// ── Reports & blocks ──
+
+export async function reportConversation(
+  conversationId: string,
+  reason?: string,
+): Promise<void> {
+  const { error } = await supabase.rpc("report_conversation", {
+    p_conversation_id: conversationId,
+    p_reason: reason ?? "",
+  });
+  if (error) throw error;
+}
+
+export async function blockUser(userId: string): Promise<void> {
+  const { error } = await supabase.rpc("block_user", { p_blocked: userId });
+  if (error) throw error;
+}
+
+export async function unblockUser(userId: string): Promise<void> {
+  const { error } = await supabase.rpc("unblock_user", { p_blocked: userId });
+  if (error) throw error;
+}
+
+// Users the current viewer has blocked. RLS restricts this to the viewer's own
+// rows, so a plain select is safe.
+export async function loadBlockedUserIds(): Promise<string[]> {
+  const { data, error } = await supabase
+    .from("user_blocks")
+    .select("blocked_id");
+  if (error) {
+    console.warn("loadBlockedUserIds error:", error.message);
+    return [];
+  }
+  return (data ?? []).map((r: any) => r.blocked_id as string);
+}
+
 export async function findOrCreateConversation(
   myId: string,
   otherId: string,
   _listingId?: string,
   topic?: string,
+  wantedId?: string,
 ): Promise<string> {
   const sorted = [myId, otherId].sort();
 
@@ -355,6 +430,7 @@ export async function findOrCreateConversation(
     .insert({
       participant_ids: sorted,
       listing_id: _listingId ?? null,
+      wanted_id: wantedId ?? null,
       topic: topic ?? null,
     })
     .select("id")
@@ -397,7 +473,7 @@ export async function loadMessages(
 ): Promise<Message[]> {
   const { data, error } = await supabase
     .from("messages")
-    .select("id, conversation_id, sender_id, kind, text, offer_amount, offer_card_name, offer_status, offer_listing_id, media_urls, shared_listing_id, created_at")
+    .select("id, conversation_id, sender_id, kind, text, offer_amount, offer_card_name, offer_status, offer_listing_id, media_urls, shared_listing_id, shared_wanted_id, created_at")
     .eq("conversation_id", conversationId)
     .order("created_at", { ascending: true })
     .limit(200);
@@ -421,9 +497,29 @@ export async function loadMessages(
     for (const l of listings ?? []) listingMap[l.id] = l;
   }
 
+  const allWantedIds = [
+    ...new Set(
+      (data ?? [])
+        .map((r: any) => r.shared_wanted_id)
+        .filter((id: any): id is string => !!id),
+    ),
+  ];
+
+  let wantedMap: Record<string, any> = {};
+  if (allWantedIds.length > 0) {
+    const { data: wanted } = await supabase
+      .from("wanted_posts")
+      .select("id, card_name, offer_price, image_url")
+      .in("id", allWantedIds);
+    for (const w of wanted ?? []) wantedMap[w.id] = w;
+  }
+
   return (data ?? []).map((row: any) => {
     if (row.kind === "listing_share" && row.shared_listing_id) {
       row._shared_listing = listingMap[row.shared_listing_id] ?? null;
+    }
+    if (row.kind === "wanted_share" && row.shared_wanted_id) {
+      row._shared_wanted = wantedMap[row.shared_wanted_id] ?? null;
     }
     if (row.kind === "offer" && row.offer_listing_id) {
       row._offer_listing = listingMap[row.offer_listing_id] ?? null;
@@ -529,6 +625,30 @@ export async function sendListingShareMessage(
     .from("conversations")
     .update({
       last_message_text: "Shared a listing",
+      last_message_at: new Date().toISOString(),
+      last_sender_id: senderId,
+    })
+    .eq("id", conversationId);
+  if (convErr) console.warn("conversation update error:", convErr.message);
+}
+
+export async function sendWantedShareMessage(
+  conversationId: string,
+  senderId: string,
+  wantedId: string,
+): Promise<void> {
+  const { error: msgErr } = await supabase.from("messages").insert({
+    conversation_id: conversationId,
+    sender_id: senderId,
+    kind: "wanted_share",
+    shared_wanted_id: wantedId,
+  });
+  if (msgErr) throw msgErr;
+
+  const { error: convErr } = await supabase
+    .from("conversations")
+    .update({
+      last_message_text: "Shared a wanted card",
       last_message_at: new Date().toISOString(),
       last_sender_id: senderId,
     })
@@ -662,6 +782,15 @@ export function subscribeToMessages(
             if (row.kind === "offer") row._offer_listing = listing;
             if (row.kind === "listing_share") row._shared_listing = listing;
           }
+        }
+
+        if (row.kind === "wanted_share" && row.shared_wanted_id) {
+          const { data: wanted } = await supabase
+            .from("wanted_posts")
+            .select("id, card_name, offer_price, image_url")
+            .eq("id", row.shared_wanted_id)
+            .maybeSingle();
+          if (wanted) row._shared_wanted = wanted;
         }
 
         onNewMessage(dbRowToMessage(row, myId));

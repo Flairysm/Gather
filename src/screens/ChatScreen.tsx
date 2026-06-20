@@ -23,14 +23,20 @@ import {
   sendTextMessage,
   sendOfferMessage,
   sendImageMessage,
+  sendWantedShareMessage,
   updateOfferStatus,
   updateOfferAmount,
   subscribeToMessages,
   markConversationRead,
+  reportConversation,
+  blockUser,
+  unblockUser,
+  loadBlockedUserIds,
   type Message,
   type OfferMessage,
   type ImageMessage,
   type ListingShareMessage,
+  type WantedShareMessage,
   type OfferStatus,
 } from "../data/messages";
 import { useAppNavigation } from "../navigation/NavigationContext";
@@ -46,7 +52,17 @@ type Props = {
   listingId?: string;
   topic?: string;
   openOffer?: boolean;
+  wantedId?: string;
+  shareWantedId?: string;
+  initialMessage?: string;
   onBack: () => void;
+};
+
+type PendingWanted = {
+  id: string;
+  card_name: string;
+  offer_price: number;
+  image: string | null;
 };
 
 type ListingContext = {
@@ -258,6 +274,9 @@ export default function ChatScreen({
   listingId: listingIdProp,
   topic,
   openOffer,
+  wantedId: wantedIdProp,
+  shareWantedId,
+  initialMessage,
   onBack,
 }: Props) {
   const { push } = useAppNavigation();
@@ -274,7 +293,6 @@ export default function ChatScreen({
   const [otherUserAvatar, setOtherUserAvatar] = useState<string | null>(null);
   const [otherStoreName, setOtherStoreName] = useState<string | null>(null);
   const [otherStoreId, setOtherStoreId] = useState<string | null>(null);
-  const [otherUserOnline] = useState(false);
   const [convTopic, setConvTopic] = useState<string | null>(topic ?? null);
   const [loading, setLoading] = useState(true);
   const [chatError, setChatError] = useState<string | null>(null);
@@ -292,6 +310,9 @@ export default function ChatScreen({
   const [editingOfferId, setEditingOfferId] = useState<string | null>(null);
   const [editOfferAmount, setEditOfferAmount] = useState("");
   const [otherUserId, setOtherUserId] = useState<string | null>(null);
+  const [isBlocked, setIsBlocked] = useState(false);
+  const [pendingWanted, setPendingWanted] = useState<PendingWanted | null>(null);
+  const initialDraftApplied = useRef(false);
   const scrollRef = useRef<ScrollView>(null);
 
   const isListingSeller = !!(myId && listing?.seller_id && myId === listing.seller_id);
@@ -317,6 +338,95 @@ export default function ChatScreen({
     }
   }
 
+  function navigateToWanted(id: string) {
+    push({ type: "WANTED_DETAIL", wantedId: id });
+  }
+
+  function openOtherProfile() {
+    if (otherStoreId) {
+      push({ type: "VENDOR_STORE_PAGE", storeId: otherStoreId });
+    } else if (otherUserId) {
+      push({ type: "USER_PROFILE", userId: otherUserId });
+    }
+  }
+
+  function confirmReport() {
+    if (!convId) return;
+    Alert.alert(
+      "Report Conversation",
+      "Report this conversation to the Evend team for review?",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Report",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              await reportConversation(convId);
+              Alert.alert(
+                "Thanks for letting us know",
+                "Our team will review this conversation.",
+              );
+            } catch {
+              Alert.alert("Couldn't report", "Please try again in a moment.");
+            }
+          },
+        },
+      ],
+    );
+  }
+
+  function confirmBlock() {
+    if (!otherUserId) return;
+    const name = otherStoreName ?? otherUserName;
+    Alert.alert(
+      `Block ${name}?`,
+      "They won't be able to message you, and this conversation will be hidden from your inbox.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Block",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              await blockUser(otherUserId);
+              setIsBlocked(true);
+            } catch {
+              Alert.alert("Couldn't block", "Please try again in a moment.");
+            }
+          },
+        },
+      ],
+    );
+  }
+
+  async function handleUnblock() {
+    if (!otherUserId) return;
+    try {
+      await unblockUser(otherUserId);
+      setIsBlocked(false);
+    } catch {
+      Alert.alert("Couldn't unblock", "Please try again in a moment.");
+    }
+  }
+
+  function handleHeaderMenu() {
+    const buttons: any[] = [];
+    if (otherStoreId || otherUserId) {
+      buttons.push({ text: "View Profile", onPress: openOtherProfile });
+    }
+    buttons.push({ text: "Report Conversation", style: "destructive", onPress: confirmReport });
+    if (otherUserId) {
+      buttons.push(
+        isBlocked
+          ? { text: "Unblock User", onPress: handleUnblock }
+          : { text: "Block User", style: "destructive", onPress: confirmBlock },
+      );
+    }
+    buttons.push({ text: "Cancel", style: "cancel" });
+    Alert.alert(otherStoreName ?? otherUserName, undefined, buttons);
+  }
+
   const initChat = useCallback(async () => {
     setChatError(null);
     const {
@@ -337,6 +447,7 @@ export default function ChatScreen({
         sellerId,
         listingIdProp,
         topic,
+        wantedIdProp,
       );
       setConvId(resolvedConvId);
     }
@@ -349,12 +460,13 @@ export default function ChatScreen({
 
     const { data: convData } = await supabase
       .from("conversations")
-      .select("participant_ids, topic, listing_id")
+      .select("participant_ids, topic, listing_id, wanted_id")
       .eq("id", resolvedConvId)
       .maybeSingle();
 
     if (convData) {
       setConvTopic(convData.topic);
+      const isWantedConversation = !!(wantedIdProp || convData.wanted_id);
       const lid = listingIdProp || convData.listing_id;
       if (lid) {
         setResolvedListingId(lid);
@@ -369,9 +481,10 @@ export default function ChatScreen({
             images: normalizeImages((listingData as any).images),
           });
         }
-      } else if (convData.topic) {
+      } else if (convData.topic && !isWantedConversation) {
         // Fallback for older conversations that were created without listing_id.
         // Scope to the other participant (the seller) to avoid ambiguous card_name matches.
+        // Skip entirely for WTB conversations — the topic is a wanted card, not a listing.
         const otherParticipant = (convData.participant_ids as string[]).find(
           (pid: string) => pid !== user.id,
         );
@@ -399,6 +512,9 @@ export default function ChatScreen({
       );
       if (otherId) {
         setOtherUserId(otherId);
+        loadBlockedUserIds()
+          .then((ids) => setIsBlocked(ids.includes(otherId)))
+          .catch(() => {});
         const [{ data: profile }, { data: store }] = await Promise.all([
           supabase
             .from("profiles")
@@ -429,9 +545,30 @@ export default function ChatScreen({
     setMessages(msgs);
     await markConversationRead(resolvedConvId, user.id).catch(() => {});
     refreshBadges().catch(() => {});
+
+    // "I have this card": stage the wanted card as an attachment and pre-fill the
+    // composer once, so the seller can review and send card + message together.
+    if (shareWantedId && !initialDraftApplied.current) {
+      initialDraftApplied.current = true;
+      const { data: w } = await supabase
+        .from("wanted_posts")
+        .select("id, card_name, offer_price, image_url")
+        .eq("id", shareWantedId)
+        .maybeSingle();
+      if (w) {
+        setPendingWanted({
+          id: w.id,
+          card_name: w.card_name,
+          offer_price: Number(w.offer_price),
+          image: (w as any).image_url ?? null,
+        });
+      }
+      if (initialMessage) setDraft(initialMessage);
+    }
+
     setLoading(false);
     scrollDown();
-  }, [initialConvId, sellerId, listingIdProp, topic]);
+  }, [initialConvId, sellerId, listingIdProp, topic, wantedIdProp, shareWantedId, initialMessage]);
 
   useEffect(() => {
     initChat().catch(() => { setChatError("Something went wrong loading this chat."); setLoading(false); });
@@ -495,15 +632,29 @@ export default function ChatScreen({
 
   async function handleSendMessage() {
     const text = draft.trim();
-    if (!text || !convId || !myId || sending) return;
+    if ((!text && !pendingWanted) || !convId || !myId || sending) return;
+    if (isBlocked) {
+      Alert.alert("You blocked this user", "Unblock them to send messages.");
+      return;
+    }
     if (!(await requireNetwork())) return;
+    const attachedWanted = pendingWanted;
+    setShowAttachMenu(false);
     setSending(true);
     setDraft("");
+    setPendingWanted(null);
     try {
-      await sendTextMessage(convId, myId, text);
+      if (attachedWanted) {
+        await sendWantedShareMessage(convId, myId, attachedWanted.id);
+      }
+      if (text) {
+        await sendTextMessage(convId, myId, text);
+      }
       scrollDown();
     } catch {
       setDraft(text);
+      setPendingWanted(attachedWanted);
+      Alert.alert("Message failed to send", "Please check your connection and try again.");
     } finally {
       setSending(false);
     }
@@ -540,6 +691,35 @@ export default function ChatScreen({
     } finally {
       setSending(false);
     }
+  }
+
+  function confirmOfferAction(msgId: string, action: "accepted" | "declined") {
+    const isAccept = action === "accepted";
+    Alert.alert(
+      isAccept ? "Accept Offer" : "Decline Offer",
+      isAccept
+        ? "Accept this offer? The buyer will be able to add the item to their cart at the agreed price."
+        : "Decline this offer? This can't be undone.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: isAccept ? "Accept" : "Decline",
+          style: isAccept ? "default" : "destructive",
+          onPress: () => handleOfferAction(msgId, action),
+        },
+      ],
+    );
+  }
+
+  function confirmWithdraw(msgId: string) {
+    Alert.alert("Withdraw Offer", "Withdraw this offer? This can't be undone.", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Withdraw",
+        style: "destructive",
+        onPress: () => handleWithdrawOffer(msgId),
+      },
+    ]);
   }
 
   async function handleOfferAction(
@@ -814,7 +994,11 @@ export default function ChatScreen({
             <Feather name="arrow-left" size={20} color={C.textPrimary} />
           </Pressable>
 
-          <View style={st.headerCenter}>
+          <Pressable
+            style={st.headerCenter}
+            onPress={openOtherProfile}
+            disabled={!otherStoreId && !otherUserId}
+          >
             <View style={st.headerAvatarWrap}>
               {otherUserAvatar ? (
                 <Image source={{ uri: otherUserAvatar }} style={st.headerAvatarImg} />
@@ -825,7 +1009,6 @@ export default function ChatScreen({
                   </Text>
                 </View>
               )}
-              {otherUserOnline && <View style={st.onlineDot} />}
             </View>
             <View style={{ flex: 1 }}>
               <Text style={st.headerName} numberOfLines={1}>
@@ -833,15 +1016,11 @@ export default function ChatScreen({
               </Text>
               {otherStoreName ? (
                 <Text style={st.headerStatus} numberOfLines={1}>@{otherUserName}</Text>
-              ) : (
-                <Text style={st.headerStatus}>
-                  {otherUserOnline ? "Online" : "Offline"}
-                </Text>
-              )}
+              ) : null}
             </View>
-          </View>
+          </Pressable>
 
-          <Pressable style={st.iconBtn}>
+          <Pressable style={st.iconBtn} onPress={handleHeaderMenu} hitSlop={8}>
             <Feather name="more-horizontal" size={17} color={C.textSearch} />
           </Pressable>
         </View>
@@ -886,11 +1065,11 @@ export default function ChatScreen({
                         ? () => push({ type: "LISTING_DETAIL", listingId: msg.listingId! })
                         : undefined
                     }
-                    onAccept={() => handleOfferAction(msg.id, "accepted")}
-                    onDecline={() => handleOfferAction(msg.id, "declined")}
+                    onAccept={() => confirmOfferAction(msg.id, "accepted")}
+                    onDecline={() => confirmOfferAction(msg.id, "declined")}
                     onCounter={() => handleCounter(msg.id)}
                     onAddToCart={() => handleAddOfferToCart(msg)}
-                    onWithdraw={() => handleWithdrawOffer(msg.id)}
+                    onWithdraw={() => confirmWithdraw(msg.id)}
                     onEdit={() => handleStartEditOffer(msg.id)}
                   />
                 </View>
@@ -905,11 +1084,7 @@ export default function ChatScreen({
                   style={[st.bubbleRow, msg.isMe && st.bubbleRowMe]}
                 >
                   {!msg.isMe && (
-                    <View style={st.bubbleAvatar}>
-                      <Text style={st.bubbleAvatarText}>
-                        {otherUserName.charAt(0).toUpperCase()}
-                      </Text>
-                    </View>
+                    <BubbleAvatar uri={otherUserAvatar} name={otherUserName} />
                   )}
                   <View style={[st.imageBubble, msg.isMe ? st.imageBubbleMe : st.imageBubbleThem]}>
                     {imgMsg.mediaUrls.length === 1 ? (
@@ -942,11 +1117,7 @@ export default function ChatScreen({
                   style={[st.bubbleRow, msg.isMe && st.bubbleRowMe]}
                 >
                   {!msg.isMe && (
-                    <View style={st.bubbleAvatar}>
-                      <Text style={st.bubbleAvatarText}>
-                        {otherUserName.charAt(0).toUpperCase()}
-                      </Text>
-                    </View>
+                    <BubbleAvatar uri={otherUserAvatar} name={otherUserName} />
                   )}
                   <Pressable
                     style={[st.listingShareCard, msg.isMe ? st.listingShareMe : st.listingShareThem]}
@@ -983,17 +1154,56 @@ export default function ChatScreen({
               );
             }
 
+            if (msg.kind === "wanted_share") {
+              const wsMsg = msg as WantedShareMessage;
+              return (
+                <View
+                  key={msg.id}
+                  style={[st.bubbleRow, msg.isMe && st.bubbleRowMe]}
+                >
+                  {!msg.isMe && (
+                    <BubbleAvatar uri={otherUserAvatar} name={otherUserName} />
+                  )}
+                  <Pressable
+                    style={[st.listingShareCard, msg.isMe ? st.listingShareMe : st.listingShareThem]}
+                    onPress={() => {
+                      if (wsMsg.sharedWanted?.id) navigateToWanted(wsMsg.sharedWanted.id);
+                    }}
+                  >
+                    <View style={st.listingShareThumb}>
+                      {wsMsg.sharedWanted?.image ? (
+                        <Image source={{ uri: wsMsg.sharedWanted.image }} style={st.listingShareThumbImg} />
+                      ) : (
+                        <Ionicons name="image-outline" size={20} color={C.textMuted} />
+                      )}
+                    </View>
+                    <View style={st.listingShareInfo}>
+                      <View style={st.wantedShareBadge}>
+                        <Ionicons name="pricetag-outline" size={10} color="#F59E0B" />
+                        <Text style={st.wantedShareBadgeText}>Wanted</Text>
+                      </View>
+                      <Text style={st.listingShareName} numberOfLines={2}>
+                        {wsMsg.sharedWanted?.card_name ?? "Wanted card"}
+                      </Text>
+                      {wsMsg.sharedWanted?.offer_price != null && (
+                        <Text style={st.listingSharePrice}>
+                          Budget: RM{Number(wsMsg.sharedWanted.offer_price).toLocaleString("en-MY", { maximumFractionDigits: 0 })}
+                        </Text>
+                      )}
+                    </View>
+                    <Feather name="chevron-right" size={14} color={C.textMuted} />
+                  </Pressable>
+                </View>
+              );
+            }
+
             return (
               <View
                 key={msg.id}
                 style={[st.bubbleRow, msg.isMe && st.bubbleRowMe]}
               >
                 {!msg.isMe && (
-                  <View style={st.bubbleAvatar}>
-                    <Text style={st.bubbleAvatarText}>
-                      {otherUserName.charAt(0).toUpperCase()}
-                    </Text>
-                  </View>
+                  <BubbleAvatar uri={otherUserAvatar} name={otherUserName} />
                 )}
                 <View
                   style={[
@@ -1172,7 +1382,46 @@ export default function ChatScreen({
           </View>
         )}
 
+        {/* Staged wanted-card attachment */}
+        {pendingWanted && (
+          <View style={st.pendingAttachBar}>
+            <View style={st.pendingAttachThumb}>
+              {pendingWanted.image ? (
+                <Image source={{ uri: pendingWanted.image }} style={st.pendingAttachThumbImg} />
+              ) : (
+                <Ionicons name="image-outline" size={16} color={C.textMuted} />
+              )}
+            </View>
+            <View style={{ flex: 1 }}>
+              <View style={st.wantedShareBadge}>
+                <Ionicons name="pricetag-outline" size={10} color="#F59E0B" />
+                <Text style={st.wantedShareBadgeText}>Wanted</Text>
+              </View>
+              <Text style={st.pendingAttachName} numberOfLines={1}>
+                {pendingWanted.card_name}
+              </Text>
+            </View>
+            <Pressable onPress={() => setPendingWanted(null)} hitSlop={10}>
+              <Feather name="x" size={16} color={C.textMuted} />
+            </Pressable>
+          </View>
+        )}
+
+        {/* Blocked banner replaces the composer when you've blocked this user */}
+        {isBlocked && (
+          <View style={st.blockedBar}>
+            <Feather name="slash" size={15} color={C.textMuted} />
+            <Text style={st.blockedText}>
+              You blocked this user. Unblock to send messages.
+            </Text>
+            <Pressable style={st.unblockBtn} onPress={handleUnblock} hitSlop={8}>
+              <Text style={st.unblockBtnText}>Unblock</Text>
+            </Pressable>
+          </View>
+        )}
+
         {/* Input bar */}
+        {!isBlocked && (
         <View style={st.inputBar}>
           <Pressable
             style={st.attachBtn}
@@ -1202,7 +1451,7 @@ export default function ChatScreen({
           <Pressable
             style={[
               st.sendBtn,
-              draft.trim().length > 0 && st.sendBtnActive,
+              (draft.trim().length > 0 || pendingWanted) && st.sendBtnActive,
             ]}
             onPress={handleSendMessage}
             disabled={sending}
@@ -1210,10 +1459,19 @@ export default function ChatScreen({
             <Feather
               name="send"
               size={18}
-              color={draft.trim().length > 0 ? C.textHero : C.textMuted}
+              color={draft.trim().length > 0 || pendingWanted ? C.textHero : C.textMuted}
             />
           </Pressable>
         </View>
+        )}
+
+        {/* Backdrop closes the attach menu on outside tap */}
+        {showAttachMenu && (
+          <Pressable
+            style={st.attachBackdrop}
+            onPress={() => setShowAttachMenu(false)}
+          />
+        )}
 
         {/* Attach menu popover */}
         {showAttachMenu && (
@@ -1235,6 +1493,17 @@ export default function ChatScreen({
       </KeyboardAvoidingView>
 
     </SafeAreaView>
+  );
+}
+
+function BubbleAvatar({ uri, name }: { uri: string | null; name: string }) {
+  if (uri) {
+    return <Image source={{ uri }} style={st.bubbleAvatarImg} />;
+  }
+  return (
+    <View style={st.bubbleAvatar}>
+      <Text style={st.bubbleAvatarText}>{name.charAt(0).toUpperCase()}</Text>
+    </View>
   );
 }
 
@@ -1370,6 +1639,14 @@ const st = StyleSheet.create({
     color: C.textHero,
     fontSize: 11,
     fontWeight: "800",
+  },
+  bubbleAvatarImg: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: C.borderAvatar,
+    marginBottom: 2,
   },
   bubble: {
     maxWidth: "72%",
@@ -1688,6 +1965,26 @@ const st = StyleSheet.create({
     gap: 6,
     backgroundColor: C.bg,
   },
+  blockedBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: S.screenPadding,
+    paddingVertical: 12,
+    borderTopWidth: 1,
+    borderTopColor: C.border,
+    backgroundColor: C.bg,
+  },
+  blockedText: { flex: 1, color: C.textMuted, fontSize: 12, fontWeight: "600" },
+  unblockBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: S.radiusSmall,
+    borderWidth: 1,
+    borderColor: C.border,
+    backgroundColor: C.elevated,
+  },
+  unblockBtnText: { color: C.textAccent, fontSize: 12, fontWeight: "800" },
   pendingOfferBanner: {
     flexDirection: "row",
     alignItems: "center",
@@ -1758,6 +2055,13 @@ const st = StyleSheet.create({
   },
 
   // ── Attach menu ──
+  attachBackdrop: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
   attachMenu: {
     flexDirection: "row",
     gap: 16,
@@ -1875,6 +2179,53 @@ const st = StyleSheet.create({
     color: C.textAccent,
     fontSize: 13,
     fontWeight: "800",
+  },
+  wantedShareBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    alignSelf: "flex-start",
+    backgroundColor: "rgba(245,158,11,0.1)",
+    borderRadius: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  wantedShareBadgeText: {
+    color: "#F59E0B",
+    fontSize: 9,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.3,
+  },
+
+  // ── Staged wanted attachment ──
+  pendingAttachBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingHorizontal: S.screenPadding,
+    paddingVertical: 8,
+    borderTopWidth: 1,
+    borderTopColor: C.border,
+    backgroundColor: C.elevated,
+  },
+  pendingAttachThumb: {
+    width: 36,
+    height: 44,
+    borderRadius: 6,
+    backgroundColor: C.cardAlt,
+    borderWidth: 1,
+    borderColor: C.borderCard,
+    overflow: "hidden",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  pendingAttachThumbImg: { width: "100%", height: "100%", borderRadius: 5 },
+  pendingAttachName: {
+    color: C.textPrimary,
+    fontSize: 13,
+    fontWeight: "700",
+    marginTop: 3,
   },
 
 });

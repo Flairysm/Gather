@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Alert,
   Dimensions,
   Pressable,
   RefreshControl,
@@ -12,6 +13,7 @@ import {
 } from "react-native";
 import CachedImage from "../components/CachedImage";
 import Shimmer, { ShimmerGroup } from "../components/Shimmer";
+import ErrorState from "../components/ErrorState";
 import { StatusBar } from "expo-status-bar";
 import { Feather, Ionicons } from "@expo/vector-icons";
 
@@ -44,6 +46,7 @@ type AuctionRow = {
   buy_now_price: number | null;
   reserve_price: number | null;
   created_at: string;
+  rank_score?: number;
   seller?: {
     username: string | null;
     display_name: string | null;
@@ -52,14 +55,15 @@ type AuctionRow = {
 };
 
 type AuctionTab = "live" | "ended";
-type SortKey = "ending" | "newest" | "bids" | "priceLow" | "priceHigh";
+type SortKey = "recommended" | "ending" | "newest" | "bids" | "priceLow" | "priceHigh";
 
 const SORT_OPTIONS: { key: SortKey; label: string }[] = [
+  { key: "recommended", label: "Recommended" },
   { key: "ending", label: "Ending Soon" },
   { key: "newest", label: "Newest" },
   { key: "bids", label: "Most Bids" },
-  { key: "priceLow", label: "Price ↑" },
-  { key: "priceHigh", label: "Price ↓" },
+  { key: "priceLow", label: "Lowest Price" },
+  { key: "priceHigh", label: "Highest Price" },
 ];
 
 function normalizeImages(raw: unknown): string[] {
@@ -108,9 +112,10 @@ export default function AuctionScreen() {
   >({});
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState(false);
   const [auctionTab, setAuctionTab] = useState<AuctionTab>("live");
   const [activeFilter, setActiveFilter] = useState("All");
-  const [sortKey, setSortKey] = useState<SortKey>("ending");
+  const [sortKey, setSortKey] = useState<SortKey>("recommended");
   const [searchQuery, setSearchQuery] = useState("");
   const [watchedIds, setWatchedIds] = useState<string[]>([]);
   const [, setTick] = useState(0);
@@ -126,23 +131,21 @@ export default function AuctionScreen() {
   }, []);
 
   const load = useCallback(async () => {
-    const { data, error } = await supabase
-      .from("auction_items")
-      .select(`
-        id, seller_id, card_name, edition, grade, condition,
-        starting_price, current_bid, bid_count, watchers, category,
-        images, ends_at, original_ends_at, status, buy_now_price,
-        reserve_price, created_at,
-        seller:profiles!seller_id(username, display_name, avatar_url)
-      `)
-      .in("status", ["active", "ended"])
-      .order("ends_at", { ascending: true })
-      .limit(200);
+    setLoadError(false);
+    // Server-side ranking RPC returns auctions best-first by an
+    // engagement×urgency×seller-quality score. It applies the same window the
+    // screen used to apply inline: status in ('active','ended') AND
+    // ends_at >= now() - 30 days, and excludes banned sellers.
+    const { data, error } = await supabase.rpc("get_ranked_auctions", {
+      p_category: null,
+      p_limit: 200,
+    });
 
     if (error) {
       console.warn("AuctionScreen load failed:", error.message);
       setAuctions([]);
       setVendorStores({});
+      setLoadError(true);
       return;
     }
 
@@ -230,6 +233,15 @@ export default function AuctionScreen() {
 
     const sorted = [...items];
     switch (sortKey) {
+      case "recommended":
+        // Live: server rank order (rank_score desc). Ended: most recently ended
+        // first, since ended auctions all carry a low rank_score.
+        if (auctionTab === "live") {
+          sorted.sort((a, b) => (b.rank_score ?? 0) - (a.rank_score ?? 0));
+        } else {
+          sorted.sort((a, b) => new Date(b.ends_at).getTime() - new Date(a.ends_at).getTime());
+        }
+        break;
       case "ending":
         sorted.sort((a, b) => new Date(a.ends_at).getTime() - new Date(b.ends_at).getTime());
         break;
@@ -382,11 +394,30 @@ export default function AuctionScreen() {
             ))}
           </ScrollView>
 
-          {filtered.length === 0 ? (
+          {loadError && filtered.length === 0 ? (
+            <ErrorState
+              message="Couldn't load auctions. Check your connection and try again."
+              onRetry={onRefresh}
+            />
+          ) : filtered.length === 0 ? (
             <View style={a.emptyWrap}>
-              <Ionicons name={auctionTab === "live" ? "flash-outline" : "checkmark-done-outline"} size={36} color={C.textMuted} />
+              <Ionicons
+                name={
+                  activeFilter !== "All" || searchQuery.trim()
+                    ? "search-outline"
+                    : auctionTab === "live"
+                      ? "flash-outline"
+                      : "checkmark-done-outline"
+                }
+                size={36}
+                color={C.textMuted}
+              />
               <Text style={a.emptyText}>
-                {auctionTab === "live" ? "No live auctions right now" : "No ended auctions"}
+                {activeFilter !== "All" || searchQuery.trim()
+                  ? "No auctions match your filters"
+                  : auctionTab === "live"
+                    ? "No live auctions right now"
+                    : "No ended auctions"}
               </Text>
             </View>
           ) : (
@@ -480,10 +511,11 @@ export default function AuctionScreen() {
                           {getSellerLabel(item)}
                         </Text>
                       </View>
-                      <View style={a.placeBidBtn}>
-                        <Text style={a.placeBidText}>
-                          {timer.ended ? "View Result" : "Place Bid"}
+                      <View style={a.cardFooter}>
+                        <Text style={a.cardFooterText}>
+                          {timer.ended ? "View result" : "Tap to bid"}
                         </Text>
+                        <Feather name="chevron-right" size={12} color={C.textMuted} />
                       </View>
                     </View>
                   </Pressable>
@@ -493,9 +525,25 @@ export default function AuctionScreen() {
           )}
         </ScrollView>
 
-        {isVerifiedVendor && (
+        {isVerifiedVendor ? (
           <Pressable style={a.fab} onPress={() => push({ type: "CREATE_AUCTION" })}>
             <Ionicons name="add" size={28} color={C.textHero} />
+          </Pressable>
+        ) : (
+          <Pressable
+            style={[a.fab, localSt.fabHint]}
+            onPress={() =>
+              Alert.alert(
+                "Vendors only",
+                "Only verified vendors can create auctions. Become a vendor to start selling.",
+                [
+                  { text: "Not now", style: "cancel" },
+                  { text: "Become a Vendor", onPress: () => push({ type: "VENDOR_APPLICATION" }) },
+                ],
+              )
+            }
+          >
+            <Ionicons name="lock-closed" size={22} color={C.textMuted} />
           </Pressable>
         )}
       </View>
@@ -532,5 +580,12 @@ const localSt = StyleSheet.create({
   },
   tabTextActive: {
     color: C.accent,
+  },
+  fabHint: {
+    backgroundColor: C.elevated,
+    borderWidth: 1,
+    borderColor: C.border,
+    shadowOpacity: 0,
+    elevation: 0,
   },
 });

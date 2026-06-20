@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   Dimensions,
   FlatList,
   Image,
@@ -8,17 +9,27 @@ import {
   SafeAreaView,
   ScrollView,
   Share,
+  Linking,
   TextInput,
   Text,
   View,
 } from "react-native";
+import { StatusBar } from "expo-status-bar";
 import { Feather, Ionicons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
 import { C, S } from "../theme";
 import { supabase } from "../lib/supabase";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import ErrorState from "../components/ErrorState";
+import ScreenHeader from "../components/ScreenHeader";
 import { StyleSheet } from "react-native";
+import {
+  fetchSellerVouches,
+  addVouch,
+  removeVouch,
+  type SellerVouches,
+} from "../data/vouches";
+import { fetchSellerTrust, TIER_COLORS, type SellerTrust } from "../data/sellerTrust";
 
 const SCREEN_W = Dimensions.get("window").width;
 const CARD_GAP = 10;
@@ -34,7 +45,41 @@ type StoreData = {
   banner_url: string | null;
   theme_color: string;
   created_at: string;
+  social_links: Record<string, string> | null;
+  specialties: string[] | null;
 };
+
+const SOCIAL_META: Record<
+  string,
+  { label: string; icon: keyof typeof Feather.glyphMap }
+> = {
+  instagram: { label: "Instagram", icon: "instagram" },
+  tiktok: { label: "TikTok", icon: "music" },
+  twitter: { label: "X", icon: "twitter" },
+  youtube: { label: "YouTube", icon: "youtube" },
+  whatsapp: { label: "WhatsApp", icon: "message-circle" },
+  website: { label: "Website", icon: "globe" },
+};
+
+function socialUrl(key: string, value: string): string {
+  const v = value.trim();
+  if (/^https?:\/\//i.test(v)) return v;
+  const handle = v.replace(/^@/, "");
+  switch (key) {
+    case "instagram":
+      return `https://instagram.com/${handle}`;
+    case "tiktok":
+      return `https://tiktok.com/@${handle}`;
+    case "twitter":
+      return `https://x.com/${handle}`;
+    case "youtube":
+      return `https://youtube.com/${handle}`;
+    case "whatsapp":
+      return `https://wa.me/${v.replace(/[^0-9]/g, "")}`;
+    default:
+      return `https://${v}`;
+  }
+}
 
 type SellerProfile = {
   display_name: string | null;
@@ -43,6 +88,7 @@ type SellerProfile = {
   total_sales: number;
   verified_seller: boolean;
   review_count: number;
+  phone_verified: boolean;
 };
 
 type StoreListing = {
@@ -62,6 +108,9 @@ type StoreReview = {
   rating: number;
   comment: string | null;
   created_at: string;
+  photos: string[] | null;
+  seller_reply: string | null;
+  seller_reply_at: string | null;
   reviewer: { username: string | null; display_name: string | null; avatar_url: string | null } | null;
 };
 
@@ -104,12 +153,18 @@ export default function VendorStorePageScreen({
   const [activeTab, setActiveTab] = useState<StoreTab>("listings");
   const [reviews, setReviews] = useState<StoreReview[]>([]);
   const [loadingReviews, setLoadingReviews] = useState(false);
+  const [vouches, setVouches] = useState<SellerVouches | null>(null);
+  const [vouchBusy, setVouchBusy] = useState(false);
+  const [trust, setTrust] = useState<SellerTrust | null>(null);
+  const [replyingId, setReplyingId] = useState<string | null>(null);
+  const [replyText, setReplyText] = useState("");
+  const [replyBusy, setReplyBusy] = useState(false);
 
   const loadReviews = useCallback(async (sellerId: string) => {
     setLoadingReviews(true);
     const { data } = await supabase
       .from("reviews")
-      .select("id, rating, comment, created_at, reviewer:profiles!reviewer_id(username, display_name, avatar_url)")
+      .select("id, rating, comment, created_at, photos, seller_reply, seller_reply_at, reviewer:profiles!reviewer_id(username, display_name, avatar_url)")
       .eq("seller_id", sellerId)
       .order("created_at", { ascending: false })
       .limit(100);
@@ -131,7 +186,7 @@ export default function VendorStorePageScreen({
 
     const { data: storeData, error: storeErr } = await supabase
       .from("vendor_stores")
-      .select("id, profile_id, store_name, description, logo_url, banner_url, theme_color, created_at")
+      .select("id, profile_id, store_name, description, logo_url, banner_url, theme_color, created_at, social_links, specialties")
       .eq("id", storeId)
       .maybeSingle();
 
@@ -152,7 +207,7 @@ export default function VendorStorePageScreen({
       await Promise.all([
         supabase
           .from("profiles")
-          .select("display_name, username, rating, total_sales, verified_seller, review_count")
+          .select("display_name, username, rating, total_sales, verified_seller, review_count, phone_verified")
           .eq("id", (storeData as any).profile_id)
           .maybeSingle(),
         supabase
@@ -182,6 +237,8 @@ export default function VendorStorePageScreen({
     setListings(allListings);
     setLoading(false);
     loadReviews((storeData as any).profile_id);
+    fetchSellerVouches((storeData as any).profile_id).then(setVouches);
+    fetchSellerTrust((storeData as any).profile_id).then(setTrust);
   }, [storeId, loadReviews]);
 
   useEffect(() => {
@@ -251,6 +308,8 @@ export default function VendorStorePageScreen({
   if (loading) {
     return (
       <SafeAreaView style={st.safe}>
+        <StatusBar style="light" />
+        <ScreenHeader title="Store" onBack={onBack} />
         <View style={st.loadingWrap}>
           <ActivityIndicator size="large" color={C.accent} />
         </View>
@@ -261,13 +320,8 @@ export default function VendorStorePageScreen({
   if (!store) {
     return (
       <SafeAreaView style={st.safe}>
-        <View style={st.header}>
-          <Pressable onPress={onBack} style={st.backBtn}>
-            <Feather name="arrow-left" size={22} color={C.textPrimary} />
-          </Pressable>
-          <Text style={st.headerTitle}>{loadError ? "Error" : "Store Not Found"}</Text>
-          <View style={{ width: 36 }} />
-        </View>
+        <StatusBar style="light" />
+        <ScreenHeader title={loadError ? "Error" : "Store Not Found"} onBack={onBack} />
         {loadError ? (
           <ErrorState
             message="Failed to load store. Check your connection and try again."
@@ -293,6 +347,58 @@ export default function VendorStorePageScreen({
       topic: store!.store_name,
     });
   }
+
+  async function handleToggleVouch() {
+    if (!store || !vouches || vouchBusy) return;
+    setVouchBusy(true);
+    const wasVouched = vouches.has_vouched;
+    try {
+      const res = wasVouched
+        ? await removeVouch(store.profile_id)
+        : await addVouch(store.profile_id);
+      setVouches((prev) =>
+        prev
+          ? { ...prev, has_vouched: !wasVouched, total: res.vouch_count }
+          : prev,
+      );
+    } catch (e: any) {
+      Alert.alert("Couldn't update vouch", e?.message ?? "Please try again.");
+    } finally {
+      setVouchBusy(false);
+    }
+  }
+
+  async function handleSubmitReply(reviewId: string) {
+    if (replyBusy) return;
+    setReplyBusy(true);
+    try {
+      const { error } = await supabase.rpc("reply_to_review", {
+        p_review_id: reviewId,
+        p_reply: replyText.trim() || null,
+      });
+      if (error) throw new Error(error.message);
+      const replyValue = replyText.trim() || null;
+      setReviews((prev) =>
+        prev.map((r) =>
+          r.id === reviewId
+            ? {
+                ...r,
+                seller_reply: replyValue,
+                seller_reply_at: replyValue ? new Date().toISOString() : null,
+              }
+            : r,
+        ),
+      );
+      setReplyingId(null);
+      setReplyText("");
+    } catch (e: any) {
+      Alert.alert("Reply failed", e?.message ?? "Please try again.");
+    } finally {
+      setReplyBusy(false);
+    }
+  }
+
+  const isOwner = currentUserId === store.profile_id;
 
   const renderItem = ({ item }: { item: StoreListing }) => {
     const isFeat = featuredIds.has(item.id);
@@ -332,6 +438,20 @@ export default function VendorStorePageScreen({
       </Pressable>
     );
   };
+
+  const socialEntries = Object.entries(store.social_links ?? {}).filter(
+    ([, v]) => typeof v === "string" && v.trim().length > 0,
+  );
+
+  const badges: { label: string; icon: keyof typeof Ionicons.glyphMap; color: string }[] = [];
+  if (seller?.verified_seller) badges.push({ label: "Verified Seller", icon: "shield-checkmark", color: tc });
+  if (seller?.phone_verified) badges.push({ label: "Phone Verified", icon: "call", color: C.success });
+  if ((seller?.rating ?? 0) >= 4.8 && (seller?.review_count ?? 0) >= 5)
+    badges.push({ label: "Top Rated", icon: "star", color: "#F59E0B" });
+  if ((seller?.total_sales ?? 0) >= 500) badges.push({ label: "500+ Sales", icon: "flame", color: "#EF4444" });
+  else if ((seller?.total_sales ?? 0) >= 100) badges.push({ label: "100+ Sales", icon: "bag-check", color: C.success });
+  if (store.created_at && Date.now() - new Date(store.created_at).getTime() >= 365 * 24 * 60 * 60 * 1000)
+    badges.push({ label: "1-Year Member", icon: "ribbon", color: C.textAccent });
 
   const ListHeader = () => (
     <>
@@ -373,6 +493,14 @@ export default function VendorStorePageScreen({
                   <Ionicons name="shield-checkmark" size={10} color="#fff" />
                 </View>
               )}
+              {trust && (
+                <View style={[st.tierPill, { backgroundColor: TIER_COLORS[trust.tier] + "22", borderColor: TIER_COLORS[trust.tier] }]}>
+                  <Ionicons name="medal" size={10} color={TIER_COLORS[trust.tier]} />
+                  <Text style={[st.tierPillText, { color: TIER_COLORS[trust.tier] }]}>
+                    {trust.tier}
+                  </Text>
+                </View>
+              )}
             </View>
             {seller?.username && (
               <Text style={st.sellerHandle}>@{seller.username}</Text>
@@ -384,6 +512,127 @@ export default function VendorStorePageScreen({
           <Text style={st.storeDesc}>{store.description}</Text>
         )}
 
+        {/* ── Social Links (verified sellers only) ── */}
+        {seller?.verified_seller && socialEntries.length > 0 && (
+          <View style={st.socialRow}>
+            {socialEntries.map(([key, value]) => {
+              const meta = SOCIAL_META[key];
+              if (!meta) return null;
+              return (
+                <Pressable
+                  key={key}
+                  style={st.socialChip}
+                  onPress={() => Linking.openURL(socialUrl(key, value)).catch(() => {})}
+                  hitSlop={6}
+                >
+                  <Feather name={meta.icon} size={15} color={tc} />
+                </Pressable>
+              );
+            })}
+          </View>
+        )}
+
+        {/* ── Specialties ── */}
+        {(store.specialties?.length ?? 0) > 0 && (
+          <View style={st.specialtyRow}>
+            {store.specialties!.map((tag) => (
+              <View key={tag} style={st.specialtyChip}>
+                <Text style={st.specialtyText}>{tag}</Text>
+              </View>
+            ))}
+          </View>
+        )}
+
+        {/* ── Trust Badges ── */}
+        {badges.length > 0 && (
+          <View style={st.badgeRow}>
+            {badges.map((b) => (
+              <View key={b.label} style={st.badge}>
+                <Ionicons name={b.icon} size={11} color={b.color} />
+                <Text style={[st.badgeText, { color: b.color }]}>{b.label}</Text>
+              </View>
+            ))}
+          </View>
+        )}
+
+        {/* ── Response time ── */}
+        {trust?.response_label && (
+          <View style={st.responseRow}>
+            <Ionicons name="flash" size={13} color={C.success} />
+            <Text style={st.responseText}>{trust.response_label}</Text>
+          </View>
+        )}
+
+        {/* ── Vouches ── */}
+        {vouches && (vouches.total > 0 || vouches.eligible) && (
+          <View style={st.vouchCard}>
+            <View style={st.vouchInfo}>
+              <View style={st.vouchHeaderRow}>
+                <Ionicons name="ribbon" size={15} color={tc} />
+                <Text style={st.vouchCount}>
+                  {vouches.total} vouch{vouches.total === 1 ? "" : "es"}
+                </Text>
+              </View>
+              {vouches.followed_count > 0 ? (
+                <View style={st.vouchAvatars}>
+                  {vouches.sample
+                    .filter((v) => v.is_followed)
+                    .slice(0, 4)
+                    .map((v, i) => (
+                      <View
+                        key={v.id}
+                        style={[st.vouchAvatar, { marginLeft: i === 0 ? 0 : -8 }]}
+                      >
+                        {v.avatar_url ? (
+                          <Image source={{ uri: v.avatar_url }} style={st.vouchAvatarImg} />
+                        ) : (
+                          <Ionicons name="person" size={11} color={C.textMuted} />
+                        )}
+                      </View>
+                    ))}
+                  <Text style={st.vouchFollowedText}>
+                    Vouched by {vouches.followed_count} you follow
+                  </Text>
+                </View>
+              ) : (
+                <Text style={st.vouchSub}>Peer endorsements from real buyers</Text>
+              )}
+            </View>
+            {!isOwner && vouches.eligible && (
+              <Pressable
+                style={[
+                  st.vouchBtn,
+                  vouches.has_vouched
+                    ? { backgroundColor: tc }
+                    : { borderWidth: 1, borderColor: tc },
+                ]}
+                onPress={handleToggleVouch}
+                disabled={vouchBusy}
+              >
+                {vouchBusy ? (
+                  <ActivityIndicator size="small" color={vouches.has_vouched ? "#fff" : tc} />
+                ) : (
+                  <>
+                    <Ionicons
+                      name={vouches.has_vouched ? "checkmark" : "add"}
+                      size={14}
+                      color={vouches.has_vouched ? "#fff" : tc}
+                    />
+                    <Text
+                      style={[
+                        st.vouchBtnText,
+                        { color: vouches.has_vouched ? "#fff" : tc },
+                      ]}
+                    >
+                      {vouches.has_vouched ? "Vouched" : "Vouch"}
+                    </Text>
+                  </>
+                )}
+              </Pressable>
+            )}
+          </View>
+        )}
+
         {/* ── Action Buttons ── */}
         <View style={st.actionRow}>
           {currentUserId !== store.profile_id && (
@@ -392,7 +641,16 @@ export default function VendorStorePageScreen({
               <Text style={st.actionBtnTextPrimary}>Message</Text>
             </Pressable>
           )}
-          <Pressable style={st.actionBtnOutline} onPress={() => Share.share({ message: `Check out ${store?.store_name ?? "this store"} on Evend!` })}>
+          <Pressable
+            style={st.actionBtnOutline}
+            onPress={() => {
+              const link = `evend://store/${store!.id}`;
+              Share.share({
+                message: `Check out ${store?.store_name ?? "this store"} on Evend!\n${link}`,
+                url: link,
+              });
+            }}
+          >
             <Ionicons name="share-outline" size={15} color={C.textPrimary} />
             <Text style={st.actionBtnText}>Share</Text>
           </Pressable>
@@ -673,7 +931,13 @@ export default function VendorStorePageScreen({
             </View>
           )}
           <View style={st.reviewMeta}>
-            <Text style={st.reviewName}>{displayName}</Text>
+            <View style={st.reviewNameRow}>
+              <Text style={st.reviewName}>{displayName}</Text>
+              <View style={st.verifiedPurchase}>
+                <Ionicons name="checkmark-circle" size={10} color={C.success} />
+                <Text style={st.verifiedPurchaseText}>Verified purchase</Text>
+              </View>
+            </View>
             <View style={st.reviewStarsRow}>
               {stars.map((name, i) => (
                 <Ionicons key={i} name={name as any} size={12} color="#F59E0B" />
@@ -683,6 +947,77 @@ export default function VendorStorePageScreen({
           </View>
         </View>
         {item.comment ? <Text style={st.reviewComment}>{item.comment}</Text> : null}
+
+        {(item.photos?.length ?? 0) > 0 && (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={st.reviewPhotos}
+          >
+            {item.photos!.map((uri, i) => (
+              <Image key={`${item.id}-${i}`} source={{ uri }} style={st.reviewPhoto} />
+            ))}
+          </ScrollView>
+        )}
+
+        {item.seller_reply ? (
+          <View style={[st.sellerReply, { borderLeftColor: tc }]}>
+            <Text style={[st.sellerReplyLabel, { color: tc }]}>Seller response</Text>
+            <Text style={st.sellerReplyText}>{item.seller_reply}</Text>
+          </View>
+        ) : null}
+
+        {isOwner && (
+          replyingId === item.id ? (
+            <View style={st.replyEditor}>
+              <TextInput
+                style={st.replyInput}
+                value={replyText}
+                onChangeText={setReplyText}
+                placeholder="Write a public response…"
+                placeholderTextColor={C.textMuted}
+                multiline
+                maxLength={500}
+                autoFocus
+              />
+              <View style={st.replyActions}>
+                <Pressable
+                  style={st.replyCancel}
+                  onPress={() => {
+                    setReplyingId(null);
+                    setReplyText("");
+                  }}
+                >
+                  <Text style={st.replyCancelText}>Cancel</Text>
+                </Pressable>
+                <Pressable
+                  style={[st.replySave, { backgroundColor: tc }]}
+                  onPress={() => handleSubmitReply(item.id)}
+                  disabled={replyBusy}
+                >
+                  {replyBusy ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <Text style={st.replySaveText}>{item.seller_reply ? "Update" : "Reply"}</Text>
+                  )}
+                </Pressable>
+              </View>
+            </View>
+          ) : (
+            <Pressable
+              style={st.replyTrigger}
+              onPress={() => {
+                setReplyingId(item.id);
+                setReplyText(item.seller_reply ?? "");
+              }}
+            >
+              <Ionicons name="arrow-undo-outline" size={13} color={C.textAccent} />
+              <Text style={st.replyTriggerText}>
+                {item.seller_reply ? "Edit response" : "Reply"}
+              </Text>
+            </Pressable>
+          )
+        )}
       </View>
     );
   };
@@ -708,7 +1043,9 @@ export default function VendorStorePageScreen({
             <Ionicons key={i} name={i < Math.round(avgRating) ? "star" : "star-outline"} size={16} color="#F59E0B" />
           ))}
         </View>
-        <Text style={st.ratingBigCount}>{reviews.length} review{reviews.length !== 1 ? "s" : ""}</Text>
+        <Text style={st.ratingBigCount}>
+          {(seller?.review_count ?? reviews.length)} review{(seller?.review_count ?? reviews.length) !== 1 ? "s" : ""}
+        </Text>
       </View>
       <View style={st.ratingBars}>
         {[5, 4, 3, 2, 1].map((star) => {
@@ -731,6 +1068,7 @@ export default function VendorStorePageScreen({
 
   return (
     <SafeAreaView style={st.safe}>
+      <StatusBar style="light" />
       {activeTab === "reviews" ? (
         <FlatList
           key="reviews-list"
@@ -789,6 +1127,18 @@ export default function VendorStorePageScreen({
                     ? "Try another category"
                     : "This vendor hasn't listed any cards yet."}
               </Text>
+              {(searchQuery.trim() || activeCategory !== "All") && (
+                <Pressable
+                  style={st.clearFiltersBtn}
+                  onPress={() => {
+                    setSearchQuery("");
+                    setActiveCategory("All");
+                  }}
+                >
+                  <Ionicons name="refresh-outline" size={14} color={C.textPrimary} />
+                  <Text style={st.clearFiltersText}>Clear filters</Text>
+                </Pressable>
+              )}
             </View>
           }
           contentContainerStyle={st.flatContent}
@@ -915,6 +1265,174 @@ const st = StyleSheet.create({
     lineHeight: 19,
     marginTop: 10,
   },
+  socialRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginTop: 12,
+  },
+  socialChip: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: C.elevated,
+    borderWidth: 1,
+    borderColor: C.borderIcon,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  specialtyRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 6,
+    marginTop: 12,
+  },
+  specialtyChip: {
+    backgroundColor: C.elevated,
+    borderWidth: 1,
+    borderColor: C.border,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  specialtyText: {
+    color: C.textSecondary,
+    fontSize: 11,
+    fontWeight: "600",
+  },
+  badgeRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 6,
+    marginTop: 12,
+  },
+  badge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: C.elevated,
+    borderWidth: 1,
+    borderColor: C.border,
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  badgeText: {
+    fontSize: 10,
+    fontWeight: "800",
+  },
+  tierPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 3,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  tierPillText: { fontSize: 10, fontWeight: "900" },
+  responseRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    marginTop: 12,
+  },
+  responseText: { color: C.textSecondary, fontSize: 12, fontWeight: "600" },
+  vouchCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    marginTop: 14,
+    padding: 12,
+    borderRadius: 14,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border,
+  },
+  vouchInfo: { flex: 1, gap: 4 },
+  vouchHeaderRow: { flexDirection: "row", alignItems: "center", gap: 6 },
+  vouchCount: { color: C.textPrimary, fontSize: 14, fontWeight: "800" },
+  vouchSub: { color: C.textMuted, fontSize: 11, fontWeight: "500" },
+  vouchAvatars: { flexDirection: "row", alignItems: "center" },
+  vouchAvatar: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: C.elevated,
+    borderWidth: 1.5,
+    borderColor: C.bg,
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "hidden",
+  },
+  vouchAvatarImg: { width: 22, height: 22, borderRadius: 11 },
+  vouchFollowedText: {
+    color: C.textSecondary,
+    fontSize: 11,
+    fontWeight: "600",
+    marginLeft: 8,
+  },
+  vouchBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 10,
+  },
+  vouchBtnText: { fontSize: 13, fontWeight: "800" },
+  reviewPhotos: { gap: 8, paddingTop: 10 },
+  reviewPhoto: {
+    width: 72,
+    height: 72,
+    borderRadius: 10,
+    backgroundColor: C.elevated,
+  },
+  sellerReply: {
+    marginTop: 10,
+    paddingLeft: 10,
+    paddingVertical: 4,
+    borderLeftWidth: 2,
+  },
+  sellerReplyLabel: { fontSize: 10, fontWeight: "800", marginBottom: 2 },
+  sellerReplyText: {
+    color: C.textSecondary,
+    fontSize: 13,
+    fontWeight: "500",
+    lineHeight: 18,
+  },
+  replyTrigger: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    marginTop: 10,
+    alignSelf: "flex-start",
+  },
+  replyTriggerText: { color: C.textAccent, fontSize: 12, fontWeight: "700" },
+  replyEditor: { marginTop: 10, gap: 8 },
+  replyInput: {
+    backgroundColor: C.elevated,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: C.border,
+    padding: 10,
+    color: C.textPrimary,
+    fontSize: 13,
+    minHeight: 60,
+    textAlignVertical: "top",
+  },
+  replyActions: { flexDirection: "row", justifyContent: "flex-end", gap: 8 },
+  replyCancel: { paddingHorizontal: 14, paddingVertical: 8 },
+  replyCancelText: { color: C.textMuted, fontSize: 13, fontWeight: "700" },
+  replySave: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 10,
+    minWidth: 72,
+    alignItems: "center",
+  },
+  replySaveText: { color: "#fff", fontSize: 13, fontWeight: "800" },
 
   // ── Actions ──
   actionRow: {
@@ -1382,9 +1900,25 @@ const st = StyleSheet.create({
     flex: 1,
     gap: 2,
   },
+  reviewNameRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    flexWrap: "wrap",
+  },
   reviewName: {
     color: C.textPrimary,
     fontSize: 13,
+    fontWeight: "700",
+  },
+  verifiedPurchase: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 3,
+  },
+  verifiedPurchaseText: {
+    color: C.success,
+    fontSize: 10,
     fontWeight: "700",
   },
   reviewStarsRow: {
@@ -1424,4 +1958,17 @@ const st = StyleSheet.create({
     textAlign: "center",
     paddingHorizontal: 40,
   },
+  clearFiltersBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginTop: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 9,
+    borderRadius: 999,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border,
+  },
+  clearFiltersText: { color: C.textPrimary, fontSize: 12, fontWeight: "700" },
 });

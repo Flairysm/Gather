@@ -1,0 +1,12 @@
+---
+description: Expo / React Native app conventions under src/
+globs: src/**/*
+alwaysApply: false
+---
+
+# Evend mobile (`src/`)
+
+- Use **TypeScript** and existing **theme** / **styles** patterns (`src/theme/`, `src/styles/*.styles.ts`) instead of ad hoc inline styles for large surfaces.
+- Prefer **React hooks and navigation** patterns already used in `src/navigation/` and screens; keep screen files cohesive.
+- **Supabase** access should go through established helpers in `src/lib/` where they exist.
+- For **library-specific** APIs (Expo modules, React Native), verify against current docs if unsure.

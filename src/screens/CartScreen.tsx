@@ -106,6 +106,10 @@ export default function CartScreen({ onBack }: Props) {
           <Text style={st.emptySub}>
             Browse the market and add cards to your cart
           </Text>
+          <Pressable style={st.browseBtn} onPress={onBack}>
+            <Ionicons name="storefront-outline" size={18} color={C.textHero} />
+            <Text style={st.browseBtnText}>Browse Market</Text>
+          </Pressable>
         </View>
       ) : (
         <>
@@ -170,7 +174,11 @@ export default function CartScreen({ onBack }: Props) {
                         st.qtyBtn,
                         ci.quantity <= 1 && st.qtyBtnDisabled,
                       ]}
-                      onPress={() => setQuantity(ci.listing.id, ci.quantity - 1)}
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                      onPress={(e) => {
+                        e.stopPropagation();
+                        setQuantity(ci.listing.id, ci.quantity - 1);
+                      }}
                       disabled={ci.quantity <= 1}
                     >
                       <Feather name="minus" size={12} color={C.textPrimary} />
@@ -181,7 +189,11 @@ export default function CartScreen({ onBack }: Props) {
                         st.qtyBtn,
                         ci.quantity >= (ci.listing.quantity ?? 99) && st.qtyBtnDisabled,
                       ]}
-                      onPress={() => setQuantity(ci.listing.id, ci.quantity + 1)}
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                      onPress={(e) => {
+                        e.stopPropagation();
+                        setQuantity(ci.listing.id, ci.quantity + 1);
+                      }}
                       disabled={ci.quantity >= (ci.listing.quantity ?? 99)}
                     >
                       <Feather name="plus" size={12} color={C.textPrimary} />
@@ -192,7 +204,18 @@ export default function CartScreen({ onBack }: Props) {
                   </Text>
                   <Pressable
                     style={st.removeBtn}
-                    onPress={() => removeItem(ci.listing.id)}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    onPress={(e) => {
+                      e.stopPropagation();
+                      Alert.alert(
+                        "Remove Item?",
+                        `Remove "${ci.listing.card_name}" from your cart?`,
+                        [
+                          { text: "Cancel", style: "cancel" },
+                          { text: "Remove", style: "destructive", onPress: () => removeItem(ci.listing.id) },
+                        ],
+                      );
+                    }}
                   >
                     <Feather name="trash-2" size={14} color={C.danger} />
                   </Pressable>
@@ -251,6 +274,12 @@ const st = StyleSheet.create({
   },
   emptyTitle: { color: C.textPrimary, fontSize: 18, fontWeight: "800" },
   emptySub: { color: C.textSecondary, fontSize: 13, fontWeight: "500", textAlign: "center", paddingHorizontal: 40 },
+  browseBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8,
+    backgroundColor: C.accent, borderRadius: S.radiusSmall,
+    paddingHorizontal: 22, paddingVertical: 13, marginTop: 8,
+  },
+  browseBtnText: { color: C.textHero, fontSize: 14, fontWeight: "800" },
 
   selectBar: {
     flexDirection: "row", alignItems: "center", justifyContent: "space-between",

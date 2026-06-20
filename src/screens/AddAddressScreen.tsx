@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -17,6 +17,7 @@ import { Feather, Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { C, S } from "../theme";
 import { supabase } from "../lib/supabase";
+import { useToast } from "../components/Toast";
 
 const LABELS = ["Home", "Work", "Other"] as const;
 
@@ -31,6 +32,7 @@ type Props = { editId?: string; onBack: () => void };
 
 export default function AddAddressScreen({ editId, onBack }: Props) {
   const insets = useSafeAreaInsets();
+  const { toast, showToast } = useToast();
   const [label, setLabel] = useState<string>("Home");
   const [fullName, setFullName] = useState("");
   const [phone, setPhone] = useState("");
@@ -43,6 +45,10 @@ export default function AddAddressScreen({ editId, onBack }: Props) {
   const [isDefault, setIsDefault] = useState(false);
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(!!editId);
+  const [showErrors, setShowErrors] = useState(false);
+  const [initialSnap, setInitialSnap] = useState(
+    () => ["Home", "", "", "", "", "", "", "", "false"].join("|"),
+  );
 
   useEffect(() => {
     if (!editId) return;
@@ -62,10 +68,33 @@ export default function AddAddressScreen({ editId, onBack }: Props) {
         setCity(data.city);
         setState(data.state);
         setIsDefault(data.is_default);
+        setInitialSnap(
+          [
+            data.label,
+            data.full_name,
+            data.phone ?? "",
+            data.address_line1,
+            data.address_line2 ?? "",
+            data.zip ?? "",
+            data.city,
+            data.state,
+            String(data.is_default),
+          ].join("|"),
+        );
       }
       setLoading(false);
     })();
   }, [editId]);
+
+  const phoneError =
+    phone.trim().length > 0 && phone.trim().length < 10
+      ? "Enter a valid phone number (at least 10 digits)."
+      : phone.trim().length === 0
+        ? "Phone number is required."
+        : null;
+  const postcodeError =
+    postcode.trim().length !== 5 ? "Postcode must be 5 digits." : null;
+  const stateError = state.trim().length === 0 ? "Please select a state." : null;
 
   const isValid =
     fullName.trim().length > 0 &&
@@ -75,8 +104,33 @@ export default function AddAddressScreen({ editId, onBack }: Props) {
     city.trim().length > 0 &&
     state.trim().length > 0;
 
+  const currentSnap = useMemo(
+    () => [label, fullName, phone, line1, line2, postcode, city, state, String(isDefault)].join("|"),
+    [label, fullName, phone, line1, line2, postcode, city, state, isDefault],
+  );
+  const isDirty = currentSnap !== initialSnap;
+
+  function handleBack() {
+    if (!isDirty) {
+      onBack();
+      return;
+    }
+    Alert.alert(
+      "Discard changes?",
+      "You have unsaved changes. Are you sure you want to go back?",
+      [
+        { text: "Keep Editing", style: "cancel" },
+        { text: "Discard", style: "destructive", onPress: onBack },
+      ],
+    );
+  }
+
   async function handleSave() {
-    if (!isValid || saving) return;
+    if (saving) return;
+    if (!isValid) {
+      setShowErrors(true);
+      return;
+    }
     setSaving(true);
 
     try {
@@ -128,7 +182,8 @@ export default function AddAddressScreen({ editId, onBack }: Props) {
         if (error) throw error;
       }
 
-      onBack();
+      showToast(editId ? "Address updated" : "Address saved");
+      setTimeout(onBack, 700);
     } catch (err: any) {
       Alert.alert("Error", err.message ?? "Failed to save address");
     } finally {
@@ -141,9 +196,9 @@ export default function AddAddressScreen({ editId, onBack }: Props) {
       <SafeAreaView style={st.safe}>
         <StatusBar style="light" />
         <View style={st.header}>
-          <Pressable style={st.backBtn} onPress={onBack}>
-            <Feather name="arrow-left" size={20} color={C.textPrimary} />
-          </Pressable>
+        <Pressable style={st.backBtn} onPress={handleBack}>
+          <Feather name="arrow-left" size={20} color={C.textPrimary} />
+        </Pressable>
           <Text style={st.headerTitle}>{editId ? "Edit Address" : "Add Address"}</Text>
           <View style={{ width: 36 }} />
         </View>
@@ -159,7 +214,7 @@ export default function AddAddressScreen({ editId, onBack }: Props) {
       <StatusBar style="light" />
 
       <View style={st.header}>
-        <Pressable style={st.backBtn} onPress={onBack}>
+        <Pressable style={st.backBtn} onPress={handleBack}>
           <Feather name="arrow-left" size={20} color={C.textPrimary} />
         </Pressable>
         <Text style={st.headerTitle}>{editId ? "Edit Address" : "Add Address"}</Text>
@@ -205,13 +260,16 @@ export default function AddAddressScreen({ editId, onBack }: Props) {
           {/* Phone */}
           <Text style={st.fieldLabel}>Phone Number</Text>
           <TextInput
-            style={st.input}
+            style={[st.input, showErrors && phoneError && st.inputError]}
             value={phone}
             onChangeText={(t) => setPhone(t.replace(/[^\d+\-\s]/g, ""))}
             placeholder="012-345 6789"
             placeholderTextColor={C.textMuted}
             keyboardType="phone-pad"
           />
+          {showErrors && phoneError ? (
+            <Text style={st.errorText}>{phoneError}</Text>
+          ) : null}
 
           {/* Address Line 1 */}
           <Text style={st.fieldLabel}>Address Line 1</Text>
@@ -240,7 +298,7 @@ export default function AddAddressScreen({ editId, onBack }: Props) {
             <View style={{ flex: 1 }}>
               <Text style={st.fieldLabel}>Postcode</Text>
               <TextInput
-                style={st.input}
+                style={[st.input, showErrors && postcodeError && st.inputError]}
                 value={postcode}
                 onChangeText={(t) => setPostcode(t.replace(/\D/g, "").slice(0, 5))}
                 placeholder="50000"
@@ -248,6 +306,9 @@ export default function AddAddressScreen({ editId, onBack }: Props) {
                 keyboardType="number-pad"
                 maxLength={5}
               />
+              {showErrors && postcodeError ? (
+                <Text style={st.errorText}>{postcodeError}</Text>
+              ) : null}
             </View>
             <View style={{ flex: 2 }}>
               <Text style={st.fieldLabel}>City</Text>
@@ -263,12 +324,18 @@ export default function AddAddressScreen({ editId, onBack }: Props) {
 
           {/* State */}
           <Text style={st.fieldLabel}>State</Text>
-          <Pressable style={st.pickerBtn} onPress={() => setShowStatePicker(!showStatePicker)}>
+          <Pressable
+            style={[st.pickerBtn, showErrors && stateError && st.inputError]}
+            onPress={() => setShowStatePicker(!showStatePicker)}
+          >
             <Text style={state ? st.pickerBtnText : st.pickerBtnPlaceholder}>
               {state || "Select state"}
             </Text>
             <Feather name={showStatePicker ? "chevron-up" : "chevron-down"} size={16} color={C.textMuted} />
           </Pressable>
+          {showErrors && stateError ? (
+            <Text style={st.errorText}>{stateError}</Text>
+          ) : null}
           {showStatePicker && (
             <View style={st.stateList}>
               <ScrollView nestedScrollEnabled showsVerticalScrollIndicator>
@@ -303,7 +370,7 @@ export default function AddAddressScreen({ editId, onBack }: Props) {
           <Pressable
             style={[st.saveBtn, !isValid && st.saveBtnDisabled]}
             onPress={handleSave}
-            disabled={!isValid || saving}
+            disabled={saving}
           >
             {saving ? (
               <ActivityIndicator size="small" color={C.textHero} />
@@ -315,6 +382,7 @@ export default function AddAddressScreen({ editId, onBack }: Props) {
           </Pressable>
         </View>
       </KeyboardAvoidingView>
+      {toast}
     </SafeAreaView>
   );
 }
@@ -350,6 +418,14 @@ const st = StyleSheet.create({
     paddingHorizontal: 14, height: 46,
     color: C.textPrimary, fontSize: 14, fontWeight: "500",
     marginBottom: S.xl,
+  },
+  inputError: { borderColor: C.danger },
+  errorText: {
+    color: C.danger,
+    fontSize: 11,
+    fontWeight: "600",
+    marginTop: -18,
+    marginBottom: 12,
   },
 
   labelRow: {

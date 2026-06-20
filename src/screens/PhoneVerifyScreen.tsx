@@ -25,12 +25,14 @@ type Step = "ENTER_PHONE" | "ENTER_CODE" | "VERIFIED";
 export default function PhoneVerifyScreen({ onBack }: Props) {
   const [step, setStep] = useState<Step>("ENTER_PHONE");
   const [phone, setPhone] = useState("");
+  const [e164Phone, setE164Phone] = useState("");
   const [code, setCode] = useState("");
   const [sending, setSending] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const [existingPhone, setExistingPhone] = useState<string | null>(null);
   const [alreadyVerified, setAlreadyVerified] = useState(false);
   const [resendTimer, setResendTimer] = useState(0);
+  const [unavailable, setUnavailable] = useState(false);
 
   const checkAnim = useRef(new Animated.Value(0)).current;
   const codeInputRef = useRef<TextInput>(null);
@@ -87,16 +89,37 @@ export default function PhoneVerifyScreen({ onBack }: Props) {
       return;
     }
 
+    const e164 = `+60${normalized}`;
+
     setSending(true);
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Not signed in");
 
+      // Persist the entered number first so the profile reflects the latest input,
+      // but DO NOT mark it verified until the OTP is actually confirmed below.
       await supabase
         .from("profiles")
-        .update({ phone_number: `+60${normalized}`, updated_at: new Date().toISOString() })
+        .update({ phone_number: e164, updated_at: new Date().toISOString() })
         .eq("id", user.id);
 
+      // Real SMS OTP via Supabase Auth. The user is already authenticated (email),
+      // so we ATTACH the phone to the existing account via updateUser (which sends a
+      // phone-change OTP) rather than signInWithOtp (which would start a separate
+      // phone sign-in). Requires an SMS provider (e.g. Twilio) configured in the
+      // Supabase project's Auth settings; without it this errors.
+      const { error: otpError } = await supabase.auth.updateUser({ phone: e164 });
+      if (otpError) {
+        setUnavailable(true);
+        Alert.alert(
+          "Phone Verification Unavailable",
+          "We couldn't send a verification code right now. Phone verification is temporarily unavailable — please try again later.",
+        );
+        return;
+      }
+
+      setE164Phone(e164);
+      setUnavailable(false);
       setStep("ENTER_CODE");
       setResendTimer(60);
       setTimeout(() => codeInputRef.current?.focus(), 300);
@@ -118,6 +141,17 @@ export default function PhoneVerifyScreen({ onBack }: Props) {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Not signed in");
 
+      // Verify the SMS OTP. Only on success do we mark the profile as verified.
+      const { error: verifyError } = await supabase.auth.verifyOtp({
+        phone: e164Phone,
+        token: code,
+        type: "phone_change",
+      });
+      if (verifyError) {
+        Alert.alert("Invalid Code", "That code is incorrect or has expired. Please try again.");
+        return;
+      }
+
       await supabase
         .from("profiles")
         .update({ phone_verified: true, updated_at: new Date().toISOString() })
@@ -137,10 +171,28 @@ export default function PhoneVerifyScreen({ onBack }: Props) {
     }
   }
 
-  function handleResend() {
-    if (resendTimer > 0) return;
+  async function handleResend() {
+    if (resendTimer > 0 || sending) return;
     setCode("");
-    handleSendCode();
+    if (!e164Phone) {
+      handleSendCode();
+      return;
+    }
+    setSending(true);
+    try {
+      const { error: otpError } = await supabase.auth.updateUser({ phone: e164Phone });
+      if (otpError) {
+        // Supabase enforces a cooldown between OTP sends; surface that clearly.
+        Alert.alert(
+          "Couldn't Resend",
+          otpError.message ?? "Please wait a moment before requesting another code.",
+        );
+        return;
+      }
+      setResendTimer(60);
+    } finally {
+      setSending(false);
+    }
   }
 
   const phoneDigits = phone.replace(/\D/g, "");
@@ -171,6 +223,15 @@ export default function PhoneVerifyScreen({ onBack }: Props) {
               <Text style={st.subtitle}>
                 A verified phone number is required to place bids on auctions. We'll send a verification code via SMS.
               </Text>
+
+              {unavailable && (
+                <View style={st.unavailableNotice}>
+                  <Ionicons name="warning-outline" size={16} color="#F59E0B" />
+                  <Text style={st.unavailableText}>
+                    Phone verification is temporarily unavailable. Please try again later.
+                  </Text>
+                </View>
+              )}
 
               <Text style={st.fieldLabel}>Phone Number</Text>
               <View style={st.phoneInputRow}>
@@ -217,7 +278,10 @@ export default function PhoneVerifyScreen({ onBack }: Props) {
                 </Text>
               </Text>
 
-              <View style={st.codeRow}>
+              <Pressable
+                style={st.codeRow}
+                onPress={() => codeInputRef.current?.focus()}
+              >
                 {Array.from({ length: 6 }).map((_, i) => (
                   <View
                     key={i}
@@ -239,7 +303,7 @@ export default function PhoneVerifyScreen({ onBack }: Props) {
                   autoFocus
                   maxLength={6}
                 />
-              </View>
+              </Pressable>
 
               <Pressable
                 style={[st.primaryBtn, code.length < 6 && st.primaryBtnDisabled]}
@@ -349,6 +413,20 @@ const st = StyleSheet.create({
     textTransform: "uppercase", letterSpacing: 0.6,
     alignSelf: "stretch", marginBottom: -8,
   },
+
+  unavailableNotice: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    alignSelf: "stretch",
+    backgroundColor: "rgba(245,158,11,0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(245,158,11,0.3)",
+    borderRadius: S.radiusSmall,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  unavailableText: { flex: 1, color: "#F59E0B", fontSize: 12, fontWeight: "600", lineHeight: 16 },
 
   phoneInputRow: {
     flexDirection: "row",

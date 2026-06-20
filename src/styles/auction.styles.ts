@@ -309,6 +309,21 @@ export const auction = StyleSheet.create({
     fontWeight: "800",
     letterSpacing: 0.5,
   },
+  cardFooter: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 2,
+    marginTop: S.md,
+    paddingTop: S.sm,
+    borderTopWidth: 1,
+    borderTopColor: C.border,
+  },
+  cardFooterText: {
+    color: C.textMuted,
+    fontSize: 11,
+    fontWeight: "700",
+  },
 
   statsRow: {
     flexDirection: "row",

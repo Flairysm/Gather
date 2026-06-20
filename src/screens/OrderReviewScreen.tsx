@@ -13,11 +13,16 @@ import {
   TextInput,
   View,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
-import { Feather, Ionicons } from "@expo/vector-icons";
+import { Ionicons } from "@expo/vector-icons";
+import * as ImagePicker from "expo-image-picker";
 import { C, S } from "../theme";
 import { supabase } from "../lib/supabase";
 import { requireNetwork } from "../lib/network";
+import ScreenHeader from "../components/ScreenHeader";
+
+const MAX_REVIEW_PHOTOS = 6;
 
 type SellerProfile = {
   display_name: string | null;
@@ -31,6 +36,7 @@ type ExistingReview = {
   id: string;
   rating: number;
   comment: string | null;
+  photos: string[] | null;
 };
 
 type Props = {
@@ -42,10 +48,12 @@ type Props = {
 const STAR_LABELS = ["", "Terrible", "Poor", "Okay", "Good", "Excellent"];
 
 export default function OrderReviewScreen({ orderId, sellerId, onBack }: Props) {
+  const insets = useSafeAreaInsets();
   const [seller, setSeller] = useState<SellerProfile | null>(null);
   const [existing, setExisting] = useState<ExistingReview | null>(null);
   const [rating, setRating] = useState(0);
   const [comment, setComment] = useState("");
+  const [photos, setPhotos] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
 
@@ -59,7 +67,7 @@ export default function OrderReviewScreen({ orderId, sellerId, onBack }: Props) 
         .maybeSingle(),
       supabase
         .from("reviews")
-        .select("id, rating, comment")
+        .select("id, rating, comment, photos")
         .eq("order_id", orderId)
         .eq("seller_id", sellerId)
         .maybeSingle(),
@@ -70,9 +78,11 @@ export default function OrderReviewScreen({ orderId, sellerId, onBack }: Props) 
 
     if (sellerResult.data) setSeller(sellerResult.data as SellerProfile);
     if (reviewResult.data) {
-      setExisting(reviewResult.data as ExistingReview);
-      setRating((reviewResult.data as ExistingReview).rating);
-      setComment((reviewResult.data as ExistingReview).comment ?? "");
+      const r = reviewResult.data as ExistingReview;
+      setExisting(r);
+      setRating(r.rating);
+      setComment(r.comment ?? "");
+      setPhotos(Array.isArray(r.photos) ? r.photos : []);
     }
     setLoading(false);
   }, [orderId, sellerId]);
@@ -81,6 +91,49 @@ export default function OrderReviewScreen({ orderId, sellerId, onBack }: Props) 
     load();
   }, [load]);
 
+  async function pickPhotos() {
+    if (photos.length >= MAX_REVIEW_PHOTOS) {
+      Alert.alert("Limit reached", `You can attach up to ${MAX_REVIEW_PHOTOS} photos.`);
+      return;
+    }
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) {
+      Alert.alert("Permission needed", "Photo access is required to attach photos.");
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ["images"],
+      allowsMultipleSelection: true,
+      selectionLimit: MAX_REVIEW_PHOTOS - photos.length,
+      quality: 0.7,
+    });
+    if (result.canceled) return;
+    const uris = result.assets.map((a) => a.uri);
+    setPhotos((prev) => [...prev, ...uris].slice(0, MAX_REVIEW_PHOTOS));
+  }
+
+  function removePhoto(uri: string) {
+    setPhotos((prev) => prev.filter((p) => p !== uri));
+  }
+
+  async function uploadPhoto(localUri: string, userId: string): Promise<string> {
+    const extMatch = localUri.match(/\.(\w+)(\?|$)/);
+    const ext = extMatch?.[1]?.toLowerCase() ?? "jpg";
+    const mimeTypes: Record<string, string> = {
+      jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
+      gif: "image/gif", webp: "image/webp",
+    };
+    const contentType = mimeTypes[ext] ?? "image/jpeg";
+    const filePath = `${userId}/${orderId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+    const resp = await fetch(localUri);
+    const arrayBuf = await resp.arrayBuffer();
+    const { error } = await supabase.storage
+      .from("review-photos")
+      .upload(filePath, arrayBuf, { upsert: true, contentType });
+    if (error) throw error;
+    return supabase.storage.from("review-photos").getPublicUrl(filePath).data.publicUrl;
+  }
+
   async function handleSubmit() {
     if (!(await requireNetwork())) return;
     if (rating < 1 || rating > 5) {
@@ -88,11 +141,26 @@ export default function OrderReviewScreen({ orderId, sellerId, onBack }: Props) 
       return;
     }
     setSubmitting(true);
+
+    let finalPhotos: string[] = [];
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error("Not signed in");
+      finalPhotos = await Promise.all(
+        photos.map((p) => (/^https?:\/\//i.test(p) ? Promise.resolve(p) : uploadPhoto(p, user.id))),
+      );
+    } catch (e: any) {
+      setSubmitting(false);
+      Alert.alert("Photo upload failed", e?.message ?? "Please try again.");
+      return;
+    }
+
     const { error } = await supabase.rpc("submit_review", {
       p_order_id: orderId,
       p_seller_id: sellerId,
       p_rating: rating,
       p_comment: comment.trim() || null,
+      p_photos: finalPhotos,
     });
     setSubmitting(false);
 
@@ -101,11 +169,8 @@ export default function OrderReviewScreen({ orderId, sellerId, onBack }: Props) 
       return;
     }
 
-    Alert.alert(
-      existing ? "Review Updated" : "Review Submitted",
-      "Thank you for your feedback!",
-      [{ text: "OK", onPress: onBack }],
-    );
+    // Success: navigate straight back instead of forcing an OK tap.
+    onBack();
   }
 
   const sellerName =
@@ -117,13 +182,7 @@ export default function OrderReviewScreen({ orderId, sellerId, onBack }: Props) 
     return (
       <SafeAreaView style={st.safe}>
         <StatusBar style="light" />
-        <View style={st.header}>
-          <Pressable style={st.backBtn} onPress={onBack}>
-            <Feather name="arrow-left" size={20} color={C.textPrimary} />
-          </Pressable>
-          <Text style={st.headerTitle}>Rate Seller</Text>
-          <View style={{ width: 36 }} />
-        </View>
+        <ScreenHeader title="Rate Seller" onBack={onBack} />
         <View style={st.centerLoading}>
           <ActivityIndicator size="large" color={C.accent} />
         </View>
@@ -138,15 +197,7 @@ export default function OrderReviewScreen({ orderId, sellerId, onBack }: Props) 
         style={{ flex: 1 }}
         behavior={Platform.OS === "ios" ? "padding" : undefined}
       >
-        <View style={st.header}>
-          <Pressable style={st.backBtn} onPress={onBack}>
-            <Feather name="arrow-left" size={20} color={C.textPrimary} />
-          </Pressable>
-          <Text style={st.headerTitle}>
-            {isEditing ? "Edit Review" : "Rate Seller"}
-          </Text>
-          <View style={{ width: 36 }} />
-        </View>
+        <ScreenHeader title={isEditing ? "Edit Review" : "Rate Seller"} onBack={onBack} />
 
         <ScrollView
           contentContainerStyle={st.scroll}
@@ -224,10 +275,35 @@ export default function OrderReviewScreen({ orderId, sellerId, onBack }: Props) 
             />
             <Text style={st.charCount}>{comment.length}/500</Text>
           </View>
+
+          {/* Photos */}
+          <View style={st.photoSection}>
+            <Text style={st.sectionLabel}>Photos (optional)</Text>
+            <View style={st.photoGrid}>
+              {photos.map((uri) => (
+                <View key={uri} style={st.photoThumbWrap}>
+                  <Image source={{ uri }} style={st.photoThumb} />
+                  <Pressable
+                    style={st.photoRemove}
+                    onPress={() => removePhoto(uri)}
+                    hitSlop={6}
+                  >
+                    <Ionicons name="close" size={12} color="#fff" />
+                  </Pressable>
+                </View>
+              ))}
+              {photos.length < MAX_REVIEW_PHOTOS && (
+                <Pressable style={st.photoAdd} onPress={pickPhotos}>
+                  <Ionicons name="camera-outline" size={22} color={C.textMuted} />
+                  <Text style={st.photoAddText}>Add</Text>
+                </Pressable>
+              )}
+            </View>
+          </View>
         </ScrollView>
 
         {/* Submit */}
-        <View style={st.bottomBar}>
+        <View style={[st.bottomBar, { paddingBottom: Math.max(insets.bottom, 14) }]}>
           <Pressable
             style={[st.submitBtn, rating < 1 && st.submitBtnDisabled]}
             onPress={handleSubmit}
@@ -255,33 +331,6 @@ export default function OrderReviewScreen({ orderId, sellerId, onBack }: Props) 
 const st = StyleSheet.create({
   safe: { flex: 1, backgroundColor: C.bg },
   centerLoading: { flex: 1, alignItems: "center", justifyContent: "center" },
-
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: S.screenPadding,
-    paddingVertical: S.md,
-    gap: S.md,
-    borderBottomWidth: 1,
-    borderBottomColor: C.border,
-  },
-  backBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: C.elevated,
-    borderWidth: 1,
-    borderColor: C.border,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  headerTitle: {
-    flex: 1,
-    color: C.textPrimary,
-    fontSize: 16,
-    fontWeight: "800",
-    textAlign: "center",
-  },
 
   scroll: {
     paddingHorizontal: S.screenPadding,
@@ -382,10 +431,55 @@ const st = StyleSheet.create({
     textAlign: "right",
   },
 
+  photoSection: {
+    backgroundColor: C.surface,
+    borderRadius: S.radiusCard,
+    borderWidth: 1,
+    borderColor: C.border,
+    padding: S.lg,
+    gap: 12,
+    marginTop: S.xl,
+  },
+  photoGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+  },
+  photoThumbWrap: {
+    width: 72,
+    height: 72,
+    borderRadius: 12,
+    overflow: "hidden",
+  },
+  photoThumb: { width: 72, height: 72, borderRadius: 12 },
+  photoRemove: {
+    position: "absolute",
+    top: 3,
+    right: 3,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: "rgba(0,0,0,0.6)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  photoAdd: {
+    width: 72,
+    height: 72,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: C.border,
+    borderStyle: "dashed",
+    backgroundColor: C.elevated,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 2,
+  },
+  photoAddText: { color: C.textMuted, fontSize: 11, fontWeight: "700" },
+
   bottomBar: {
     paddingHorizontal: S.screenPadding,
     paddingTop: 10,
-    paddingBottom: 30,
     borderTopWidth: 1,
     borderTopColor: C.border,
   },

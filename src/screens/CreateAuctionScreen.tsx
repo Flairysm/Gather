@@ -8,6 +8,7 @@ import {
   Pressable,
   SafeAreaView,
   ScrollView,
+  StyleSheet,
   Text,
   TextInput,
   View,
@@ -17,7 +18,7 @@ import { Feather, Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { C } from "../theme";
+import { C, S } from "../theme";
 import { cf } from "../styles/createForm.styles";
 import { MARKET_FILTERS } from "../data/market";
 import { supabase } from "../lib/supabase";
@@ -38,6 +39,16 @@ const DURATIONS: Duration[] = [
   { label: "3 Days", hours: 72 },
   { label: "7 Days", hours: 168 },
 ];
+
+function formatPrice(n: number): string {
+  return `RM${n.toLocaleString("en-MY", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+}
+
+function formatEndDate(date: Date): string {
+  return date.toLocaleDateString("en-MY", {
+    weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
+  });
+}
 
 type Props = { onBack: () => void };
 
@@ -126,7 +137,59 @@ export default function CreateAuctionScreen({ onBack }: Props) {
     return data.publicUrl;
   }
 
-  async function handleSubmit() {
+  type ParsedPrices = {
+    numStart: number;
+    numReserve: number | null;
+    numBuyNow: number | null;
+    numIncrement: number;
+  };
+
+  function parsePrices(): ParsedPrices | null {
+    const numStart = parseFloat(startingPrice.replace(/(RM|\$|,)/gi, ""));
+    if (isNaN(numStart) || numStart <= 0) {
+      Alert.alert("Error", "Please enter a valid starting price.");
+      return null;
+    }
+    const numReserve = reservePrice.trim()
+      ? parseFloat(reservePrice.replace(/(RM|\$|,)/gi, ""))
+      : null;
+    if (numReserve !== null && (isNaN(numReserve) || numReserve < numStart)) {
+      Alert.alert("Error", "Reserve price must be at least the starting price.");
+      return null;
+    }
+    const numBuyNow = buyNowPrice.trim()
+      ? parseFloat(buyNowPrice.replace(/(RM|\$|,)/gi, ""))
+      : null;
+    if (numBuyNow !== null && (isNaN(numBuyNow) || numBuyNow <= numStart)) {
+      Alert.alert("Error", "Buy Now price must be higher than starting price.");
+      return null;
+    }
+    const numIncrement = Math.max(1, parseFloat(minIncrement.replace(/(RM|\$|,)/gi, "")) || 1);
+    return { numStart, numReserve, numBuyNow, numIncrement };
+  }
+
+  function handleSubmit() {
+    const parsed = parsePrices();
+    if (!parsed) return;
+
+    const endDate = new Date(Date.now() + duration.hours * 3600000);
+    const summary =
+      `${cardName.trim() || "Card"}\n\n` +
+      `Starting bid: ${formatPrice(parsed.numStart)}\n` +
+      (parsed.numReserve != null ? `Reserve: ${formatPrice(parsed.numReserve)}\n` : "") +
+      (parsed.numBuyNow != null ? `Buy Now: ${formatPrice(parsed.numBuyNow)}\n` : "") +
+      `Min raise: ${formatPrice(parsed.numIncrement)}\n` +
+      `Duration: ${duration.label}\n` +
+      `Ends: ${formatEndDate(endDate)}\n\n` +
+      `Goes live immediately and bids are binding.`;
+
+    Alert.alert("Start Auction?", summary, [
+      { text: "Cancel", style: "cancel" },
+      { text: "Start Auction", onPress: () => submitAuction(parsed) },
+    ]);
+  }
+
+  async function submitAuction(parsed: ParsedPrices) {
     if (!(await requireNetwork())) return;
     setSubmitting(true);
     const { data: { user } } = await supabase.auth.getUser();
@@ -139,33 +202,6 @@ export default function CreateAuctionScreen({ onBack }: Props) {
     try {
       const uploadedUrls = await Promise.all(images.map((uri, i) => uploadImage(uri, user.id, i)));
 
-      const numStart = parseFloat(startingPrice.replace(/(RM|\$|,)/gi, ""));
-      if (isNaN(numStart) || numStart <= 0) {
-        setSubmitting(false);
-        Alert.alert("Error", "Please enter a valid starting price.");
-        return;
-      }
-
-      const numReserve = reservePrice.trim()
-        ? parseFloat(reservePrice.replace(/(RM|\$|,)/gi, ""))
-        : null;
-      if (numReserve !== null && (isNaN(numReserve) || numReserve < numStart)) {
-        setSubmitting(false);
-        Alert.alert("Error", "Reserve price must be at least the starting price.");
-        return;
-      }
-
-      const numBuyNow = buyNowPrice.trim()
-        ? parseFloat(buyNowPrice.replace(/(RM|\$|,)/gi, ""))
-        : null;
-      if (numBuyNow !== null && (isNaN(numBuyNow) || numBuyNow <= numStart)) {
-        setSubmitting(false);
-        Alert.alert("Error", "Buy Now price must be higher than starting price.");
-        return;
-      }
-
-      const numIncrement = Math.max(1, parseFloat(minIncrement.replace(/(RM|\$|,)/gi, "")) || 1);
-
       const endsAt = new Date(Date.now() + duration.hours * 3600000).toISOString();
 
       const { error } = await supabase.from("auction_items").insert({
@@ -176,10 +212,10 @@ export default function CreateAuctionScreen({ onBack }: Props) {
         grading_company: gradingCompany,
         grade_value: gradeValue,
         condition: condition || null,
-        starting_price: numStart,
-        reserve_price: numReserve,
-        buy_now_price: numBuyNow,
-        min_bid_increment: numIncrement,
+        starting_price: parsed.numStart,
+        reserve_price: parsed.numReserve,
+        buy_now_price: parsed.numBuyNow,
+        min_bid_increment: parsed.numIncrement,
         category,
         description: description.trim() || null,
         images: uploadedUrls,
@@ -189,7 +225,9 @@ export default function CreateAuctionScreen({ onBack }: Props) {
       });
 
       if (error) throw error;
-      onBack();
+      Alert.alert("Auction Started", "Your auction is now live.", [
+        { text: "OK", onPress: onBack },
+      ]);
     } catch (err: any) {
       Alert.alert("Error", err?.message ?? "Failed to create auction.");
     } finally {
@@ -303,6 +341,9 @@ export default function CreateAuctionScreen({ onBack }: Props) {
                 <Text style={cf.dollarSign}>RM</Text>
                 <TextInput style={cf.priceInput} value={reservePrice} onChangeText={setReservePrice} placeholder="Min price to sell" placeholderTextColor={C.textMuted} keyboardType="numeric" />
               </View>
+              <Text style={lst.helperText}>
+                Hidden minimum — the auction may end unsold if bids don't reach it.
+              </Text>
 
               <Text style={cf.fieldLabel}>Buy It Now Price (optional)</Text>
               <View style={cf.priceInputRow}>
@@ -330,6 +371,9 @@ export default function CreateAuctionScreen({ onBack }: Props) {
                   </Pressable>
                 ))}
               </View>
+              <Text style={lst.helperText}>
+                Ends {formatEndDate(new Date(Date.now() + duration.hours * 3600000))}
+              </Text>
 
               <Text style={cf.fieldLabel}>Description</Text>
               <TextInput
@@ -390,7 +434,7 @@ export default function CreateAuctionScreen({ onBack }: Props) {
                   <View style={cf.reviewRow}>
                     <Text style={cf.reviewLabel}>Reserve</Text>
                     <Text style={cf.reviewValue}>
-                      RM${reservePrice.replace(/^(RM|\$)/i, "")}
+                      {`RM${reservePrice.replace(/^(RM|\$)/i, "")}`}
                     </Text>
                   </View>
                 ) : null}
@@ -398,7 +442,7 @@ export default function CreateAuctionScreen({ onBack }: Props) {
                   <View style={cf.reviewRow}>
                     <Text style={cf.reviewLabel}>Buy Now</Text>
                     <Text style={[cf.reviewValue, { color: C.success }]}>
-                      RM${buyNowPrice.replace(/^(RM|\$)/i, "")}
+                      {`RM${buyNowPrice.replace(/^(RM|\$)/i, "")}`}
                     </Text>
                   </View>
                 ) : null}
@@ -444,3 +488,14 @@ export default function CreateAuctionScreen({ onBack }: Props) {
     </SafeAreaView>
   );
 }
+
+const lst = StyleSheet.create({
+  helperText: {
+    color: C.textMuted,
+    fontSize: 11,
+    fontWeight: "600",
+    marginTop: -6,
+    marginBottom: S.md,
+    lineHeight: 16,
+  },
+});

@@ -14,6 +14,11 @@ type VendorApplication = {
   status: "pending" | "approved" | "rejected";
   reviewed_at: string | null;
   created_at: string;
+  full_name: string | null;
+  phone: string | null;
+  ic_number: string | null;
+  ic_front_path: string | null;
+  selfie_path: string | null;
 };
 
 export default function VendorApplicationsPage() {
@@ -23,6 +28,21 @@ export default function VendorApplicationsPage() {
   const [selected, setSelected] = useState<VendorApplication | null>(null);
   const [adminNote, setAdminNote] = useState("");
   const [saving, setSaving] = useState(false);
+  const [docLoading, setDocLoading] = useState<string | null>(null);
+  const [docError, setDocError] = useState<string | null>(null);
+
+  async function viewDocument(path: string | null) {
+    if (!path) return;
+    setDocLoading(path);
+    setDocError(null);
+    const { ok, error: err, data } = await adminAction<{ url: string }>("kyc.signUrl", { path });
+    setDocLoading(null);
+    if (!ok || !data?.url) {
+      setDocError(err ?? "Could not open document");
+      return;
+    }
+    window.open(data.url, "_blank", "noopener,noreferrer");
+  }
 
   async function load() {
     setLoading(true);
@@ -30,7 +50,7 @@ export default function VendorApplicationsPage() {
 
     const { data, error: queryError } = await adminQuery<VendorApplication>({
       table: "vendor_applications",
-      select: "id, profile_id, store_name, description, categories, notes, status, reviewed_at, created_at",
+      select: "id, profile_id, store_name, description, categories, notes, status, reviewed_at, created_at, full_name, phone, ic_number, ic_front_path, selfie_path",
       order: [{ column: "created_at", ascending: false }],
     });
 
@@ -167,6 +187,7 @@ export default function VendorApplicationsPage() {
                       onClick={() => {
                         setSelected(row);
                         setAdminNote(row.notes ?? "");
+                        setDocError(null);
                       }}
                       className="rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-200 hover:bg-slate-800"
                     >
@@ -230,6 +251,57 @@ export default function VendorApplicationsPage() {
               <div>
                 <p className="text-xs uppercase tracking-wide text-slate-500">Status</p>
                 <p className="mt-1 capitalize text-slate-200">{selected.status}</p>
+              </div>
+
+              {/* ── Identity verification ── */}
+              <div className="md:col-span-2 mt-1 rounded-lg border border-slate-800 bg-slate-950 p-3">
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-sky-400">
+                  Identity Verification
+                </p>
+                <div className="grid gap-3 md:grid-cols-3">
+                  <div>
+                    <p className="text-xs uppercase tracking-wide text-slate-500">Full Name</p>
+                    <p className="mt-1 text-slate-100">{selected.full_name ?? "—"}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs uppercase tracking-wide text-slate-500">Phone</p>
+                    <p className="mt-1 text-slate-100">{selected.phone ?? "—"}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs uppercase tracking-wide text-slate-500">IC / NRIC</p>
+                    <p className="mt-1 font-mono text-slate-100">{selected.ic_number ?? "—"}</p>
+                  </div>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    onClick={() => viewDocument(selected.ic_front_path)}
+                    disabled={!selected.ic_front_path || docLoading === selected.ic_front_path}
+                    className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-800 disabled:opacity-40"
+                  >
+                    {docLoading === selected.ic_front_path
+                      ? "Opening…"
+                      : selected.ic_front_path
+                        ? "View IC Photo"
+                        : "No IC photo"}
+                  </button>
+                  <button
+                    onClick={() => viewDocument(selected.selfie_path)}
+                    disabled={!selected.selfie_path || docLoading === selected.selfie_path}
+                    className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-800 disabled:opacity-40"
+                  >
+                    {docLoading === selected.selfie_path
+                      ? "Opening…"
+                      : selected.selfie_path
+                        ? "View Selfie"
+                        : "No selfie"}
+                  </button>
+                </div>
+                <p className="mt-2 text-[11px] text-slate-500">
+                  Documents open in a new tab via a link that expires in 5 minutes.
+                </p>
+                {docError && (
+                  <p className="mt-2 text-xs text-rose-300">{docError}</p>
+                )}
               </div>
               <div className="md:col-span-2">
                 <label className="text-xs uppercase tracking-wide text-slate-500">

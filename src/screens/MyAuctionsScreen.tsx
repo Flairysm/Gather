@@ -5,6 +5,7 @@ import {
   Image,
   Modal,
   Pressable,
+  RefreshControl,
   SafeAreaView,
   ScrollView,
   StyleSheet,
@@ -29,7 +30,7 @@ const TABS: { id: TabId; label: string; icon: string }[] = [
   { id: "watching", label: "Watching", icon: "eye-outline" },
   { id: "active", label: "Active", icon: "hammer-outline" },
   { id: "won", label: "Won", icon: "trophy-outline" },
-  { id: "lost", label: "Loss", icon: "close-circle-outline" },
+  { id: "lost", label: "Lost", icon: "close-circle-outline" },
   { id: "history", label: "History", icon: "time-outline" },
 ];
 
@@ -56,19 +57,12 @@ type AuctionInfo = {
 type WinRow = {
   id: string;
   auction_id: string | null;
-  flash_pin_id: string | null;
   winning_bid: number;
   payment_deadline: string;
   payment_status: string;
   paid_at: string | null;
   created_at: string;
   auction: AuctionInfo | null;
-  flash_pin: {
-    flash_name: string | null;
-    flash_image_url: string | null;
-    streamer_name: string | null;
-    stream_title: string | null;
-  } | null;
 };
 
 type BidRow = {
@@ -150,6 +144,9 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
   const [userId, setUserId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
+  const [signedOut, setSignedOut] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const didAutoSelectTab = useRef(false);
 
   const [wins, setWins] = useState<WinRow[]>([]);
   const [allBids, setAllBids] = useState<BidRow[]>([]);
@@ -169,7 +166,11 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
   const load = useCallback(async () => {
     setLoadError(false);
     const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
+    if (!user) {
+      setSignedOut(true);
+      return;
+    }
+    setSignedOut(false);
     setUserId(user.id);
 
     const AUCTION_SELECT = `
@@ -182,12 +183,8 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
       supabase
         .from("auction_wins")
         .select(`
-          id, auction_id, flash_pin_id, winning_bid, payment_deadline, payment_status, paid_at, created_at,
-          auction:auction_items!auction_id(${AUCTION_SELECT}),
-          flash_pin:live_stream_pins!flash_pin_id(flash_name, flash_image_url,
-            host:profiles!host_id(username, display_name),
-            stream:live_streams!stream_id(title)
-          )
+          id, auction_id, winning_bid, payment_deadline, payment_status, paid_at, created_at,
+          auction:auction_items!auction_id(${AUCTION_SELECT})
         `)
         .eq("winner_id", user.id)
         .order("created_at", { ascending: false })
@@ -220,18 +217,9 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
     }
 
     const mapRow = (row: any) => {
-      const fp = Array.isArray(row.flash_pin) ? row.flash_pin[0] : row.flash_pin;
-      const host = fp ? (Array.isArray(fp.host) ? fp.host[0] : fp.host) : null;
-      const stream = fp ? (Array.isArray(fp.stream) ? fp.stream[0] : fp.stream) : null;
       return {
         ...row,
         auction: Array.isArray(row.auction) ? row.auction[0] : row.auction,
-        flash_pin: fp ? {
-          flash_name: fp.flash_name,
-          flash_image_url: fp.flash_image_url,
-          streamer_name: host?.display_name ?? host?.username ?? null,
-          stream_title: stream?.title ?? null,
-        } : null,
       };
     };
 
@@ -247,6 +235,21 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
   }, [load]);
 
   useReconnect(load);
+
+  async function onRefresh() {
+    setRefreshing(true);
+    await load().catch(() => setLoadError(true));
+    setRefreshing(false);
+  }
+
+  async function handleUnwatch(auctionId: string) {
+    setWatched((prev) => prev.filter((w) => w.auction_id !== auctionId));
+    const { error } = await supabase.rpc("toggle_auction_watch", { p_auction_id: auctionId });
+    if (error) {
+      Alert.alert("Error", error.message);
+      load();
+    }
+  }
 
   const activeBids = useMemo<ActiveBid[]>(() => {
     if (!userId) return [];
@@ -320,6 +323,19 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
       });
   }, [watched]);
 
+  // Land users on the tab with the most actionable items:
+  // pending payment (in "won") > active bids > default "won".
+  useEffect(() => {
+    if (loading || didAutoSelectTab.current || !userId) return;
+    didAutoSelectTab.current = true;
+    const hasPendingPayment = wins.some(
+      (w) => w.payment_status === "pending" && new Date(w.payment_deadline).getTime() > Date.now(),
+    );
+    if (hasPendingPayment) setTab("won");
+    else if (activeBids.length > 0) setTab("active");
+    else setTab("won");
+  }, [loading, userId, wins, activeBids]);
+
   function handlePayNow(win: WinRow) {
     push({ type: "AUCTION_CHECKOUT", winId: win.id });
   }
@@ -351,18 +367,14 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
         data={wins}
         keyExtractor={(item) => item.id}
         contentContainerStyle={st.list}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.accent} />}
         initialNumToRender={10}
         maxToRenderPerBatch={8}
         windowSize={5}
         removeClippedSubviews
         renderItem={({ item: win }) => {
-          const isFlash = !win.auction && !!win.flash_pin;
-          const img = isFlash
-            ? win.flash_pin?.flash_image_url ?? null
-            : auctionThumb(win.auction);
-          const itemName = isFlash
-            ? win.flash_pin?.flash_name ?? "Flash Auction"
-            : win.auction?.card_name ?? "Auction";
+          const img = auctionThumb(win.auction);
+          const itemName = win.auction?.card_name ?? "Auction";
           const isPaid = win.payment_status === "paid";
           const isExpired = win.payment_status === "expired";
           const countdown = !isPaid && !isExpired ? formatCountdown(win.payment_deadline) : null;
@@ -378,18 +390,17 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
                   {img ? (
                     <CachedImage source={{ uri: img }} style={st.thumbImg} />
                   ) : (
-                    <Ionicons name={isFlash ? "flash" : "hammer-outline"} size={18} color={isFlash ? "#FFD700" : C.textMuted} />
+                    <Ionicons name="hammer-outline" size={18} color={C.textMuted} />
                   )}
                 </View>
                 <View style={st.cardInfo}>
                   <Text style={st.cardName} numberOfLines={1}>
-                    {isFlash && <Text style={{ color: "#FFD700" }}>⚡ </Text>}
                     {itemName}
                   </Text>
                   <Text style={st.cardMeta} numberOfLines={1}>
-                    {isFlash ? "Flash Auction" : `${win.auction?.edition ?? ""}${win.auction?.grade ? ` · ${win.auction.grade}` : ""}`}
+                    {`${win.auction?.edition ?? ""}${win.auction?.grade ? ` · ${win.auction.grade}` : ""}`}
                   </Text>
-                  <Text style={st.cardSeller}>from {isFlash ? "Live Stream" : sellerName(win.auction)}</Text>
+                  <Text style={st.cardSeller}>from {sellerName(win.auction)}</Text>
                 </View>
                 <View style={st.cardRight}>
                   <Text style={st.winPrice}>{formatPrice(win.winning_bid)}</Text>
@@ -459,6 +470,7 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
         data={activeBids}
         keyExtractor={(item) => item.auctionId}
         contentContainerStyle={st.list}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.accent} />}
         initialNumToRender={10}
         maxToRenderPerBatch={8}
         windowSize={5}
@@ -546,6 +558,7 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
         data={lostAuctions}
         keyExtractor={(item) => item.auctionId}
         contentContainerStyle={st.list}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.accent} />}
         initialNumToRender={10}
         maxToRenderPerBatch={8}
         windowSize={5}
@@ -607,6 +620,7 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
         data={bidHistory}
         keyExtractor={(item) => item.id}
         contentContainerStyle={st.list}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.accent} />}
         initialNumToRender={15}
         maxToRenderPerBatch={10}
         windowSize={5}
@@ -657,6 +671,7 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
         data={watchedAuctions}
         keyExtractor={(item) => item.auction_id}
         contentContainerStyle={st.list}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.accent} />}
         initialNumToRender={10}
         maxToRenderPerBatch={8}
         windowSize={5}
@@ -703,6 +718,14 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
                       <Text style={st.timerChipText}>{timer.text}</Text>
                     </View>
                   )}
+                  <Pressable
+                    style={st.unwatchBtn}
+                    hitSlop={8}
+                    onPress={() => handleUnwatch(item.auction_id)}
+                  >
+                    <Ionicons name="eye-off-outline" size={12} color={C.textMuted} />
+                    <Text style={st.unwatchText}>Unwatch</Text>
+                  </Pressable>
                 </View>
               </View>
             </Pressable>
@@ -790,6 +813,12 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
             ))}
           </View>
         </ShimmerGroup>
+      ) : signedOut ? (
+        <View style={st.emptyState}>
+          <Ionicons name="lock-closed-outline" size={44} color={C.textMuted} />
+          <Text style={st.emptyTitle}>Sign in required</Text>
+          <Text style={st.emptySub}>Sign in to view your auctions, bids, and watchlist.</Text>
+        </View>
       ) : loadError ? (
         <ErrorState message="Could not load your auctions." onRetry={() => { setLoading(true); load().catch(() => setLoadError(true)).finally(() => setLoading(false)); }} />
       ) : (
@@ -806,13 +835,8 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
       <Modal visible={!!selectedWin} transparent animationType="fade" onRequestClose={() => setSelectedWin(null)}>
         {selectedWin && (() => {
           const w = selectedWin;
-          const isFlash = !w.auction && !!w.flash_pin;
-          const img = isFlash
-            ? w.flash_pin?.flash_image_url ?? null
-            : auctionThumb(w.auction);
-          const name = isFlash
-            ? w.flash_pin?.flash_name ?? "Flash Auction"
-            : w.auction?.card_name ?? "Auction";
+          const img = auctionThumb(w.auction);
+          const name = w.auction?.card_name ?? "Auction";
           const isPaid = w.payment_status === "paid";
           const isExpired = w.payment_status === "expired";
           return (
@@ -824,7 +848,7 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
                   {img ? (
                     <Image source={{ uri: img }} style={st.modalImg} resizeMode="cover" />
                   ) : (
-                    <Ionicons name={isFlash ? "flash" : "hammer-outline"} size={36} color={isFlash ? "#FFD700" : C.textMuted} />
+                    <Ionicons name="hammer-outline" size={36} color={C.textMuted} />
                   )}
                 </View>
                 {/* Name + price */}
@@ -832,24 +856,16 @@ export default function MyAuctionsScreen({ onBack }: { onBack: () => void }) {
                 <Text style={st.modalPrice}>{formatPrice(w.winning_bid)}</Text>
 
                 {/* Details */}
-                {!isFlash && w.auction?.edition && (
+                {w.auction?.edition && (
                   <Text style={st.modalMeta}>{w.auction.edition}{w.auction.grade ? ` · ${w.auction.grade}` : ""}</Text>
                 )}
 
                 {/* Source */}
                 <View style={st.modalSource}>
-                  <Ionicons name={isFlash ? "flash" : "hammer"} size={14} color={isFlash ? "#FFD700" : "#F59E0B"} />
+                  <Ionicons name="hammer" size={14} color="#F59E0B" />
                   <View style={{ flex: 1, gap: 2 }}>
-                    <Text style={st.modalSourceLabel}>
-                      {isFlash ? "Won in Flash Auction" : "Won in Auction"}
-                    </Text>
-                    {isFlash && w.flash_pin?.streamer_name && (
-                      <Text style={st.modalSourceDetail}>
-                        from {w.flash_pin.streamer_name}'s live stream
-                        {w.flash_pin.stream_title ? ` — "${w.flash_pin.stream_title}"` : ""}
-                      </Text>
-                    )}
-                    {!isFlash && w.auction?.seller && (
+                    <Text style={st.modalSourceLabel}>Won in Auction</Text>
+                    {w.auction?.seller && (
                       <Text style={st.modalSourceDetail}>from {sellerName(w.auction)}</Text>
                     )}
                   </View>
@@ -1183,6 +1199,17 @@ const st = StyleSheet.create({
   },
   watchStatusTextEnded: {
     color: C.textMuted,
+  },
+  unwatchBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 3,
+    marginTop: 2,
+  },
+  unwatchText: {
+    color: C.textMuted,
+    fontSize: 10,
+    fontWeight: "700",
   },
 
   // ── Empty state ──

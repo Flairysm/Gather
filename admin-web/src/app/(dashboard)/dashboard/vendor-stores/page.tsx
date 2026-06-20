@@ -12,6 +12,7 @@ type VendorStore = {
   logo_url: string | null;
   theme_color: string;
   priority: number;
+  pinned_position: number | null;
   is_active: boolean;
   created_at: string;
   profile?: { username: string | null; display_name: string | null };
@@ -23,6 +24,8 @@ export default function VendorStoresPage() {
   const [error, setError] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editPriority, setEditPriority] = useState("");
+  const [pinningId, setPinningId] = useState<string | null>(null);
+  const [editPinned, setEditPinned] = useState("");
   const [saving, setSaving] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -33,7 +36,7 @@ export default function VendorStoresPage() {
 
     const { data, error: queryError } = await adminQuery<Record<string, any>>({
       table: "vendor_stores",
-      select: "id, profile_id, store_name, description, logo_url, theme_color, priority, is_active, created_at, profile:profiles(username, display_name)",
+      select: "id, profile_id, store_name, description, logo_url, theme_color, priority, pinned_position, is_active, created_at, profile:profiles(username, display_name)",
       order: [{ column: "priority", ascending: true }, { column: "created_at", ascending: false }],
     });
 
@@ -77,6 +80,49 @@ export default function VendorStoresPage() {
     await loadStores();
   }
 
+  async function handleSavePinned(id: string) {
+    const trimmed = editPinned.trim();
+    let pinned_position: number | null;
+    if (trimmed === "" || trimmed === "0") {
+      pinned_position = null;
+    } else {
+      const parsed = Number.parseInt(trimmed, 10);
+      if (Number.isNaN(parsed) || parsed < 1) {
+        setError("Pinned slot must be a whole number 1 or greater (leave empty to unpin).");
+        return;
+      }
+      pinned_position = parsed;
+    }
+
+    setSaving(true);
+    const { ok, error: err } = await adminAction("store.setPinnedPosition", { id, pinned_position });
+    setSaving(false);
+
+    if (!ok) {
+      setError(err ?? "Failed to update pinned slot");
+      return;
+    }
+
+    setPinningId(null);
+    setEditPinned("");
+    await loadStores();
+  }
+
+  async function handleUnpin(id: string) {
+    setSaving(true);
+    const { ok, error: err } = await adminAction("store.setPinnedPosition", { id, pinned_position: null });
+    setSaving(false);
+
+    if (!ok) {
+      setError(err ?? "Failed to unpin store");
+      return;
+    }
+
+    setPinningId(null);
+    setEditPinned("");
+    await loadStores();
+  }
+
   async function toggleActive(id: string, active: boolean) {
     const { ok, error: err } = await adminAction("store.toggleActive", { id, active });
     if (!ok) {
@@ -111,8 +157,9 @@ export default function VendorStoresPage() {
       <div className="mb-5">
         <h1 className="text-2xl font-semibold">Vendor Stores</h1>
         <p className="mt-1 text-sm text-slate-400">
-          Adjust vendor store priority on the home screen. Lower numbers appear
-          first.
+          Pinned stores lock to a specific slot on the Home carousel (slot #1 is
+          first). Unpinned stores are auto-ranked by reputation and popularity;
+          priority is only used as a legacy tie-breaker.
         </p>
       </div>
 
@@ -138,6 +185,7 @@ export default function VendorStoresPage() {
                 <th className="px-4 py-3">Store</th>
                 <th className="px-4 py-3">Owner</th>
                 <th className="px-4 py-3">Priority</th>
+                <th className="px-4 py-3">Pinned Slot</th>
                 <th className="px-4 py-3">Status</th>
                 <th className="px-4 py-3">Created</th>
                 <th className="px-4 py-3">Actions</th>
@@ -221,6 +269,43 @@ export default function VendorStoresPage() {
                     )}
                   </td>
                   <td className="px-4 py-3">
+                    {pinningId === row.id ? (
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number"
+                          min={1}
+                          value={editPinned}
+                          onChange={(e) => setEditPinned(e.target.value)}
+                          placeholder="Slot #"
+                          className="w-20 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-sm outline-none ring-sky-500 focus:ring-2"
+                          autoFocus
+                        />
+                        <button
+                          onClick={() => handleSavePinned(row.id)}
+                          disabled={saving}
+                          className="rounded-md bg-sky-500 px-2 py-1 text-xs font-medium text-slate-950 hover:bg-sky-400 disabled:opacity-50"
+                        >
+                          Save
+                        </button>
+                        <button
+                          onClick={() => {
+                            setPinningId(null);
+                            setEditPinned("");
+                          }}
+                          className="rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-200 hover:bg-slate-800"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : row.pinned_position !== null ? (
+                      <span className="rounded-full bg-sky-900/40 px-2 py-1 text-xs font-medium text-sky-300">
+                        Pinned #{row.pinned_position}
+                      </span>
+                    ) : (
+                      <span className="text-xs text-slate-500">Auto-ranked</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3">
                     <span
                       className={`rounded-full px-2 py-1 text-xs font-medium ${
                         row.is_active
@@ -245,6 +330,26 @@ export default function VendorStoresPage() {
                       >
                         Edit Priority
                       </button>
+                      <button
+                        onClick={() => {
+                          setPinningId(row.id);
+                          setEditPinned(
+                            row.pinned_position !== null ? String(row.pinned_position) : "",
+                          );
+                        }}
+                        className="rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-200 hover:bg-slate-800"
+                      >
+                        {row.pinned_position !== null ? "Edit Pin" : "Pin Slot"}
+                      </button>
+                      {row.pinned_position !== null && (
+                        <button
+                          onClick={() => handleUnpin(row.id)}
+                          disabled={saving}
+                          className="rounded-md border border-rose-700/40 bg-rose-900/20 px-2 py-1 text-xs text-rose-300 hover:bg-rose-900/40 disabled:opacity-50"
+                        >
+                          Unpin
+                        </button>
+                      )}
                       {row.is_active ? (
                         <button
                           onClick={() => toggleActive(row.id, false)}

@@ -375,6 +375,13 @@ export const cf = StyleSheet.create({
   nextBtnTextDisabled: {
     color: C.textMuted,
   },
+  advanceHint: {
+    color: C.textMuted,
+    fontSize: 12,
+    fontWeight: "600",
+    textAlign: "center",
+    marginBottom: 10,
+  },
   submitBtn: {
     alignItems: "center",
     justifyContent: "center",

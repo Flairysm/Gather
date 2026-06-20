@@ -39,6 +39,7 @@ export type WantedPost = {
   views: number;
   status: string;
   created_at: string;
+  expires_at: string | null;
   buyer?: {
     username: string | null;
     display_name: string | null;

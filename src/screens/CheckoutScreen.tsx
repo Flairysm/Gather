@@ -10,6 +10,11 @@ import { supabase } from "../lib/supabase";
 import { requireNetwork } from "../lib/network";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import CachedImage from "../components/CachedImage";
+import CardPaymentMethodCard from "../components/CardPaymentMethodCard";
+import { useCardPayment, createOrderPayment, cancelCardOrder } from "../data/payments";
+import { fetchUsableVouchers, type Voucher } from "../data/vouchers";
+
+const MIN_CARD_CHARGE = 2; // Mirrors the server: never leave a residual below this.
 
 type ShippingAddress = {
   id: string;
@@ -53,17 +58,24 @@ export default function CheckoutScreen({ onBack }: Props) {
       .join("|");
   }, [items, selectedIds]);
   const { push, stack } = useAppNavigation();
+  const pay = useCardPayment();
   const insets = useSafeAreaInsets();
   const [confirmed, setConfirmed] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [address, setAddress] = useState<ShippingAddress | null>(null);
   const [loadingAddr, setLoadingAddr] = useState(true);
+  const [signedIn, setSignedIn] = useState<boolean | null>(null);
   const [orderSnapshot, setOrderSnapshot] = useState<{
     sellerGroups: SellerGroup[];
     totalUnits: number;
     grandTotal: number;
+    voucherApplied: number;
+    amountPaid: number;
   } | null>(null);
   const [pricesRefreshed, setPricesRefreshed] = useState(false);
+  const [vouchers, setVouchers] = useState<Voucher[]>([]);
+  const [vouchersLoading, setVouchersLoading] = useState(true);
+  const [selectedVoucherCode, setSelectedVoucherCode] = useState<string | null>(null);
   const checkoutItems = selectedItems();
   const totalUnits = checkoutItems.reduce((sum, ci) => sum + ci.quantity, 0);
 
@@ -88,8 +100,28 @@ export default function CheckoutScreen({ onBack }: Props) {
   const totalShipping = useMemo(() => (address ? sellerGroups.length * getShippingFee(address.state) : 0), [sellerGroups, address]);
   const grandTotal = subtotal + totalShipping;
 
+  const selectedVoucher = useMemo(
+    () => vouchers.find((v) => v.code === selectedVoucherCode) ?? null,
+    [vouchers, selectedVoucherCode],
+  );
+
+  // Estimate how much voucher credit applies (server is authoritative). Mirror
+  // the server rule: cover fully, or leave at least the minimum card charge.
+  const voucherApplied = useMemo(() => {
+    if (!selectedVoucher || grandTotal <= 0) return 0;
+    let applied = Math.min(selectedVoucher.remaining_value, grandTotal);
+    if (applied < grandTotal && grandTotal - applied < MIN_CARD_CHARGE) {
+      applied = Math.max(0, grandTotal - MIN_CARD_CHARGE);
+    }
+    return Math.round(applied * 100) / 100;
+  }, [selectedVoucher, grandTotal]);
+
+  const payableTotal = Math.max(0, Math.round((grandTotal - voucherApplied) * 100) / 100);
+  const fullyCovered = voucherApplied > 0 && payableTotal <= 0;
+
   const loadDefaultAddress = useCallback(async () => {
     const { data: { user } } = await supabase.auth.getUser();
+    setSignedIn(!!user);
     if (!user) { setLoadingAddr(false); return; }
     const { data, error } = await supabase
       .from("user_addresses")
@@ -106,6 +138,16 @@ export default function CheckoutScreen({ onBack }: Props) {
 
   useEffect(() => { loadDefaultAddress(); }, [loadDefaultAddress]);
   useEffect(() => { loadDefaultAddress(); }, [stack.length]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setVouchersLoading(true);
+    fetchUsableVouchers()
+      .then((rows) => { if (!cancelled) setVouchers(rows); })
+      .catch((e) => console.warn("CheckoutScreen loadVouchers error:", e?.message ?? e))
+      .finally(() => { if (!cancelled) setVouchersLoading(false); });
+    return () => { cancelled = true; };
+  }, [stack.length]);
 
   useEffect(() => {
     let cancelled = false;
@@ -166,6 +208,7 @@ export default function CheckoutScreen({ onBack }: Props) {
     if (!(await requireNetwork())) return;
     setProcessing(true);
 
+    let orderIds: string[] = [];
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) {
@@ -184,47 +227,61 @@ export default function CheckoutScreen({ onBack }: Props) {
         return;
       }
 
-      const errors: string[] = [];
-      const succeededItems: string[] = [];
-      for (const group of sellerGroups) {
-        const payload = group.items.map((ci) => ({
-          listing_id: ci.listing.id,
-          quantity: ci.quantity,
-          unit_price: parsePrice(ci.listing.price),
-        }));
+      // 1. Reserve stock + create the PaymentIntent (server-authoritative pricing).
+      const lines = checkoutItems.map((ci) => ({ listing_id: ci.listing.id, quantity: ci.quantity }));
+      const shippingFee = getShippingFee(address.state);
+      const shippingAddress = {
+        full_name: address.full_name,
+        phone: address.phone,
+        address_line1: address.address_line1,
+        address_line2: address.address_line2,
+        city: address.city,
+        state: address.state,
+        zip: address.zip,
+        country: "Malaysia",
+        label: address.label,
+      };
+      const { clientSecret, orderIds: ids, total, fullyPaid, voucherApplied: appliedFromServer, payable } = await createOrderPayment(
+        lines,
+        shippingFee,
+        shippingAddress,
+        selectedVoucherCode,
+      );
+      orderIds = ids;
 
-        const { error } = await supabase.rpc("checkout_order", { p_items: payload });
-        if (error) {
-          errors.push(`${group.sellerName}: ${error.message}`);
-        } else {
-          succeededItems.push(...group.items.map((ci) => ci.listing.id));
+      // 2. If a voucher fully covered the cart, the order is already settled —
+      //    skip the Stripe sheet entirely.
+      if (!fullyPaid) {
+        const result = await pay(clientSecret);
+        if (result.status !== "paid") {
+          // Buyer cancelled or payment failed — release the reserved stock (and voucher hold).
+          await cancelCardOrder(orderIds).catch(() => {});
+          if (result.status === "failed") {
+            Alert.alert("Payment Failed", result.message ?? "Your payment could not be completed. Please try again.");
+          } else {
+            Alert.alert("Payment Cancelled", "Your order was not placed. Your items are still in your cart.");
+          }
+          return;
         }
       }
 
-      setOrderSnapshot({
-        sellerGroups: [...sellerGroups],
-        totalUnits,
-        grandTotal,
-      });
-
-      for (const lid of succeededItems) removeItem(lid);
-
-      if (errors.length > 0 && errors.length === sellerGroups.length) {
-        setOrderSnapshot(null);
-        throw new Error(errors.join("\n"));
+      // 3. Paid. Settlement (escrow + order confirmation) happens via webhook
+      //    (card) or inline (voucher-only).
+      {
+        const grand = total || grandTotal;
+        const applied = appliedFromServer ?? voucherApplied;
+        setOrderSnapshot({
+          sellerGroups: [...sellerGroups],
+          totalUnits,
+          grandTotal: grand,
+          voucherApplied: applied,
+          amountPaid: fullyPaid ? 0 : (payable ?? Math.max(0, grand - applied)),
+        });
       }
-
-      if (errors.length > 0) {
-        setOrderSnapshot(null);
-        Alert.alert(
-          "Partial Success",
-          `Some orders failed:\n${errors.join("\n")}\n\nSuccessful orders have been placed and those items removed from your cart. Failed items remain in your cart.`,
-        );
-        return;
-      }
-
+      for (const ci of checkoutItems) removeItem(ci.listing.id);
       setConfirmed(true);
     } catch (err: any) {
+      if (orderIds.length) await cancelCardOrder(orderIds).catch(() => {});
       Alert.alert("Purchase Failed", err.message ?? "Something went wrong. Please try again.");
     } finally {
       setProcessing(false);
@@ -276,16 +333,41 @@ export default function CheckoutScreen({ onBack }: Props) {
               </View>
             ))}
             {snap.sellerGroups.length === 1 && <View style={st.successDivider} />}
+            {snap.voucherApplied > 0 && (
+              <>
+                <View style={st.successItem}>
+                  <Text style={st.successItemName}>Order Total</Text>
+                  <Text style={st.successItemPrice}>{formatPrice(snap.grandTotal)}</Text>
+                </View>
+                <View style={st.successItem}>
+                  <Text style={st.successItemName}>Voucher Credit</Text>
+                  <Text style={[st.successItemPrice, { color: C.success }]}>
+                    −{formatPrice(snap.voucherApplied)}
+                  </Text>
+                </View>
+              </>
+            )}
             <View style={st.successItem}>
-              <Text style={st.successTotalLabel}>Total Paid</Text>
-              <Text style={st.successTotalPrice}>{formatPrice(snap.grandTotal)}</Text>
+              <Text style={st.successTotalLabel}>
+                {snap.voucherApplied > 0 && snap.amountPaid <= 0 ? "Paid with Voucher" : "Total Paid"}
+              </Text>
+              <Text style={st.successTotalPrice}>
+                {snap.voucherApplied > 0 ? formatPrice(snap.amountPaid) : formatPrice(snap.grandTotal)}
+              </Text>
             </View>
           </View>
           <Pressable
-            style={[st.doneBtn, { marginBottom: Math.max(insets.bottom, 14) }]}
+            style={st.doneBtn}
             onPress={handleDone}
           >
-            <Text style={st.doneBtnText}>Back to Market</Text>
+            <Text style={st.doneBtnText}>Back to Cart</Text>
+          </Pressable>
+          <Pressable
+            style={[st.viewOrdersBtn, { marginBottom: Math.max(insets.bottom, 14) }]}
+            onPress={() => push({ type: "MY_ORDERS" })}
+          >
+            <Ionicons name="receipt-outline" size={16} color={C.textAccent} />
+            <Text style={st.viewOrdersText}>View Orders</Text>
           </Pressable>
         </View>
       </SafeAreaView>
@@ -308,6 +390,15 @@ export default function CheckoutScreen({ onBack }: Props) {
         showsVerticalScrollIndicator={false}
         contentContainerStyle={st.scroll}
       >
+        {signedIn === false && (
+          <View style={st.signInGate}>
+            <Ionicons name="lock-closed" size={16} color={C.danger} />
+            <Text style={st.signInGateText}>
+              You're not signed in. Please sign in to add a shipping address and complete your purchase.
+            </Text>
+          </View>
+        )}
+
         {/* ── Order Summary (grouped by seller) ── */}
         <Text style={st.sectionTitle}>
           Order Summary
@@ -397,16 +488,67 @@ export default function CheckoutScreen({ onBack }: Props) {
           <Feather name="chevron-right" size={18} color={C.textMuted} />
         </Pressable>
 
+        {/* ── Voucher ── */}
+        <Text style={st.sectionTitle}>Voucher</Text>
+        {vouchersLoading ? (
+          <View style={[st.voucherCard, st.voucherLoadingRow]}>
+            <ActivityIndicator size="small" color={C.accent} />
+            <Text style={st.voucherEmptyText}>Checking for vouchers…</Text>
+          </View>
+        ) : vouchers.length === 0 ? (
+          <Pressable style={st.voucherEmptyCard} onPress={() => push({ type: "VOUCHERS" })}>
+            <Ionicons name="ticket-outline" size={18} color={C.textMuted} />
+            <View style={{ flex: 1 }}>
+              <Text style={st.voucherEmptyTitle}>Have a voucher code?</Text>
+              <Text style={st.voucherEmptyText}>Tap to redeem it, then come back to apply it.</Text>
+            </View>
+            <Feather name="chevron-right" size={18} color={C.textMuted} />
+          </Pressable>
+        ) : (
+          <>
+            <View style={st.voucherCard}>
+              {vouchers.map((v, i) => {
+                const active = v.code === selectedVoucherCode;
+                return (
+                  <View key={v.id}>
+                    {i > 0 && <View style={st.voucherDivider} />}
+                    <Pressable
+                      style={st.voucherRow}
+                      onPress={() => setSelectedVoucherCode(active ? null : v.code)}
+                    >
+                      <View style={[st.radio, active && st.radioOn]}>
+                        {active && <View style={st.radioDot} />}
+                      </View>
+                      <View style={st.voucherInfo}>
+                        <Text style={st.voucherCode}>{v.code}</Text>
+                        <Text style={st.voucherBal}>{formatPrice(v.remaining_value)} available</Text>
+                      </View>
+                      <Ionicons name="ticket" size={18} color={active ? C.accent : C.textMuted} />
+                    </Pressable>
+                  </View>
+                );
+              })}
+              {selectedVoucherCode && (
+                <Pressable style={st.voucherClear} onPress={() => setSelectedVoucherCode(null)}>
+                  <Text style={st.voucherClearText}>Don't use a voucher</Text>
+                </Pressable>
+              )}
+            </View>
+          </>
+        )}
+
         {/* ── Payment ── */}
         <Text style={st.sectionTitle}>Payment Method</Text>
-        <Pressable style={st.paymentCard}>
-          <Ionicons name="card-outline" size={18} color={C.textAccent} />
-          <View style={st.addressInfo}>
-            <Text style={st.addressName}>Add Payment Method</Text>
-            <Text style={st.addressSub}>Credit/Debit card, Apple Pay</Text>
+        {fullyCovered ? (
+          <View style={st.voucherCoveredCard}>
+            <Ionicons name="checkmark-circle" size={18} color={C.success} />
+            <Text style={st.voucherCoveredText}>
+              Your voucher covers this order in full — no card payment needed.
+            </Text>
           </View>
-          <Feather name="chevron-right" size={18} color={C.textMuted} />
-        </Pressable>
+        ) : (
+          <CardPaymentMethodCard />
+        )}
 
         {/* ── Price Breakdown ── */}
         <Text style={st.sectionTitle}>Price Breakdown</Text>
@@ -437,10 +579,19 @@ export default function CheckoutScreen({ onBack }: Props) {
               <Text style={st.breakdownMuted}>Add address to calculate</Text>
             )}
           </View>
+          {voucherApplied > 0 && (
+            <View style={st.breakdownRow}>
+              <Text style={st.breakdownLabel}>Voucher{selectedVoucher ? ` (${selectedVoucher.code})` : ""}</Text>
+              <Text style={st.breakdownDiscount}>− {formatPrice(voucherApplied)}</Text>
+            </View>
+          )}
           <View style={st.breakdownDivider} />
           <View style={st.breakdownRow}>
-            <Text style={st.breakdownTotalLabel}>Total</Text>
-            <Text style={st.breakdownTotal}>{formatPrice(grandTotal)}</Text>
+            <Text style={st.breakdownTotalLabel}>
+              {voucherApplied > 0 ? "Total Due" : "Total"}
+              {!address ? <Text style={st.breakdownExclShipping}> (excl. shipping)</Text> : null}
+            </Text>
+            <Text style={st.breakdownTotal}>{formatPrice(payableTotal)}</Text>
           </View>
         </View>
 
@@ -455,23 +606,42 @@ export default function CheckoutScreen({ onBack }: Props) {
 
       {/* ── Bottom Bar ── */}
       <View style={[st.bottomBar, { paddingBottom: Math.max(insets.bottom, 14) }]}>
+        {signedIn === false ? (
+          <Pressable
+            style={st.confirmBtn}
+            onPress={() =>
+              Alert.alert(
+                "Sign in required",
+                "Please sign in to complete your purchase.",
+                [{ text: "OK", onPress: onBack }],
+              )
+            }
+          >
+            <Ionicons name="log-in-outline" size={18} color={C.textHero} />
+            <Text style={st.confirmText}>Sign In to Checkout</Text>
+          </Pressable>
+        ) : (
+          <>
         {!address && !loadingAddr && (
           <Text style={st.noAddrHint}>Please add a shipping address to continue</Text>
+        )}
+        {checkoutItems.length === 0 && (
+          <Text style={st.noAddrHint}>No items selected for checkout</Text>
         )}
         <Pressable
           style={[
             st.confirmBtn,
-            (processing || !address || (checkoutItems.length > 0 && !pricesRefreshed)) && st.confirmBtnDisabled,
+            (processing || !address || checkoutItems.length === 0 || (checkoutItems.length > 0 && !pricesRefreshed)) && st.confirmBtnDisabled,
           ]}
           onPress={handleConfirm}
-          disabled={processing || !address || (checkoutItems.length > 0 && !pricesRefreshed)}
+          disabled={processing || !address || checkoutItems.length === 0 || (checkoutItems.length > 0 && !pricesRefreshed)}
         >
           {processing ? (
             <ActivityIndicator size="small" color={C.textHero} />
           ) : checkoutItems.length > 0 && !pricesRefreshed ? (
             <ActivityIndicator size="small" color={C.textHero} />
           ) : (
-            <Ionicons name="lock-closed" size={18} color={!address ? C.textMuted : C.textHero} />
+            <Ionicons name={fullyCovered ? "ticket" : "lock-closed"} size={18} color={!address ? C.textMuted : C.textHero} />
           )}
           <Text
             style={[
@@ -483,9 +653,13 @@ export default function CheckoutScreen({ onBack }: Props) {
               ? "Processing…"
               : checkoutItems.length > 0 && !pricesRefreshed
                 ? "Verifying prices…"
-                : `Confirm Purchase  •  ${formatPrice(grandTotal)}`}
+                  : fullyCovered
+                    ? "Place Order  •  Paid with Voucher"
+                    : `Pay  •  ${formatPrice(payableTotal)}`}
           </Text>
         </Pressable>
+          </>
+        )}
       </View>
     </SafeAreaView>
   );
@@ -551,12 +725,6 @@ const st = StyleSheet.create({
   addressEmptyTitle: { color: C.danger, fontSize: 13, fontWeight: "700" },
   addressEmptySub: { color: C.textMuted, fontSize: 11, fontWeight: "500" },
 
-  paymentCard: {
-    flexDirection: "row", alignItems: "center", gap: S.md,
-    backgroundColor: C.surface, borderRadius: S.radiusCard, borderWidth: 1, borderColor: C.border,
-    padding: S.lg,
-  },
-
   breakdownCard: {
     backgroundColor: C.surface, borderRadius: S.radiusCard, borderWidth: 1, borderColor: C.border,
     padding: S.lg, gap: S.md,
@@ -565,11 +733,45 @@ const st = StyleSheet.create({
   breakdownLabel: { color: C.textSecondary, fontSize: 13, fontWeight: "600" },
   breakdownValue: { color: C.textPrimary, fontSize: 13, fontWeight: "600" },
   breakdownFree: { color: C.success, fontSize: 13, fontWeight: "800" },
+  breakdownDiscount: { color: C.success, fontSize: 13, fontWeight: "800" },
+
+  voucherCard: {
+    backgroundColor: C.surface, borderRadius: S.radiusCard, borderWidth: 1, borderColor: C.border,
+    padding: S.sm,
+  },
+  voucherRow: { flexDirection: "row", alignItems: "center", gap: S.md, padding: S.md },
+  voucherDivider: { height: 1, backgroundColor: C.border },
+  voucherInfo: { flex: 1, gap: 2 },
+  voucherCode: { color: C.textPrimary, fontSize: 13, fontWeight: "800", letterSpacing: 0.5 },
+  voucherBal: { color: C.textSecondary, fontSize: 11, fontWeight: "600" },
+  radio: {
+    width: 20, height: 20, borderRadius: 10, borderWidth: 2, borderColor: C.border,
+    alignItems: "center", justifyContent: "center",
+  },
+  radioOn: { borderColor: C.accent },
+  radioDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: C.accent },
+  voucherClear: { paddingVertical: 8, alignItems: "center" },
+  voucherClearText: { color: C.textMuted, fontSize: 12, fontWeight: "700" },
+  voucherLoadingRow: { flexDirection: "row", alignItems: "center", gap: S.md, paddingVertical: S.md, paddingHorizontal: S.md },
+  voucherEmptyCard: {
+    flexDirection: "row", alignItems: "center", gap: S.md,
+    backgroundColor: C.surface, borderRadius: S.radiusCard, borderWidth: 1, borderColor: C.border,
+    padding: S.md,
+  },
+  voucherEmptyTitle: { color: C.textPrimary, fontSize: 13, fontWeight: "700" },
+  voucherEmptyText: { color: C.textSecondary, fontSize: 11, fontWeight: "500", marginTop: 1 },
+  voucherCoveredCard: {
+    flexDirection: "row", alignItems: "center", gap: 8,
+    backgroundColor: C.successBg, borderRadius: S.radiusCard,
+    borderWidth: 1, borderColor: "rgba(34,197,94,0.2)", padding: S.lg,
+  },
+  voucherCoveredText: { flex: 1, color: C.success, fontSize: 12, fontWeight: "600", lineHeight: 16 },
   breakdownMuted: { color: C.textMuted, fontSize: 12, fontWeight: "500", fontStyle: "italic" },
   shippingValue: { alignItems: "flex-end", gap: 1 },
   shippingRegion: { color: C.textMuted, fontSize: 10, fontWeight: "600" },
   breakdownDivider: { height: 1, backgroundColor: C.border },
   breakdownTotalLabel: { color: C.textPrimary, fontSize: 15, fontWeight: "800" },
+  breakdownExclShipping: { color: C.textMuted, fontSize: 11, fontWeight: "600" },
   breakdownTotal: { color: C.link, fontSize: 20, fontWeight: "900" },
 
   protectionRow: {
@@ -591,6 +793,10 @@ const st = StyleSheet.create({
     backgroundColor: C.success, borderRadius: S.radiusSmall, paddingVertical: 16,
   },
   confirmBtnDisabled: { backgroundColor: C.muted },
+  topupBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8,
+    backgroundColor: C.accent, borderRadius: S.radiusSmall, paddingVertical: 16,
+  },
   confirmText: { color: C.textHero, fontSize: 15, fontWeight: "800" },
   confirmTextDisabled: { color: C.textMuted },
 
@@ -619,4 +825,16 @@ const st = StyleSheet.create({
     backgroundColor: C.accent, borderRadius: S.radiusSmall, paddingVertical: 16, marginTop: S.lg,
   },
   doneBtnText: { color: C.textHero, fontSize: 15, fontWeight: "800" },
+  viewOrdersBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6,
+    paddingVertical: 12, marginTop: 4,
+  },
+  viewOrdersText: { color: C.textAccent, fontSize: 14, fontWeight: "800" },
+  signInGate: {
+    flexDirection: "row", alignItems: "flex-start", gap: 8,
+    backgroundColor: C.dangerBg, borderRadius: S.radiusSmall,
+    borderWidth: 1, borderColor: "rgba(239,68,68,0.25)",
+    padding: S.lg, marginTop: S.md,
+  },
+  signInGateText: { flex: 1, color: C.danger, fontSize: 12, fontWeight: "600", lineHeight: 16 },
 });

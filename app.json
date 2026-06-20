@@ -3,6 +3,7 @@
     "name": "Evend",
     "slug": "Evend",
     "version": "1.0.0",
+    "scheme": "evend",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -35,11 +36,10 @@
       "expo-asset",
       "expo-secure-store",
       [
-        "expo-camera",
+        "@stripe/stripe-react-native",
         {
-          "cameraPermission": "Evend needs camera access to go live and stream to your viewers.",
-          "microphonePermission": "Evend needs microphone access so viewers can hear you during live streams.",
-          "recordAudioAndroid": true
+          "merchantIdentifier": "merchant.com.flairysm.evend",
+          "enableGooglePay": true
         }
       ]
     ]

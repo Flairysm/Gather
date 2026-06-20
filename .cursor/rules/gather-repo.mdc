@@ -1,0 +1,12 @@
+---
+description: Evend monorepo basics — scope, secrets, where code lives
+alwaysApply: true
+---
+
+# Gather / Evend
+
+- **Mobile app**: `src/` (Expo / React Native). **Admin**: `admin-web/` (Next.js 16). Do not mix conventions between the two (different routers, styling, env).
+- **Supabase** is used from `src/lib/supabase.ts` and `admin-web/src/lib/supabase/`. Respect existing query and auth patterns.
+- **Secrets**: never commit or paste `.env` / `.env.local` contents; keep keys out of code and chat logs.
+- **Unfamiliar APIs** (Next 16, Expo, Supabase): prefer current docs or the **find-docs** / Context7 workflow over guessing signatures.
+- **New UI** (screens, dashboards): match existing components and tokens; for greenfield visuals, follow the **frontend-design** skill (`~/.cursor/skills/frontend-design/SKILL.md`) when the user wants a strong visual direction.

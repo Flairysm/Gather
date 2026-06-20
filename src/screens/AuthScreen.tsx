@@ -1,8 +1,11 @@
 import { useState } from "react";
 import {
   ActivityIndicator,
+  KeyboardAvoidingView,
+  Platform,
   Pressable,
   SafeAreaView,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -15,6 +18,8 @@ import { C, S } from "../theme";
 import { supabase } from "../lib/supabase";
 
 type Mode = "login" | "register";
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export default function AuthScreen() {
   const [mode, setMode] = useState<Mode>("login");
@@ -32,6 +37,10 @@ export default function AuthScreen() {
     const trimmedEmail = email.trim();
     if (!trimmedEmail || !password) {
       setError("Email and password are required.");
+      return;
+    }
+    if (!EMAIL_RE.test(trimmedEmail)) {
+      setError("Please enter a valid email address.");
       return;
     }
 
@@ -78,10 +87,36 @@ export default function AuthScreen() {
     }
   }
 
+  async function handleForgotPassword() {
+    setError(null);
+    setInfo(null);
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail || !EMAIL_RE.test(trimmedEmail)) {
+      setError("Enter your email above, then tap “Forgot password?” to reset it.");
+      return;
+    }
+    setLoading(true);
+    const { error: resetError } = await supabase.auth.resetPasswordForEmail(trimmedEmail);
+    setLoading(false);
+    if (resetError) {
+      setError(resetError.message);
+      return;
+    }
+    setInfo(`We've sent a password reset link to ${trimmedEmail}.`);
+  }
+
   return (
     <SafeAreaView style={st.safe}>
       <StatusBar style="light" />
-      <View style={st.root}>
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+      >
+        <ScrollView
+          contentContainerStyle={st.root}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
         <View style={st.card}>
           <View style={st.header}>
             <View style={st.logoWrap}>
@@ -196,15 +231,32 @@ export default function AuthScreen() {
               </>
             )}
           </Pressable>
+
+          {mode === "login" && (
+            <Pressable
+              style={st.forgotBtn}
+              onPress={handleForgotPassword}
+              disabled={loading}
+              hitSlop={8}
+            >
+              <Text style={st.forgotText}>Forgot password?</Text>
+            </Pressable>
+          )}
         </View>
-      </View>
+        </ScrollView>
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
 
 const st = StyleSheet.create({
   safe: { flex: 1, backgroundColor: C.bg },
-  root: { flex: 1, justifyContent: "center", paddingHorizontal: S.screenPadding },
+  root: {
+    flexGrow: 1,
+    justifyContent: "center",
+    paddingHorizontal: S.screenPadding,
+    paddingVertical: S.xl,
+  },
   card: {
     backgroundColor: C.surface,
     borderRadius: S.radiusCard,
@@ -287,4 +339,7 @@ const st = StyleSheet.create({
   },
   submitBtnDisabled: { opacity: 0.6 },
   submitText: { color: C.textHero, fontSize: 14, fontWeight: "800" },
+
+  forgotBtn: { alignSelf: "center", paddingVertical: 4 },
+  forgotText: { color: C.textAccent, fontSize: 13, fontWeight: "700" },
 });

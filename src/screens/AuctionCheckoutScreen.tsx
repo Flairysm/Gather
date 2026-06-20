@@ -17,6 +17,8 @@ import { C, S } from "../theme";
 import { supabase } from "../lib/supabase";
 import { requireNetwork } from "../lib/network";
 import { useAppNavigation } from "../navigation/NavigationContext";
+import CardPaymentMethodCard from "../components/CardPaymentMethodCard";
+import { useCardPayment, createAuctionPayment, cancelCardOrder } from "../data/payments";
 
 type ShippingAddress = {
   id: string;
@@ -41,7 +43,6 @@ type Props = { winId: string; onBack: () => void };
 type WinData = {
   id: string;
   auction_id: string | null;
-  flash_pin_id: string | null;
   winning_bid: number;
   payment_deadline: string;
   payment_status: string;
@@ -52,10 +53,7 @@ type WinData = {
   images: string[];
   seller_name: string;
   seller_avatar: string | null;
-  isFlash: boolean;
   created_at: string;
-  streamer_name: string | null;
-  stream_title: string | null;
 };
 
 function normalizeImages(value: unknown): string[] {
@@ -77,9 +75,28 @@ function formatPrice(n: number): string {
   return `RM${n.toLocaleString("en-MY", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
 }
 
+function formatDeadline(deadline: string): string {
+  return new Date(deadline).toLocaleDateString("en-MY", {
+    day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit",
+  });
+}
+
+function deadlineCountdown(deadline: string): { text: string; urgent: boolean } {
+  const diff = new Date(deadline).getTime() - Date.now();
+  if (diff <= 0) return { text: "deadline passed", urgent: true };
+  const totalSec = Math.floor(diff / 1000);
+  const days = Math.floor(totalSec / 86400);
+  const hrs = Math.floor((totalSec % 86400) / 3600);
+  const mins = Math.floor((totalSec % 3600) / 60);
+  if (days > 0) return { text: `${days}d ${hrs}h left`, urgent: days < 1 };
+  if (hrs > 0) return { text: `${hrs}h ${mins}m left`, urgent: true };
+  return { text: `${mins}m left`, urgent: true };
+}
+
 export default function AuctionCheckoutScreen({ winId, onBack }: Props) {
   const insets = useSafeAreaInsets();
   const { push, stack } = useAppNavigation();
+  const pay = useCardPayment();
   const [win, setWin] = useState<WinData | null>(null);
   const [loading, setLoading] = useState(true);
   const [processing, setProcessing] = useState(false);
@@ -95,12 +112,8 @@ export default function AuctionCheckoutScreen({ winId, onBack }: Props) {
       const { data, error } = await supabase
         .from("auction_wins")
         .select(`
-          id, auction_id, flash_pin_id, winning_bid, payment_deadline, payment_status, seller_id, created_at,
+          id, auction_id, winning_bid, payment_deadline, payment_status, seller_id, created_at,
           auction:auction_items!auction_id(card_name, edition, grade, condition, images),
-          flash_pin:live_stream_pins!flash_pin_id(flash_name, flash_image_url, host_id, stream_id,
-            host:profiles!host_id(username, display_name),
-            stream:live_streams!stream_id(title)
-          ),
           seller:profiles!seller_id(username, display_name, avatar_url)
         `)
         .eq("id", winId)
@@ -116,38 +129,24 @@ export default function AuctionCheckoutScreen({ winId, onBack }: Props) {
       const auction = Array.isArray((data as any).auction)
         ? (data as any).auction[0]
         : (data as any).auction;
-      const flashPin = Array.isArray((data as any).flash_pin)
-        ? (data as any).flash_pin[0]
-        : (data as any).flash_pin;
       const seller = Array.isArray((data as any).seller)
         ? (data as any).seller[0]
         : (data as any).seller;
 
-      const isFlash = !auction && !!flashPin;
-      const host = flashPin ? (Array.isArray(flashPin.host) ? flashPin.host[0] : flashPin.host) : null;
-      const stream = flashPin ? (Array.isArray(flashPin.stream) ? flashPin.stream[0] : flashPin.stream) : null;
       setWin({
         id: data.id,
         auction_id: (data as any).auction_id,
-        flash_pin_id: (data as any).flash_pin_id,
         winning_bid: Number((data as any).winning_bid),
         payment_deadline: (data as any).payment_deadline,
         payment_status: (data as any).payment_status,
         seller_id: (data as any).seller_id,
         created_at: (data as any).created_at,
-        card_name: isFlash
-          ? flashPin.flash_name ?? "Flash Auction Item"
-          : auction?.card_name ?? "Auction Item",
-        edition: isFlash ? null : auction?.edition ?? null,
-        grade: isFlash ? null : auction?.grade ?? auction?.condition ?? null,
-        images: isFlash
-          ? (flashPin.flash_image_url ? [flashPin.flash_image_url] : [])
-          : normalizeImages(auction?.images),
+        card_name: auction?.card_name ?? "Auction Item",
+        edition: auction?.edition ?? null,
+        grade: auction?.grade ?? auction?.condition ?? null,
+        images: normalizeImages(auction?.images),
         seller_name: seller?.display_name ?? seller?.username ?? "Seller",
         seller_avatar: seller?.avatar_url ?? null,
-        isFlash,
-        streamer_name: host?.display_name ?? host?.username ?? null,
-        stream_title: stream?.title ?? null,
       });
     } catch (e) {
       console.warn("AuctionCheckout loadWin exception:", e);
@@ -192,17 +191,34 @@ export default function AuctionCheckoutScreen({ winId, onBack }: Props) {
     if (!(await requireNetwork())) return;
     setProcessing(true);
 
+    let orderId = "";
     try {
-      const { error } = await supabase.rpc("pay_auction_win", {
-        p_win_id: win.id,
-      });
-      if (error) throw new Error(error.message);
+      const shippingAddress = {
+        full_name: address.full_name,
+        phone: address.phone,
+        address_line1: address.address_line1,
+        address_line2: address.address_line2,
+        city: address.city,
+        state: address.state,
+        zip: address.zip,
+        country: "Malaysia",
+        label: address.label,
+      };
+      const { clientSecret, orderId: id } = await createAuctionPayment(win.id, shippingFee, shippingAddress);
+      orderId = id;
+
+      const result = await pay(clientSecret);
+      if (result.status !== "paid") {
+        if (orderId) await cancelCardOrder([orderId]).catch(() => {});
+        if (result.status === "failed") {
+          Alert.alert("Payment Failed", result.message ?? "Your payment could not be completed. Please try again.");
+        }
+        return;
+      }
       setConfirmed(true);
     } catch (err: any) {
-      Alert.alert(
-        "Payment Failed",
-        err.message ?? "Something went wrong. Please try again.",
-      );
+      if (orderId) await cancelCardOrder([orderId]).catch(() => {});
+      Alert.alert("Payment Failed", err.message ?? "Something went wrong. Please try again.");
     } finally {
       setProcessing(false);
     }
@@ -226,7 +242,8 @@ export default function AuctionCheckoutScreen({ winId, onBack }: Props) {
     );
   }
 
-  if (confirmed && win) {
+  const alreadyPaid = !confirmed && win?.payment_status === "paid";
+  if ((confirmed || alreadyPaid) && win) {
     return (
       <SafeAreaView style={st.safe}>
         <StatusBar style="light" />
@@ -234,9 +251,13 @@ export default function AuctionCheckoutScreen({ winId, onBack }: Props) {
           <View style={st.successCircle}>
             <Ionicons name="checkmark" size={40} color={C.textHero} />
           </View>
-          <Text style={st.successTitle}>Payment Confirmed!</Text>
+          <Text style={st.successTitle}>
+            {alreadyPaid ? "Already Paid" : "Payment Confirmed!"}
+          </Text>
           <Text style={st.successSub}>
-            Your auction win has been paid. The seller will ship your item soon.
+            {alreadyPaid
+              ? "You've already paid for this auction win. The seller will ship your item soon."
+              : "Your auction win has been paid. The seller will ship your item soon."}
           </Text>
           <View style={st.successDetails}>
             <View style={st.successItem}>
@@ -259,11 +280,17 @@ export default function AuctionCheckoutScreen({ winId, onBack }: Props) {
               </Text>
             </View>
           </View>
+          <Pressable style={st.doneBtn} onPress={() => push({ type: "MY_ORDERS" })}>
+            <Text style={st.doneBtnText}>View Order</Text>
+          </Pressable>
+          <Pressable style={st.secondaryBtn} onPress={() => push({ type: "MY_AUCTIONS" })}>
+            <Text style={st.secondaryBtnText}>My Auctions</Text>
+          </Pressable>
           <Pressable
-            style={[st.doneBtn, { marginBottom: Math.max(insets.bottom, 14) }]}
+            style={[st.linkBtn, { marginBottom: Math.max(insets.bottom, 14) }]}
             onPress={onBack}
           >
-            <Text style={st.doneBtnText}>Done</Text>
+            <Text style={st.linkBtnText}>Done</Text>
           </Pressable>
         </View>
       </SafeAreaView>
@@ -295,6 +322,8 @@ export default function AuctionCheckoutScreen({ winId, onBack }: Props) {
 
   const deadlinePassed =
     win.payment_deadline && new Date(win.payment_deadline) < new Date();
+  const payable = win.payment_status === "pending" && !deadlinePassed;
+  const countdown = deadlineCountdown(win.payment_deadline);
   const imageUrl = win.images[0];
 
   return (
@@ -315,8 +344,23 @@ export default function AuctionCheckoutScreen({ winId, onBack }: Props) {
       >
         {/* Auction badge */}
         <View style={st.auctionBadge}>
-          <Ionicons name={win.isFlash ? "flash" : "hammer"} size={14} color={win.isFlash ? "#FFD700" : "#F59E0B"} />
-          <Text style={st.auctionBadgeText}>{win.isFlash ? "Flash Auction Win" : "Auction Win"}</Text>
+          <Ionicons name="hammer" size={14} color="#F59E0B" />
+          <Text style={st.auctionBadgeText}>Auction Win</Text>
+        </View>
+
+        {/* Payment deadline banner */}
+        <View style={[st.deadlineBanner, (!payable || countdown.urgent) && st.deadlineBannerUrgent]}>
+          <Ionicons
+            name={payable ? "time-outline" : "alert-circle"}
+            size={18}
+            color={!payable || countdown.urgent ? C.danger : "#F59E0B"}
+          />
+          <View style={{ flex: 1 }}>
+            <Text style={[st.deadlineTitle, (!payable || countdown.urgent) && { color: C.danger }]}>
+              {payable ? `Payment due — ${countdown.text}` : "Payment deadline passed"}
+            </Text>
+            <Text style={st.deadlineSub}>Pay by {formatDeadline(win.payment_deadline)}</Text>
+          </View>
         </View>
 
         {/* Item card */}
@@ -344,21 +388,9 @@ export default function AuctionCheckoutScreen({ winId, onBack }: Props) {
         {/* Source */}
         <Text style={st.sectionTitle}>Source</Text>
         <View style={st.sourceCard}>
-          <Ionicons
-            name={win.isFlash ? "flash" : "hammer"}
-            size={16}
-            color={win.isFlash ? "#FFD700" : "#F59E0B"}
-          />
+          <Ionicons name="hammer" size={16} color="#F59E0B" />
           <View style={st.sourceInfo}>
-            <Text style={st.sourceLabel}>
-              {win.isFlash ? "Won in Flash Auction" : "Won in Auction"}
-            </Text>
-            {win.isFlash && win.streamer_name && (
-              <Text style={st.sourceDetail}>
-                from {win.streamer_name}'s live stream
-                {win.stream_title ? ` — "${win.stream_title}"` : ""}
-              </Text>
-            )}
+            <Text style={st.sourceLabel}>Won in Auction</Text>
             <Text style={st.sourceDate}>
               {new Date(win.created_at).toLocaleDateString("en-MY", {
                 day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit",
@@ -387,6 +419,14 @@ export default function AuctionCheckoutScreen({ winId, onBack }: Props) {
 
         {/* Shipping */}
         <Text style={st.sectionTitle}>Shipping Address</Text>
+        {loadingAddr ? (
+          <View style={st.addressCard}>
+            <ActivityIndicator size="small" color={C.textAccent} />
+            <View style={st.addressInfo}>
+              <Text style={st.addressName}>Loading address…</Text>
+            </View>
+          </View>
+        ) : (
         <Pressable
           style={[st.addressCard, !address && { borderColor: C.danger + "60" }]}
           onPress={() => push({ type: "ADDRESS_BOOK" })}
@@ -418,6 +458,11 @@ export default function AuctionCheckoutScreen({ winId, onBack }: Props) {
           </View>
           <Feather name="chevron-right" size={18} color={C.textMuted} />
         </Pressable>
+        )}
+
+        {/* Payment */}
+        <Text style={st.sectionTitle}>Payment Method</Text>
+        <CardPaymentMethodCard />
 
         {/* Price breakdown */}
         <Text style={st.sectionTitle}>Price Breakdown</Text>
@@ -435,14 +480,14 @@ export default function AuctionCheckoutScreen({ winId, onBack }: Props) {
           <View style={st.breakdownRow}>
             <Text style={st.breakdownLabel}>Shipping</Text>
             <Text style={st.breakdownValue}>
-              {address ? `RM${shippingFee}` : "Select address"}
+              {loadingAddr ? "Loading…" : address ? formatPrice(shippingFee) : "Select address"}
             </Text>
           </View>
           <View style={st.breakdownDivider} />
           <View style={st.breakdownRow}>
             <Text style={st.breakdownTotalLabel}>Total</Text>
             <Text style={st.breakdownTotal}>
-              {formatPrice(total)}
+              {loadingAddr ? "—" : formatPrice(total)}
             </Text>
           </View>
         </View>
@@ -461,16 +506,18 @@ export default function AuctionCheckoutScreen({ winId, onBack }: Props) {
       <View
         style={[st.bottomBar, { paddingBottom: Math.max(insets.bottom, 14) }]}
       >
-        {deadlinePassed ? (
+        {!payable ? (
           <View style={st.expiredBtn}>
             <Ionicons name="time-outline" size={18} color={C.danger} />
-            <Text style={st.expiredText}>Payment Deadline Passed</Text>
+            <Text style={st.expiredText}>
+              {deadlinePassed ? "Payment Deadline Passed" : "Payment Closed"}
+            </Text>
           </View>
         ) : (
           <Pressable
-            style={[st.confirmBtn, processing && { opacity: 0.7 }]}
+            style={[st.confirmBtn, (processing || loadingAddr) && { opacity: 0.7 }]}
             onPress={handleConfirmPayment}
-            disabled={processing}
+            disabled={processing || loadingAddr}
           >
             {processing ? (
               <ActivityIndicator size="small" color={C.textHero} />
@@ -478,9 +525,7 @@ export default function AuctionCheckoutScreen({ winId, onBack }: Props) {
               <Ionicons name="lock-closed" size={18} color={C.textHero} />
             )}
             <Text style={st.confirmText}>
-              {processing
-                ? "Processing…"
-                : `Confirm Payment  •  ${formatPrice(total)}`}
+              {processing ? "Processing…" : `Pay  •  ${formatPrice(total)}`}
             </Text>
           </Pressable>
         )}
@@ -707,6 +752,15 @@ const st = StyleSheet.create({
     paddingVertical: 16,
   },
   confirmText: { color: C.textHero, fontSize: 15, fontWeight: "800" },
+  topupBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    backgroundColor: C.accent,
+    borderRadius: S.radiusSmall,
+    paddingVertical: 16,
+  },
   expiredBtn: {
     flexDirection: "row",
     alignItems: "center",
@@ -784,4 +838,43 @@ const st = StyleSheet.create({
     marginTop: S.lg,
   },
   doneBtnText: { color: C.textHero, fontSize: 15, fontWeight: "800" },
+  secondaryBtn: {
+    width: "100%",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: C.elevated,
+    borderRadius: S.radiusSmall,
+    borderWidth: 1,
+    borderColor: C.border,
+    paddingVertical: 14,
+    marginTop: S.md,
+  },
+  secondaryBtnText: { color: C.textPrimary, fontSize: 14, fontWeight: "700" },
+  linkBtn: {
+    width: "100%",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 12,
+    marginTop: S.sm,
+  },
+  linkBtnText: { color: C.textSecondary, fontSize: 14, fontWeight: "600" },
+
+  deadlineBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: "rgba(245,158,11,0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(245,158,11,0.25)",
+    borderRadius: S.radiusCard,
+    padding: S.lg,
+    marginTop: S.sm,
+    marginBottom: S.sm,
+  },
+  deadlineBannerUrgent: {
+    backgroundColor: "rgba(239,68,68,0.1)",
+    borderColor: "rgba(239,68,68,0.25)",
+  },
+  deadlineTitle: { color: "#F59E0B", fontSize: 14, fontWeight: "800" },
+  deadlineSub: { color: C.textSecondary, fontSize: 11, fontWeight: "600", marginTop: 2 },
 });

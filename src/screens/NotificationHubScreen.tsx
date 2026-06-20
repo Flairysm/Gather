@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ActivityIndicator, FlatList, Pressable, SafeAreaView, StyleSheet, Text, View } from "react-native";
+import { FlatList, Pressable, RefreshControl, SafeAreaView, StyleSheet, Text, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { Feather, Ionicons } from "@expo/vector-icons";
 
@@ -8,6 +8,8 @@ import { supabase } from "../lib/supabase";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import { useBadgeContext } from "../hooks/useBadgeCounts";
 import ErrorState from "../components/ErrorState";
+import EmptyState from "../components/EmptyState";
+import Shimmer, { ShimmerGroup } from "../components/Shimmer";
 
 type NotificationRow = {
   id: string;
@@ -23,6 +25,16 @@ type NotificationRow = {
 };
 
 type Props = { onBack: () => void };
+
+const ACTIONABLE_TYPES = new Set([
+  "new_sale",
+  "order_shipped",
+  "order_delivered",
+  "auction_won",
+  "auction_outbid",
+  "dispute_opened",
+  "dispute_resolved",
+]);
 
 function relativeTime(dateStr: string): string {
   const diffMs = Date.now() - new Date(dateStr).getTime();
@@ -44,11 +56,12 @@ export default function NotificationHubScreen({ onBack }: Props) {
   const { push } = useAppNavigation();
   const { refresh: refreshBadges } = useBadgeContext();
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState(false);
   const [rows, setRows] = useState<NotificationRow[]>([]);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     setLoadError(false);
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) { setRows([]); setLoading(false); return; }
@@ -97,6 +110,12 @@ export default function NotificationHubScreen({ onBack }: Props) {
 
   useEffect(() => {
     load().catch(() => setLoading(false));
+  }, [load]);
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await load(true).catch(() => {});
+    setRefreshing(false);
   }, [load]);
 
   function handleTap(notif: NotificationRow) {
@@ -149,7 +168,12 @@ export default function NotificationHubScreen({ onBack }: Props) {
           <Feather name="arrow-left" size={20} color={C.textPrimary} />
         </Pressable>
         <Text style={st.headerTitle}>Notifications</Text>
-        <Pressable style={st.backBtn} onPress={load}>
+        <Pressable
+          style={st.backBtn}
+          onPress={() => load()}
+          accessibilityRole="button"
+          accessibilityLabel="Refresh notifications"
+        >
           <Ionicons name="refresh" size={16} color={C.textPrimary} />
         </Pressable>
       </View>
@@ -161,29 +185,51 @@ export default function NotificationHubScreen({ onBack }: Props) {
       )}
 
       {loading ? (
-        <View style={st.centerWrap}>
-          <ActivityIndicator size="large" color={C.accent} />
-        </View>
+        <ShimmerGroup>
+          <View style={st.list}>
+            {[0, 1, 2, 3, 4, 5].map((i) => (
+              <View key={i} style={st.skeletonRow}>
+                <Shimmer width={38} height={38} borderRadius={12} />
+                <View style={{ flex: 1, gap: 8 }}>
+                  <Shimmer width="55%" height={13} borderRadius={6} />
+                  <Shimmer width="85%" height={11} borderRadius={5} />
+                  <Shimmer width="25%" height={10} borderRadius={5} />
+                </View>
+              </View>
+            ))}
+          </View>
+        </ShimmerGroup>
       ) : loadError ? (
         <ErrorState
           message="Failed to load notifications. Check your connection and try again."
           onRetry={() => { setLoadError(false); load(); }}
         />
       ) : empty ? (
-        <View style={st.centerWrap}>
-          <Ionicons name="notifications-off-outline" size={40} color={C.textMuted} />
-          <Text style={st.emptyTitle}>No notifications</Text>
-          <Text style={st.emptySub}>Order updates, sales, and auction alerts will show up here.</Text>
-        </View>
+        <EmptyState
+          icon="notifications-off-outline"
+          title="No notifications"
+          message="Order updates, sales, and auction alerts will show up here."
+        />
       ) : (
         <FlatList
           data={rows}
           keyExtractor={(item) => item.id}
           contentContainerStyle={st.list}
-          renderItem={({ item }) => (
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor={C.accent}
+              colors={[C.accent]}
+            />
+          }
+          renderItem={({ item }) => {
+            const actionable = ACTIONABLE_TYPES.has(item.type);
+            return (
             <Pressable
               style={[st.row, !item.is_read && st.rowUnread]}
-              onPress={() => handleTap(item)}
+              onPress={actionable ? () => handleTap(item) : undefined}
+              disabled={!actionable}
             >
               <View style={[st.iconWrap, { backgroundColor: item.color + "18" }]}>
                 <Ionicons name={item.icon as any} size={17} color={item.color} />
@@ -195,7 +241,8 @@ export default function NotificationHubScreen({ onBack }: Props) {
               </View>
               {!item.is_read && <View style={st.unreadDot} />}
             </Pressable>
-          )}
+            );
+          }}
         />
       )}
     </SafeAreaView>
@@ -238,16 +285,17 @@ const st = StyleSheet.create({
     alignItems: "flex-end",
   },
   markAllText: { color: C.accent, fontSize: 12, fontWeight: "700" },
-  centerWrap: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-    paddingHorizontal: 40,
-  },
-  emptyTitle: { color: C.textPrimary, fontSize: 16, fontWeight: "800" },
-  emptySub: { color: C.textSecondary, fontSize: 12, textAlign: "center" },
   list: { paddingHorizontal: S.screenPadding, paddingVertical: 12, gap: 10 },
+  skeletonRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border,
+    borderRadius: 14,
+    padding: 12,
+  },
   row: {
     flexDirection: "row",
     alignItems: "center",

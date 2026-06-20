@@ -152,6 +152,147 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true });
       }
 
+      // Real refund: credits the buyer's wallet (or refunds the card) and flips
+      // escrow + order_items to 'refunded'. Only valid while escrow is held.
+      case "order.refund": {
+        const { order_id } = params;
+        if (!order_id) return NextResponse.json({ error: "order_id required" }, { status: 400 });
+        const { data, error } = await admin.functions.invoke("refund-order", {
+          body: { order_id },
+        });
+        if (error) return NextResponse.json({ error: error.message }, { status: 400 });
+        if (data?.error) return NextResponse.json({ error: data.error }, { status: 400 });
+        if (data?.status && !["refunded", "already_refunded"].includes(data.status)) {
+          return NextResponse.json({ error: `Cannot refund: ${data.status}` }, { status: 400 });
+        }
+        return NextResponse.json({ ok: true, result: data });
+      }
+
+      // Manual escrow release (override the dispute-window cron): marks the
+      // order's escrow 'released' so it becomes withdrawable seller balance.
+      // No Stripe Transfer — payouts are settled out-of-band (see payout.*).
+      case "order.releaseEscrow": {
+        const { order_id } = params;
+        if (!order_id) return NextResponse.json({ error: "order_id required" }, { status: 400 });
+        const { data, error } = await admin.rpc("admin_release_order", { p_order_id: order_id });
+        if (error) return NextResponse.json({ error: error.message }, { status: 400 });
+        if (data?.status && data.status !== "released") {
+          return NextResponse.json({ error: `Cannot release: ${data.status}` }, { status: 400 });
+        }
+        return NextResponse.json({ ok: true, result: data });
+      }
+
+      // ─── Seller payouts (manual model) ───
+      // Mark a withdrawal request paid after transferring funds out-of-band.
+      case "payout.markPaid": {
+        const { payout_id, reference } = params;
+        if (!payout_id) return NextResponse.json({ error: "payout_id required" }, { status: 400 });
+        const { data: row, error: fetchErr } = await admin
+          .from("seller_payouts")
+          .select("seller_id, amount")
+          .eq("id", payout_id)
+          .single();
+        if (fetchErr || !row) {
+          return NextResponse.json({ error: fetchErr?.message ?? "Payout not found" }, { status: 400 });
+        }
+        const { error } = await admin.rpc("admin_mark_payout_paid", {
+          p_payout_id: payout_id,
+          p_reference: reference ?? null,
+          p_admin_id: userId,
+        });
+        if (error) return NextResponse.json({ error: error.message }, { status: 400 });
+        await admin.from("notifications").insert({
+          user_id: row.seller_id,
+          type: "payout_paid",
+          title: "Payout sent",
+          body: `Your payout of RM${Number(row.amount).toFixed(2)} has been transferred to your bank.`,
+          icon: "cash-outline",
+          color: "#22C55E",
+          reference_type: "payout",
+          reference_id: payout_id,
+        });
+        return NextResponse.json({ ok: true });
+      }
+
+      case "payout.reject": {
+        const { payout_id, note } = params;
+        if (!payout_id) return NextResponse.json({ error: "payout_id required" }, { status: 400 });
+        const { data: row } = await admin
+          .from("seller_payouts")
+          .select("seller_id, amount")
+          .eq("id", payout_id)
+          .single();
+        const { error } = await admin.rpc("admin_reject_payout", {
+          p_payout_id: payout_id,
+          p_note: note ?? null,
+        });
+        if (error) return NextResponse.json({ error: error.message }, { status: 400 });
+        if (row) {
+          await admin.from("notifications").insert({
+            user_id: row.seller_id,
+            type: "payout_rejected",
+            title: "Payout request declined",
+            body: note ? String(note).slice(0, 200) : "Your payout request was not approved. Please review your bank details.",
+            icon: "alert-circle-outline",
+            color: "#EF4444",
+            reference_type: "payout",
+            reference_id: payout_id,
+          });
+        }
+        return NextResponse.json({ ok: true });
+      }
+
+      // ─── Vouchers (DropsTCG prepaid credit) ───
+      case "voucher.create": {
+        const { code, value, source, expires_at, batch } = params;
+        const { data, error } = await admin.rpc("admin_create_voucher", {
+          p_code: code,
+          p_value: value,
+          p_source: source ?? "dropstcg",
+          p_expires_at: expires_at ?? null,
+          p_batch: batch ?? null,
+          p_admin_id: userId,
+        });
+        if (error) return NextResponse.json({ error: error.message }, { status: 400 });
+        return NextResponse.json({ ok: true, result: data });
+      }
+
+      // Generate N random codes in one batch (returns the created codes).
+      case "voucher.createBatch": {
+        const { count, value, source, expires_at, batch, prefix } = params;
+        const n = Math.min(Math.max(parseInt(String(count), 10) || 0, 1), 200);
+        const codes: string[] = [];
+        const errors: string[] = [];
+        const rand = () => {
+          const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no ambiguous 0/O/1/I
+          let s = "";
+          for (let i = 0; i < 10; i++) s += chars[Math.floor(Math.random() * chars.length)];
+          return s;
+        };
+        for (let i = 0; i < n; i++) {
+          const code = `${(prefix ? String(prefix).toUpperCase().replace(/[^A-Z0-9]/g, "") : "")}${rand()}`;
+          const { error } = await admin.rpc("admin_create_voucher", {
+            p_code: code,
+            p_value: value,
+            p_source: source ?? "dropstcg",
+            p_expires_at: expires_at ?? null,
+            p_batch: batch ?? null,
+            p_admin_id: userId,
+          });
+          if (error) { errors.push(error.message); continue; }
+          codes.push(code);
+        }
+        return NextResponse.json({ ok: true, codes, errors });
+      }
+
+      case "voucher.void": {
+        const { id } = params;
+        if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
+        const { error } = await admin.rpc("admin_void_voucher", { p_voucher_id: id });
+        if (error) return NextResponse.json({ error: error.message }, { status: 400 });
+        return NextResponse.json({ ok: true });
+      }
+
       // ─── Users ───
       case "user.toggleBan": {
         const { id, banned, reason } = params;
@@ -242,6 +383,30 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true });
       }
 
+      // Short-lived signed URL for a vendor KYC document. Validates the path is
+      // actually referenced by a vendor application before exposing the private file.
+      case "kyc.signUrl": {
+        const { path } = params;
+        if (!path || typeof path !== "string") {
+          return NextResponse.json({ error: "path required" }, { status: 400 });
+        }
+        const { data: appRow } = await admin
+          .from("vendor_applications")
+          .select("id")
+          .or(`ic_front_path.eq.${path},selfie_path.eq.${path}`)
+          .maybeSingle();
+        if (!appRow) {
+          return NextResponse.json({ error: "Document not found" }, { status: 404 });
+        }
+        const { data, error } = await admin.storage
+          .from("vendor-kyc")
+          .createSignedUrl(path, 300);
+        if (error || !data?.signedUrl) {
+          return NextResponse.json({ error: error?.message ?? "Failed to sign URL" }, { status: 400 });
+        }
+        return NextResponse.json({ ok: true, url: data.signedUrl });
+      }
+
       // ─── Featured Banners ───
       case "banner.upsert": {
         const { id, payload } = params;
@@ -280,6 +445,19 @@ export async function POST(req: NextRequest) {
       case "store.updatePriority": {
         const { id, priority } = params;
         const { error } = await admin.from("vendor_stores").update({ priority }).eq("id", id);
+        if (error) return NextResponse.json({ error: error.message }, { status: 400 });
+        return NextResponse.json({ ok: true });
+      }
+
+      case "store.setPinnedPosition": {
+        const { id, pinned_position } = params;
+        if (
+          pinned_position !== null &&
+          (!Number.isInteger(pinned_position) || (pinned_position as number) < 1)
+        ) {
+          return NextResponse.json({ error: "pinned_position must be an integer >= 1 or null" }, { status: 400 });
+        }
+        const { error } = await admin.from("vendor_stores").update({ pinned_position }).eq("id", id);
         if (error) return NextResponse.json({ error: error.message }, { status: 400 });
         return NextResponse.json({ ok: true });
       }

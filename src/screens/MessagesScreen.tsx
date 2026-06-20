@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  ActivityIndicator,
   Alert,
   Animated,
+  FlatList,
   Pressable,
+  RefreshControl,
   SafeAreaView,
-  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -15,6 +15,8 @@ import { StatusBar } from "expo-status-bar";
 import { Feather, Ionicons } from "@expo/vector-icons";
 import CachedImage from "../components/CachedImage";
 import ErrorState from "../components/ErrorState";
+import EmptyState from "../components/EmptyState";
+import Shimmer, { ShimmerGroup } from "../components/Shimmer";
 import { C, S } from "../theme";
 import {
   loadConversations,
@@ -38,6 +40,7 @@ export default function MessagesScreen({ onBack }: Props) {
   const [convos, setConvos] = useState<Conversation[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [search, setSearch] = useState("");
   const [userId, setUserId] = useState<string | null>(null);
 
@@ -52,6 +55,13 @@ export default function MessagesScreen({ onBack }: Props) {
       setLoading(false);
     }
   }, []);
+
+  const onRefresh = useCallback(async () => {
+    if (!userId) return;
+    setRefreshing(true);
+    await fetchConversations(userId);
+    setRefreshing(false);
+  }, [userId, fetchConversations]);
 
   useEffect(() => {
     let channel: ReturnType<typeof subscribeToConversations> | null = null;
@@ -185,42 +195,50 @@ export default function MessagesScreen({ onBack }: Props) {
       </View>
 
       {loading ? (
-        <View style={st.center}>
-          <ActivityIndicator size="large" color={C.accent} />
-        </View>
+        <ShimmerGroup>
+          <View style={st.list}>
+            {[0, 1, 2, 3, 4, 5].map((i) => (
+              <View key={i} style={st.skeletonRow}>
+                <Shimmer width={52} height={52} borderRadius={26} />
+                <View style={{ flex: 1, gap: 8 }}>
+                  <Shimmer width="55%" height={14} borderRadius={6} />
+                  <Shimmer width="80%" height={12} borderRadius={6} />
+                </View>
+              </View>
+            ))}
+          </View>
+        </ShimmerGroup>
       ) : loadError ? (
         <ErrorState message="Could not load messages." onRetry={() => userId && fetchConversations(userId)} />
       ) : filtered.length === 0 ? (
-        <View style={st.center}>
-          <Ionicons
-            name="chatbubbles-outline"
-            size={48}
-            color={C.textMuted}
-          />
-          <Text style={st.emptyTitle}>
-            {search.trim() ? "No matches" : "No messages yet"}
-          </Text>
-          <Text style={st.emptySub}>
-            {search.trim()
+        <EmptyState
+          icon="chatbubbles-outline"
+          title={search.trim() ? "No matches" : "No messages yet"}
+          message={
+            search.trim()
               ? "Try a different search term"
-              : "Start a conversation from a listing"}
-          </Text>
-        </View>
+              : "Start a conversation from a listing"
+          }
+        />
       ) : (
-        <ScrollView
+        <FlatList
+          data={filtered}
+          keyExtractor={(conv) => conv.id}
           showsVerticalScrollIndicator={false}
           contentContainerStyle={st.list}
-        >
-          {filtered.map((conv) => (
+          keyboardShouldPersistTaps="handled"
+          refreshControl={
+            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.accent} />
+          }
+          renderItem={({ item }) => (
             <SwipeableRow
-              key={conv.id}
-              conv={conv}
-              onFavorite={() => handleToggleFavorite(conv)}
-              onDelete={() => handleDelete(conv)}
-              onPress={() => push({ type: "CHAT", conversationId: conv.id })}
+              conv={item}
+              onFavorite={() => handleToggleFavorite(item)}
+              onDelete={() => handleDelete(item)}
+              onPress={() => push({ type: "CHAT", conversationId: item.id })}
             />
-          ))}
-        </ScrollView>
+          )}
+        />
       )}
     </SafeAreaView>
   );
@@ -456,24 +474,16 @@ const st = StyleSheet.create({
     fontWeight: "500",
   },
 
-  center: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 10,
-    paddingHorizontal: 40,
-  },
-  emptyTitle: { color: C.textPrimary, fontSize: 16, fontWeight: "800" },
-  emptySub: {
-    color: C.textSecondary,
-    fontSize: 12,
-    fontWeight: "500",
-    textAlign: "center",
-  },
-
   list: {
     paddingTop: 4,
     paddingBottom: 40,
+  },
+  skeletonRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingHorizontal: S.screenPadding,
+    paddingVertical: 12,
   },
 
   /* ── Swipeable row ── */

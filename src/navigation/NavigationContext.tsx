@@ -7,7 +7,16 @@ const IOS_EASE = Easing.bezier(0.25, 0.46, 0.45, 0.94);
 
 export type ChatScreenParams =
   | { type: "CHAT"; conversationId: string; openOffer?: boolean }
-  | { type: "CHAT"; sellerId: string; listingId?: string; topic?: string; openOffer?: boolean };
+  | {
+      type: "CHAT";
+      sellerId: string;
+      listingId?: string;
+      topic?: string;
+      openOffer?: boolean;
+      wantedId?: string;
+      shareWantedId?: string;
+      initialMessage?: string;
+    };
 
 export type AppScreen =
   | { type: "MESSAGES" }
@@ -16,6 +25,7 @@ export type AppScreen =
   | { type: "LISTING_DETAIL"; listingId: string }
   | { type: "WANTED_DETAIL"; wantedId: string }
   | { type: "CREATE_LISTING" }
+  | { type: "EDIT_LISTING"; listingId: string }
   | { type: "CREATE_WANTED" }
   | { type: "CART" }
   | { type: "CHECKOUT" }
@@ -36,9 +46,13 @@ export type AppScreen =
   | { type: "MY_BOOKMARKS" }
   | { type: "ORDER_REVIEW"; orderId: string; sellerId: string }
   | { type: "MY_AUCTIONS" }
-  | { type: "LIVE_VIEWER"; streamId: string }
-  | { type: "GO_LIVE" }
-  | { type: "AUCTION_CHECKOUT"; winId: string };
+  | { type: "POST_COMPOSER" }
+  | { type: "FEED_POST_DETAIL"; postId: string }
+  | { type: "USER_PROFILE"; userId: string }
+  | { type: "AUCTION_CHECKOUT"; winId: string }
+  | { type: "WALLET" }
+  | { type: "VOUCHERS" }
+  | { type: "HELP_CENTRE" };
 
 type StackItem = { id: number; screen: AppScreen };
 

@@ -14,7 +14,7 @@ import type { Listing } from "../data/market";
 const CART_STORAGE_KEY = "@evend_cart";
 import HomeScreen from "../screens/HomeScreen";
 import MarketScreen from "../screens/MarketScreen";
-import LiveScreen from "../screens/LiveScreen";
+import FeedScreen from "../screens/FeedScreen";
 import AuctionScreen from "../screens/AuctionScreen";
 import SettingsScreen from "../screens/SettingsScreen";
 import MessagesScreen from "../screens/MessagesScreen";
@@ -23,6 +23,7 @@ import ChatScreen from "../screens/ChatScreen";
 import ListingDetailScreen from "../screens/ListingDetailScreen";
 import WantedDetailScreen from "../screens/WantedDetailScreen";
 import CreateListingScreen from "../screens/CreateListingScreen";
+import EditListingScreen from "../screens/EditListingScreen";
 import CreateWantedScreen from "../screens/CreateWantedScreen";
 import CartScreen from "../screens/CartScreen";
 import CheckoutScreen from "../screens/CheckoutScreen";
@@ -44,12 +45,18 @@ import MyBookmarksScreen from "../screens/MyBookmarksScreen";
 import OrderReviewScreen from "../screens/OrderReviewScreen";
 import MyAuctionsScreen from "../screens/MyAuctionsScreen";
 import AuctionCheckoutScreen from "../screens/AuctionCheckoutScreen";
+import UserProfileScreen from "../screens/UserProfileScreen";
 import { UserContext, fetchVendorStatus, type VendorStatus } from "../data/user";
 import { FeedPrefsProvider } from "../data/feedPreferences";
+import { WalletProvider } from "../data/wallet";
+import WalletScreen from "../screens/WalletScreen";
+import VouchersScreen from "../screens/VouchersScreen";
+import HelpCentreScreen from "../screens/HelpCentreScreen";
 import { supabase } from "../lib/supabase";
 import { useBadgeCounts, BadgeContext } from "../hooks/useBadgeCounts";
+import { emitTabReselect } from "../lib/tabEvents";
 
-type TabId = "HOME" | "MARKET" | "LIVE" | "AUCTION" | "SETTINGS";
+type TabId = "HOME" | "MARKET" | "FEED" | "AUCTION" | "SETTINGS";
 
 const TABS: {
   id: TabId;
@@ -58,7 +65,7 @@ const TABS: {
 }[] = [
   { id: "HOME",     label: "HOME",     icon: "home-outline" },
   { id: "MARKET",   label: "MARKET",   icon: "storefront-outline" },
-  { id: "LIVE",     label: "LIVE",     icon: "radio" },
+  { id: "FEED",     label: "SOCIAL",   icon: "chatbubbles-outline" },
   { id: "AUCTION",  label: "AUCTION",  icon: "hammer-outline" },
   { id: "SETTINGS", label: "PROFILE", icon: "person-outline" },
 ];
@@ -95,7 +102,14 @@ function renderOverlay(screen: AppScreen, pop: () => void) {
         <ChatScreen
           {...("conversationId" in screen
             ? { conversationId: screen.conversationId }
-            : { sellerId: screen.sellerId, listingId: screen.listingId, topic: screen.topic })}
+            : {
+                sellerId: screen.sellerId,
+                listingId: screen.listingId,
+                topic: screen.topic,
+                wantedId: screen.wantedId,
+                shareWantedId: screen.shareWantedId,
+                initialMessage: screen.initialMessage,
+              })}
           openOffer={screen.openOffer}
           onBack={pop}
         />
@@ -106,6 +120,8 @@ function renderOverlay(screen: AppScreen, pop: () => void) {
       return <WantedDetailScreen wantedId={screen.wantedId} onBack={pop} />;
     case "CREATE_LISTING":
       return <CreateListingScreen onBack={pop} />;
+    case "EDIT_LISTING":
+      return <EditListingScreen listingId={screen.listingId} onBack={pop} />;
     case "CREATE_WANTED":
       return <CreateWantedScreen onBack={pop} />;
     case "CART":
@@ -146,23 +162,31 @@ function renderOverlay(screen: AppScreen, pop: () => void) {
       return <OrderReviewScreen orderId={screen.orderId} sellerId={screen.sellerId} onBack={pop} />;
     case "MY_AUCTIONS":
       return <MyAuctionsScreen onBack={pop} />;
-    case "LIVE_VIEWER": {
-      const LiveViewerScreen = require("../screens/LiveViewerScreen").default;
-      return <LiveViewerScreen streamId={screen.streamId} onBack={pop} />;
+    case "POST_COMPOSER": {
+      const PostComposerScreen = require("../screens/PostComposerScreen").default;
+      return <PostComposerScreen onBack={pop} />;
     }
-    case "GO_LIVE": {
-      const GoLiveScreen = require("../screens/GoLiveScreen").default;
-      return <GoLiveScreen onBack={pop} />;
+    case "FEED_POST_DETAIL": {
+      const PostDetailScreen = require("../screens/PostDetailScreen").default;
+      return <PostDetailScreen postId={screen.postId} onBack={pop} />;
     }
+    case "USER_PROFILE":
+      return <UserProfileScreen userId={screen.userId} onBack={pop} />;
     case "AUCTION_CHECKOUT":
       return <AuctionCheckoutScreen winId={screen.winId} onBack={pop} />;
+    case "WALLET":
+      return <WalletScreen onBack={pop} />;
+    case "VOUCHERS":
+      return <VouchersScreen onBack={pop} />;
+    case "HELP_CENTRE":
+      return <HelpCentreScreen onBack={pop} />;
   }
 }
 
 const SCREENS: { id: TabId; render: () => React.ReactNode }[] = [
   { id: "HOME",     render: () => <HomeScreen /> },
   { id: "MARKET",   render: () => <MarketScreen /> },
-  { id: "LIVE",     render: () => <LiveScreen /> },
+  { id: "FEED",     render: () => <FeedScreen /> },
   { id: "AUCTION",  render: () => <AuctionScreen /> },
   { id: "SETTINGS", render: () => <SettingsScreen /> },
 ];
@@ -423,6 +447,7 @@ export default function TabNavigator() {
     <UserContext.Provider value={userValue}>
     <FeedPrefsProvider>
     <BadgeContext.Provider value={badges}>
+    <WalletProvider>
     <CartContext.Provider value={cart}>
       <NavigationProvider renderOverlay={renderOverlay}>
         <View style={{ flex: 1, backgroundColor: C.bg }}>
@@ -473,7 +498,10 @@ export default function TabNavigator() {
                 <Pressable
                   key={tab.id}
                   style={sh.tabItem}
-                  onPress={() => switchTab(tab.id)}
+                  onPress={() => {
+                    if (tab.id === activeTab) emitTabReselect(tab.id);
+                    else switchTab(tab.id);
+                  }}
                 >
                   <View>
                     <Ionicons
@@ -499,6 +527,7 @@ export default function TabNavigator() {
         </View>
       </NavigationProvider>
     </CartContext.Provider>
+    </WalletProvider>
     </BadgeContext.Provider>
     </FeedPrefsProvider>
     </UserContext.Provider>

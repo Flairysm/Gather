@@ -9,8 +9,4 @@ config.watchFolders = [__dirname];
 config.resolver.nodeModulesPaths = [path.resolve(__dirname, "node_modules")];
 config.resolver.disableHierarchicalLookup = true;
 
-config.resolver.extraNodeModules = {
-  "react-native-agora": path.resolve(__dirname, "agoraStub.js"),
-};
-
 module.exports = config;

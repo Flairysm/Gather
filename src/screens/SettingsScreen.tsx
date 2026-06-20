@@ -20,6 +20,8 @@ import { useAppNavigation } from "../navigation/NavigationContext";
 import { fetchVendorStatus, useUser } from "../data/user";
 import { supabase } from "../lib/supabase";
 import { useBadgeContext } from "../hooks/useBadgeCounts";
+import { formatRM, useWallet } from "../data/wallet";
+import { WALLET_TOPUP_ENABLED } from "../lib/featureFlags";
 
 const ORDER_SHORTCUTS = [
   { label: "To Pay", filter: "pending", icon: "card-outline", color: "#F59E0B", bg: "rgba(245,158,11,0.10)" },
@@ -49,6 +51,7 @@ export default function SettingsScreen() {
   const { push } = useAppNavigation();
   const { isVerifiedVendor, vendorStatus, setVendorStatus } = useUser();
   const { counts, refresh: refreshBadges } = useBadgeContext();
+  const { balance: walletBalance, loading: walletLoading, refresh: refreshWallet } = useWallet();
   const [refreshing, setRefreshing] = useState(false);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [email, setEmail] = useState<string | null>(null);
@@ -57,10 +60,12 @@ export default function SettingsScreen() {
   const [addressCount, setAddressCount] = useState(0);
   const [bookmarksCount, setBookmarksCount] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [notificationsEnabled, setNotificationsEnabled] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
 
   const loadProfile = useCallback(async () => {
     try {
+      setLoadError(false);
       const {
         data: { user },
       } = await supabase.auth.getUser();
@@ -77,6 +82,7 @@ export default function SettingsScreen() {
 
       if (profileError) {
         console.warn("SettingsScreen loadProfile failed:", profileError.message);
+        setLoadError(true);
       } else if (data) {
         setProfile(data as Profile);
       }
@@ -112,6 +118,7 @@ export default function SettingsScreen() {
       setBookmarksCount(savedResult.count ?? 0);
     } catch (e) {
       console.warn("SettingsScreen loadProfile unexpected error:", e);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -126,6 +133,7 @@ export default function SettingsScreen() {
     await Promise.all([
       loadProfile(),
       refreshBadges().catch(() => {}),
+      refreshWallet().catch(() => {}),
       fetchVendorStatus()
         .then(setVendorStatus)
         .catch(() => {}),
@@ -141,7 +149,13 @@ export default function SettingsScreen() {
         text: "Log Out",
         style: "destructive",
         onPress: async () => {
-          await supabase.auth.signOut();
+          setLoggingOut(true);
+          try {
+            await supabase.auth.signOut();
+          } catch {
+            setLoggingOut(false);
+            Alert.alert("Error", "Failed to log out. Please try again.");
+          }
         },
       },
     ]);
@@ -149,17 +163,21 @@ export default function SettingsScreen() {
 
   function handleDeleteAccount() {
     Alert.alert(
-      "Delete Account",
-      "This action is permanent and cannot be undone. All your data will be lost.",
+      "Request Account Deletion",
+      "Account deletion is permanent and cannot be undone. All your data will be lost. To proceed, send us a deletion request and our team will action it.",
       [
         { text: "Cancel", style: "cancel" },
         {
-          text: "Delete",
+          text: "Email Support",
           style: "destructive",
           onPress: () =>
-            Alert.alert(
-              "Contact Support",
-              "Please email support@evend.gg to delete your account.",
+            Linking.openURL(
+              "mailto:support@evend.gg?subject=Account%20deletion%20request",
+            ).catch(() =>
+              Alert.alert(
+                "Contact Support",
+                "Please email support@evend.gg to request account deletion.",
+              ),
             ),
         },
       ],
@@ -201,6 +219,22 @@ export default function SettingsScreen() {
           />
         }
       >
+        {loadError && (
+          <Pressable
+            style={st.errorBanner}
+            onPress={() => {
+              setLoading(true);
+              loadProfile();
+            }}
+          >
+            <Ionicons name="alert-circle-outline" size={18} color={C.danger} />
+            <Text style={st.errorBannerText}>
+              Couldn't load your latest profile. Tap to retry.
+            </Text>
+            <Feather name="refresh-cw" size={15} color={C.danger} />
+          </Pressable>
+        )}
+
         {/* ── Profile Card ── */}
         <View style={st.profileCard}>
           <View style={st.avatarWrap}>
@@ -250,6 +284,25 @@ export default function SettingsScreen() {
             </View>
           </View>
         </View>
+
+        {/* ── Wallet Card (hidden until the wallet is re-enabled) ── */}
+        {WALLET_TOPUP_ENABLED && (
+          <Pressable style={st.walletCard} onPress={() => push({ type: "WALLET" })}>
+            <View style={st.walletIconWrap}>
+              <Ionicons name="wallet" size={22} color={C.accent} />
+            </View>
+            <View style={st.walletInfo}>
+              <Text style={st.walletLabel}>Evend Wallet</Text>
+              <Text style={st.walletBalance}>
+                {walletLoading ? "—" : formatRM(walletBalance)}
+              </Text>
+            </View>
+            <View style={st.walletTopUp}>
+              <Feather name="plus" size={13} color={C.accent} />
+              <Text style={st.walletTopUpText}>Top Up</Text>
+            </View>
+          </Pressable>
+        )}
 
         {/* ── Vendor Card ── */}
         {isVerifiedVendor ? (
@@ -365,6 +418,12 @@ export default function SettingsScreen() {
           />
           <View style={st.divider} />
           <SettingsRow
+            icon="ticket-outline"
+            label="My Vouchers"
+            onPress={() => push({ type: "VOUCHERS" })}
+          />
+          <View style={st.divider} />
+          <SettingsRow
             icon="chatbubbles-outline"
             label="Messages"
             value={counts.unreadChats > 0 ? `${counts.unreadChats} unread` : undefined}
@@ -406,13 +465,20 @@ export default function SettingsScreen() {
             icon="mail-outline"
             label="Email"
             value={email ?? "Not set"}
+            readOnly
           />
           <View style={st.divider} />
           <SettingsRow
             icon="lock-closed-outline"
             label="Change Password"
             onPress={() => {
-              if (!email) return;
+              if (!email) {
+                Alert.alert(
+                  "Add an Email First",
+                  "Your account has no email address, so we can't send a password reset link. Add an email to your account to enable this.",
+                );
+                return;
+              }
               Alert.alert(
                 "Reset Password",
                 `We'll send a password reset link to ${email}.`,
@@ -448,10 +514,30 @@ export default function SettingsScreen() {
             value={addressCount > 0 ? `${addressCount} saved` : "No addresses"}
             onPress={() => push({ type: "ADDRESS_BOOK" })}
           />
+          {WALLET_TOPUP_ENABLED && (
+            <>
+              <View style={st.divider} />
+              <SettingsRow
+                icon="wallet-outline"
+                label="Wallet & Payments"
+                value={walletLoading ? undefined : formatRM(walletBalance)}
+                onPress={() => push({ type: "WALLET" })}
+              />
+            </>
+          )}
           <View style={st.divider} />
-          <SettingsRow icon="card-outline" label="Payment Methods" />
-          <View style={st.divider} />
-          <SettingsRow icon="cash-outline" label="Currency" value="MYR" />
+          <SettingsRow
+            icon="cash-outline"
+            label="Currency"
+            value="MYR (RM)"
+            infoAction
+            onPress={() =>
+              Alert.alert(
+                "Currency",
+                "Evend operates in Malaysian Ringgit (MYR). All prices, payments, and payouts are in RM. Support for more currencies may come as Evend expands.",
+              )
+            }
+          />
         </View>
 
         {profile?.transaction_banned && (
@@ -480,12 +566,17 @@ export default function SettingsScreen() {
             <View style={st.rowIcon}>
               <Ionicons name="notifications-outline" size={18} color={C.textIcon} />
             </View>
-            <Text style={st.rowLabel}>Push Notifications</Text>
+            <View style={{ flex: 1, gap: 2 }}>
+              <Text style={st.rowLabel}>Push Alerts</Text>
+              <Text style={st.rowSubtitle}>
+                Order &amp; message push notifications · coming soon
+              </Text>
+            </View>
             <Switch
-              value={notificationsEnabled}
-              onValueChange={setNotificationsEnabled}
+              value={false}
+              disabled
               trackColor={{ false: C.muted, true: C.accentSoft }}
-              thumbColor={notificationsEnabled ? C.accent : C.textMuted}
+              thumbColor={C.textMuted}
               ios_backgroundColor={C.muted}
             />
           </View>
@@ -503,13 +594,7 @@ export default function SettingsScreen() {
           <SettingsRow
             icon="help-circle-outline"
             label="Help Centre"
-            onPress={() => Linking.openURL("https://evend.gg/help")}
-          />
-          <View style={st.divider} />
-          <SettingsRow
-            icon="chatbubble-outline"
-            label="Send Feedback"
-            onPress={() => Linking.openURL("mailto:support@evend.gg?subject=App Feedback")}
+            onPress={() => push({ type: "HELP_CENTRE" })}
           />
           <View style={st.divider} />
           <SettingsRow
@@ -532,12 +617,13 @@ export default function SettingsScreen() {
             icon="log-out-outline"
             label="Log Out"
             danger
+            loading={loggingOut}
             onPress={handleLogout}
           />
           <View style={st.divider} />
           <SettingsRow
             icon="trash-outline"
-            label="Delete Account"
+            label="Request Account Deletion"
             danger
             onPress={handleDeleteAccount}
           />
@@ -556,16 +642,26 @@ function SettingsRow({
   label,
   value,
   danger,
+  readOnly,
+  loading,
+  infoAction,
   onPress,
 }: {
   icon: React.ComponentProps<typeof Ionicons>["name"];
   label: string;
   value?: string;
   danger?: boolean;
+  readOnly?: boolean;
+  loading?: boolean;
+  infoAction?: boolean;
   onPress?: () => void;
 }) {
   return (
-    <Pressable style={st.row} onPress={onPress}>
+    <Pressable
+      style={st.row}
+      onPress={readOnly || loading ? undefined : onPress}
+      disabled={readOnly || loading || !onPress}
+    >
       <View style={[st.rowIcon, danger && st.rowIconDanger]}>
         <Ionicons
           name={icon}
@@ -580,9 +676,13 @@ function SettingsRow({
             {value}
           </Text>
         )}
-        {!danger && (
+        {loading ? (
+          <ActivityIndicator size="small" color={danger ? C.danger : C.accent} />
+        ) : infoAction ? (
+          <Feather name="info" size={16} color={C.textMuted} />
+        ) : !danger && !readOnly ? (
           <Feather name="chevron-right" size={16} color={C.textMuted} />
-        )}
+        ) : null}
       </View>
     </Pressable>
   );
@@ -728,6 +828,44 @@ const st = StyleSheet.create({
     letterSpacing: 0.3,
   },
 
+  // Wallet Card
+  walletCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: C.surface,
+    borderRadius: S.radiusCard,
+    borderWidth: 1,
+    borderColor: C.border,
+    padding: S.lg,
+    gap: S.md,
+    marginBottom: S.md,
+  },
+  walletIconWrap: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: C.accentGlow,
+    borderWidth: 1,
+    borderColor: C.borderStream,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  walletInfo: { flex: 1, gap: 1 },
+  walletLabel: { color: C.textSecondary, fontSize: 11, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.5 },
+  walletBalance: { color: C.textPrimary, fontSize: 20, fontWeight: "900" },
+  walletTopUp: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: C.accentGlow,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: C.borderStream,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  walletTopUpText: { color: C.accent, fontSize: 12, fontWeight: "800" },
+
   // Vendor Card
   vendorCard: {
     flexDirection: "row",
@@ -833,6 +971,29 @@ const st = StyleSheet.create({
   },
   rowLabelDanger: {
     color: C.danger,
+  },
+  rowSubtitle: {
+    color: C.textMuted,
+    fontSize: 11,
+    fontWeight: "500",
+  },
+  errorBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: S.sm,
+    backgroundColor: "rgba(239,68,68,0.1)",
+    borderRadius: S.radiusCard,
+    borderWidth: 1,
+    borderColor: "rgba(239,68,68,0.25)",
+    paddingHorizontal: S.lg,
+    paddingVertical: 12,
+    marginBottom: S.md,
+  },
+  errorBannerText: {
+    flex: 1,
+    color: C.danger,
+    fontSize: 12,
+    fontWeight: "700",
   },
   rowRight: {
     flexDirection: "row",

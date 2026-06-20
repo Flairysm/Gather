@@ -3,30 +3,40 @@ import {
   ActivityIndicator,
   Image,
   Alert,
+  KeyboardAvoidingView,
+  Platform,
   Pressable,
   SafeAreaView,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import { Feather } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
 import { C, S } from "../theme";
 import { supabase } from "../lib/supabase";
+import ScreenHeader from "../components/ScreenHeader";
+import { useToast } from "../components/Toast";
 
 type Props = { onBack: () => void };
 
 export default function EditProfileScreen({ onBack }: Props) {
+  const insets = useSafeAreaInsets();
+  const { toast, showToast } = useToast();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [userId, setUserId] = useState<string | null>(null);
   const [displayName, setDisplayName] = useState("");
   const [username, setUsername] = useState("");
+  const [bio, setBio] = useState("");
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
   const [pickedAvatarUri, setPickedAvatarUri] = useState<string | null>(null);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
+  const [initial, setInitial] = useState({ displayName: "", username: "", bio: "" });
 
   const [noAuth, setNoAuth] = useState(false);
 
@@ -40,14 +50,20 @@ export default function EditProfileScreen({ onBack }: Props) {
 
       const { data } = await supabase
         .from("profiles")
-        .select("display_name, username, avatar_url")
+        .select("display_name, username, bio, avatar_url")
         .eq("id", user.id)
         .maybeSingle();
 
       if (data) {
         setDisplayName(data.display_name ?? "");
         setUsername(data.username ?? "");
+        setBio(data.bio ?? "");
         setAvatarUrl(data.avatar_url ?? null);
+        setInitial({
+          displayName: data.display_name ?? "",
+          username: data.username ?? "",
+          bio: data.bio ?? "",
+        });
       }
     } finally {
       setLoading(false);
@@ -57,6 +73,27 @@ export default function EditProfileScreen({ onBack }: Props) {
   useEffect(() => {
     load();
   }, [load]);
+
+  const hasUnsavedChanges =
+    displayName !== initial.displayName ||
+    username !== initial.username ||
+    bio !== initial.bio ||
+    pickedAvatarUri !== null;
+
+  function handleBack() {
+    if (!hasUnsavedChanges) {
+      onBack();
+      return;
+    }
+    Alert.alert(
+      "Discard changes?",
+      "You have unsaved changes. Are you sure you want to go back?",
+      [
+        { text: "Keep Editing", style: "cancel" },
+        { text: "Discard", style: "destructive", onPress: onBack },
+      ],
+    );
+  }
 
   async function save() {
     if (!userId || saving) return;
@@ -131,6 +168,7 @@ export default function EditProfileScreen({ onBack }: Props) {
         .update({
           display_name: nextDisplayName,
           username: nextUsername,
+          bio: bio.trim() || null,
           avatar_url: nextAvatarUrl,
           updated_at: new Date().toISOString(),
         })
@@ -138,9 +176,10 @@ export default function EditProfileScreen({ onBack }: Props) {
 
       if (error) throw error;
 
-      Alert.alert("Saved", "Your profile has been updated.", [
-        { text: "OK", onPress: onBack },
-      ]);
+      setInitial({ displayName: nextDisplayName, username: nextUsername, bio: bio.trim() });
+      setPickedAvatarUri(null);
+      showToast("Profile updated");
+      setTimeout(onBack, 700);
     } catch (e: any) {
       Alert.alert("Update failed", e?.message ?? "Please try again.");
     } finally {
@@ -186,13 +225,7 @@ export default function EditProfileScreen({ onBack }: Props) {
     return (
       <SafeAreaView style={st.safe}>
         <StatusBar style="light" />
-        <View style={st.header}>
-          <Pressable style={st.backBtn} onPress={onBack}>
-            <Feather name="arrow-left" size={20} color={C.textPrimary} />
-          </Pressable>
-          <Text style={st.headerTitle}>Edit Profile</Text>
-          <View style={{ width: 36 }} />
-        </View>
+        <ScreenHeader title="Edit Profile" onBack={handleBack} />
         <View style={st.loadingWrap}>
           <Text style={{ color: C.textMuted, fontSize: 14 }}>Please sign in to edit your profile.</Text>
         </View>
@@ -204,14 +237,18 @@ export default function EditProfileScreen({ onBack }: Props) {
     <SafeAreaView style={st.safe}>
       <StatusBar style="light" />
 
-      <View style={st.header}>
-        <Pressable style={st.backBtn} onPress={onBack}>
-          <Feather name="arrow-left" size={20} color={C.textPrimary} />
-        </Pressable>
-        <Text style={st.headerTitle}>Edit Profile</Text>
-        <View style={{ width: 36 }} />
-      </View>
+      <ScreenHeader title="Edit Profile" onBack={handleBack} />
 
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        keyboardVerticalOffset={Platform.OS === "ios" ? 8 : 0}
+      >
+        <ScrollView
+          contentContainerStyle={{ paddingBottom: 16 }}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
       <View style={st.avatarCard}>
         <View style={st.avatarRow}>
           <View style={st.avatarPreviewWrap}>
@@ -271,7 +308,7 @@ export default function EditProfileScreen({ onBack }: Props) {
         <TextInput
           style={st.input}
           value={username}
-          onChangeText={(v) => setUsername(v.replace(/\s+/g, ""))}
+          onChangeText={(v) => setUsername(v.replace(/\s+/g, "").toLowerCase())}
           placeholder="username"
           placeholderTextColor={C.textMuted}
           autoCapitalize="none"
@@ -281,17 +318,33 @@ export default function EditProfileScreen({ onBack }: Props) {
         <Text style={st.hint}>
           3-20 chars, lowercase letters, numbers, underscore.
         </Text>
-      </View>
 
-      <View style={st.footer}>
-        <Pressable style={st.saveBtn} onPress={save} disabled={saving}>
-          {saving ? (
-            <ActivityIndicator color={C.textHero} size="small" />
-          ) : (
-            <Text style={st.saveBtnText}>Save Changes</Text>
-          )}
-        </Pressable>
+        <Text style={st.label}>Bio</Text>
+        <TextInput
+          style={[st.input, st.bioInput]}
+          value={bio}
+          onChangeText={setBio}
+          placeholder="Tell collectors about yourself…"
+          placeholderTextColor={C.textMuted}
+          multiline
+          maxLength={160}
+          textAlignVertical="top"
+        />
+        <Text style={st.hint}>{bio.length}/160</Text>
       </View>
+        </ScrollView>
+
+        <View style={[st.footer, { paddingBottom: Math.max(insets.bottom, 14) }]}>
+          <Pressable style={st.saveBtn} onPress={save} disabled={saving}>
+            {saving ? (
+              <ActivityIndicator color={C.textHero} size="small" />
+            ) : (
+              <Text style={st.saveBtnText}>Save Changes</Text>
+            )}
+          </Pressable>
+        </View>
+      </KeyboardAvoidingView>
+      {toast}
     </SafeAreaView>
   );
 }
@@ -299,32 +352,6 @@ export default function EditProfileScreen({ onBack }: Props) {
 const st = StyleSheet.create({
   safe: { flex: 1, backgroundColor: C.bg },
   loadingWrap: { flex: 1, alignItems: "center", justifyContent: "center" },
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: S.screenPadding,
-    paddingVertical: S.md,
-    gap: S.md,
-    borderBottomWidth: 1,
-    borderBottomColor: C.border,
-  },
-  backBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: C.elevated,
-    borderWidth: 1,
-    borderColor: C.border,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  headerTitle: {
-    flex: 1,
-    color: C.textPrimary,
-    fontSize: 16,
-    fontWeight: "800",
-    textAlign: "center",
-  },
   avatarCard: {
     marginHorizontal: S.screenPadding,
     marginTop: S.md,
@@ -390,6 +417,11 @@ const st = StyleSheet.create({
     fontSize: 14,
     fontWeight: "500",
   },
+  bioInput: {
+    minHeight: 88,
+    paddingTop: 10,
+    lineHeight: 20,
+  },
   hint: {
     color: C.textMuted,
     fontSize: 11,
@@ -397,9 +429,11 @@ const st = StyleSheet.create({
     marginTop: 2,
   },
   footer: {
-    marginTop: "auto",
     paddingHorizontal: S.screenPadding,
-    paddingBottom: 20,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: C.border,
+    backgroundColor: C.bg,
   },
   saveBtn: {
     backgroundColor: C.accent,

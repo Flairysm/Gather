@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  ActivityIndicator,
+  Alert,
   Image,
   Pressable,
+  RefreshControl,
   SafeAreaView,
-  ScrollView,
+  SectionList,
   StyleSheet,
   Text,
   View,
@@ -19,6 +20,9 @@ import { useAppNavigation } from "../navigation/NavigationContext";
 import type { Listing, WantedPost } from "../data/market";
 import { formatListingPrice } from "../data/market";
 import ErrorState from "../components/ErrorState";
+import EmptyState from "../components/EmptyState";
+import ScreenHeader from "../components/ScreenHeader";
+import Shimmer, { ShimmerGroup } from "../components/Shimmer";
 
 type SavedItem = {
   id: string;
@@ -47,7 +51,9 @@ type Props = { onBack: () => void };
 export default function MyBookmarksScreen({ onBack }: Props) {
   const { push } = useAppNavigation();
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState(false);
+  const [signedIn, setSignedIn] = useState<boolean | null>(null);
   const [rows, setRows] = useState<BookmarkRow[]>([]);
 
   const load = useCallback(async () => {
@@ -57,6 +63,7 @@ export default function MyBookmarksScreen({ onBack }: Props) {
     const {
       data: { user },
     } = await supabase.auth.getUser();
+    setSignedIn(!!user);
     if (!user) {
       setRows([]);
       setLoading(false);
@@ -154,6 +161,25 @@ export default function MyBookmarksScreen({ onBack }: Props) {
 
   useReconnect(load);
 
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await load().catch(() => { setLoadError(true); });
+    setRefreshing(false);
+  }, [load]);
+
+  async function handleUnsave(itemType: "listing" | "wanted" | "auction", itemId: string) {
+    const { error } = await supabase.rpc("toggle_save_item", {
+      p_item_type: itemType,
+      p_item_id: itemId,
+    });
+    if (error) {
+      console.warn("MyBookmarks unsave failed:", error.message);
+      Alert.alert("Error", "Failed to remove bookmark. Please try again.");
+      return;
+    }
+    setRows((prev) => prev.filter((r) => !(r.item_type === itemType && r.id === itemId)));
+  }
+
   const bookmarkedListings = useMemo(
     () => rows.filter((r) => r.item_type === "listing") as any as Listing[],
     [rows],
@@ -168,9 +194,9 @@ export default function MyBookmarksScreen({ onBack }: Props) {
   );
 
   function auctionThumb(a: AuctionBookmark): string | null {
-    const raw = a.images;
+    const raw: unknown = a.images;
     if (!raw) return null;
-    if (Array.isArray(raw) && raw[0]) return raw[0];
+    if (Array.isArray(raw) && raw[0]) return raw[0] as string;
     if (typeof raw === "string") {
       try {
         const p = JSON.parse(raw);
@@ -187,20 +213,179 @@ export default function MyBookmarksScreen({ onBack }: Props) {
     return formatListingPrice(n);
   }
 
+  type BookmarkSectionItem =
+    | { kind: "listing"; data: Listing }
+    | { kind: "auction"; data: AuctionBookmark }
+    | { kind: "wanted"; data: WantedPost };
+
+  const sections = useMemo(() => {
+    const out: { title: string; data: BookmarkSectionItem[] }[] = [];
+    if (bookmarkedListings.length > 0)
+      out.push({
+        title: "Bookmarked Listings",
+        data: bookmarkedListings.map((data) => ({ kind: "listing", data })),
+      });
+    if (bookmarkedAuctions.length > 0)
+      out.push({
+        title: "Bookmarked Auctions",
+        data: bookmarkedAuctions.map((data) => ({ kind: "auction", data })),
+      });
+    if (bookmarkedWanted.length > 0)
+      out.push({
+        title: "Bookmarked Wanted",
+        data: bookmarkedWanted.map((data) => ({ kind: "wanted", data })),
+      });
+    return out;
+  }, [bookmarkedListings, bookmarkedAuctions, bookmarkedWanted]);
+
+  function renderBookmark(entry: BookmarkSectionItem) {
+    if (entry.kind === "listing") {
+      const l = entry.data;
+      const img = Array.isArray((l as any).images) ? (l as any).images[0] : null;
+      const removed = (l as any).status === "removed";
+      return (
+        <Pressable
+          style={[st.row, removed && st.rowRemoved]}
+          onPress={() => !removed && push({ type: "LISTING_DETAIL", listingId: l.id })}
+          disabled={removed}
+        >
+          <View style={st.thumb}>
+            {img ? (
+              <Image source={{ uri: img }} style={st.thumbImg} />
+            ) : (
+              <View style={st.thumbPlaceholder}>
+                <Ionicons name={removed ? "trash-outline" : "image-outline"} size={18} color={C.textMuted} />
+              </View>
+            )}
+          </View>
+          <View style={st.rowInfo}>
+            <Text style={[st.rowTitle, removed && st.rowTitleRemoved]} numberOfLines={1}>
+              {l.card_name}
+            </Text>
+            <Text style={st.rowSub} numberOfLines={1}>
+              {removed ? "This item is no longer available" : (l.edition ?? l.category)}
+            </Text>
+            {!removed && <Text style={st.rowPrice}>{formatListingPrice(l.price)}</Text>}
+          </View>
+          {removed ? (
+            <Pressable
+              style={st.unsaveBtn}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              onPress={() => handleUnsave("listing", l.id)}
+            >
+              <Feather name="x" size={16} color={C.danger} />
+            </Pressable>
+          ) : (
+            <Feather name="chevron-right" size={16} color={C.textMuted} />
+          )}
+        </Pressable>
+      );
+    }
+
+    if (entry.kind === "auction") {
+      const a = entry.data;
+      const img = auctionThumb(a);
+      const removed = a.status === "removed";
+      return (
+        <Pressable
+          style={[st.row, removed && st.rowRemoved]}
+          onPress={() => !removed && push({ type: "AUCTION_DETAIL", auctionId: a.id })}
+          disabled={removed}
+        >
+          <View style={st.thumb}>
+            {img ? (
+              <Image source={{ uri: img }} style={st.thumbImg} />
+            ) : (
+              <View style={st.thumbPlaceholder}>
+                <Ionicons name={removed ? "trash-outline" : "hammer-outline"} size={18} color={C.textMuted} />
+              </View>
+            )}
+          </View>
+          <View style={st.rowInfo}>
+            <Text style={[st.rowTitle, removed && st.rowTitleRemoved]} numberOfLines={1}>
+              {a.card_name}
+            </Text>
+            <Text style={st.rowSub} numberOfLines={1}>
+              {removed ? "This auction is no longer available" : (a.edition ?? (a.status === "active" ? "Live auction" : a.status))}
+            </Text>
+            {!removed && <Text style={st.rowPrice}>{auctionPriceLabel(a)}</Text>}
+          </View>
+          {removed ? (
+            <Pressable
+              style={st.unsaveBtn}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              onPress={() => handleUnsave("auction", a.id)}
+            >
+              <Feather name="x" size={16} color={C.danger} />
+            </Pressable>
+          ) : (
+            <Feather name="chevron-right" size={16} color={C.textMuted} />
+          )}
+        </Pressable>
+      );
+    }
+
+    const w = entry.data;
+    const removed = (w as any).status === "removed";
+    return (
+      <Pressable
+        style={[st.row, removed && st.rowRemoved]}
+        onPress={() => !removed && push({ type: "WANTED_DETAIL", wantedId: w.id })}
+        disabled={removed}
+      >
+        <View style={st.thumb}>
+          {w.image_url ? (
+            <Image source={{ uri: w.image_url }} style={st.thumbImg} />
+          ) : (
+            <View style={st.thumbPlaceholder}>
+              <Ionicons name={removed ? "trash-outline" : "image-outline"} size={18} color={C.textMuted} />
+            </View>
+          )}
+        </View>
+        <View style={st.rowInfo}>
+          <Text style={[st.rowTitle, removed && st.rowTitleRemoved]} numberOfLines={1}>
+            {w.card_name}
+          </Text>
+          <Text style={st.rowSub} numberOfLines={1}>
+            {removed ? "This post is no longer available" : (w.edition ?? w.category)}
+          </Text>
+          {!removed && <Text style={st.rowPrice}>{formatListingPrice(w.offer_price)}</Text>}
+        </View>
+        {removed ? (
+          <Pressable
+            style={st.unsaveBtn}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            onPress={() => handleUnsave("wanted", w.id)}
+          >
+            <Feather name="x" size={16} color={C.danger} />
+          </Pressable>
+        ) : (
+          <Feather name="chevron-right" size={16} color={C.textMuted} />
+        )}
+      </Pressable>
+    );
+  }
+
   if (loading) {
     return (
       <SafeAreaView style={st.safe}>
         <StatusBar style="light" />
-        <View style={st.header}>
-          <Pressable style={st.backBtn} onPress={onBack}>
-            <Feather name="arrow-left" size={20} color={C.textPrimary} />
-          </Pressable>
-          <Text style={st.headerTitle}>My Bookmarks</Text>
-          <View style={{ width: 36 }} />
-        </View>
-        <View style={st.centerLoading}>
-          <ActivityIndicator size="large" color={C.accent} />
-        </View>
+        <ScreenHeader title="My Bookmarks" onBack={onBack} />
+        <ShimmerGroup>
+          <View style={st.scroll}>
+            <Shimmer width="45%" height={12} borderRadius={6} style={{ marginBottom: S.md, marginLeft: 2 }} />
+            {[0, 1, 2, 3, 4].map((i) => (
+              <View key={i} style={st.row}>
+                <Shimmer width={52} height={52} borderRadius={14} />
+                <View style={{ flex: 1, gap: 8 }}>
+                  <Shimmer width="70%" height={14} borderRadius={6} />
+                  <Shimmer width="45%" height={11} borderRadius={5} />
+                  <Shimmer width="30%" height={13} borderRadius={6} />
+                </View>
+              </View>
+            ))}
+          </View>
+        </ShimmerGroup>
       </SafeAreaView>
     );
   }
@@ -210,142 +395,43 @@ export default function MyBookmarksScreen({ onBack }: Props) {
   return (
     <SafeAreaView style={st.safe}>
       <StatusBar style="light" />
-
-      <View style={st.header}>
-        <Pressable style={st.backBtn} onPress={onBack}>
-          <Feather name="arrow-left" size={20} color={C.textPrimary} />
-        </Pressable>
-        <Text style={st.headerTitle}>My Bookmarks</Text>
-        <View style={{ width: 36 }} />
-      </View>
+      <ScreenHeader title="My Bookmarks" onBack={onBack} />
 
       {loadError ? (
         <ErrorState message="Could not load bookmarks." onRetry={load} />
+      ) : signedIn === false ? (
+        <EmptyState
+          icon="log-in-outline"
+          title="Sign in to see bookmarks"
+          message="Sign in to save listings, auctions, and wanted posts and view them here."
+          actionLabel="Go Back"
+          onAction={onBack}
+        />
       ) : isEmpty ? (
-        <ScrollView contentContainerStyle={st.emptyWrap}>
-          <View style={st.emptyCard}>
-            <Ionicons name="bookmark-outline" size={34} color={C.textSecondary} />
-            <Text style={st.emptyTitle}>No bookmarks yet</Text>
-            <Text style={st.emptySub}>
-              Tap the bookmark icon on listings, auctions, or wanted posts to save them here.
-            </Text>
-          </View>
-        </ScrollView>
+        <EmptyState
+          icon="bookmark-outline"
+          title="No bookmarks yet"
+          message="Tap the bookmark icon on listings, auctions, or wanted posts to save them here."
+        />
       ) : (
-        <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={st.scroll}>
-          {bookmarkedListings.length > 0 && (
-            <View style={st.section}>
-              <Text style={st.sectionTitle}>Bookmarked Listings</Text>
-              {bookmarkedListings.map((l) => {
-                const img = Array.isArray((l as any).images) ? (l as any).images[0] : null;
-                const removed = (l as any).status === "removed";
-                return (
-                  <Pressable
-                    key={l.id}
-                    style={[st.row, removed && st.rowRemoved]}
-                    onPress={() => !removed && push({ type: "LISTING_DETAIL", listingId: l.id })}
-                    disabled={removed}
-                  >
-                    <View style={st.thumb}>
-                      {img ? (
-                        <Image source={{ uri: img }} style={st.thumbImg} />
-                      ) : (
-                        <View style={st.thumbPlaceholder}>
-                          <Ionicons name={removed ? "trash-outline" : "image-outline"} size={18} color={C.textMuted} />
-                        </View>
-                      )}
-                    </View>
-                    <View style={st.rowInfo}>
-                      <Text style={[st.rowTitle, removed && st.rowTitleRemoved]} numberOfLines={1}>
-                        {l.card_name}
-                      </Text>
-                      <Text style={st.rowSub} numberOfLines={1}>
-                        {removed ? "This item is no longer available" : (l.edition ?? l.category)}
-                      </Text>
-                      {!removed && <Text style={st.rowPrice}>{formatListingPrice(l.price)}</Text>}
-                    </View>
-                    {!removed && <Feather name="chevron-right" size={16} color={C.textMuted} />}
-                  </Pressable>
-                );
-              })}
-            </View>
+        <SectionList
+          sections={sections}
+          keyExtractor={(item, index) => `${item.kind}-${item.data.id}-${index}`}
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={st.scroll}
+          stickySectionHeadersEnabled={false}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor={C.accent}
+            />
+          }
+          renderSectionHeader={({ section }) => (
+            <Text style={st.sectionTitle}>{section.title}</Text>
           )}
-
-          {bookmarkedAuctions.length > 0 && (
-            <View style={st.section}>
-              <Text style={st.sectionTitle}>Bookmarked Auctions</Text>
-              {bookmarkedAuctions.map((a) => {
-                const img = auctionThumb(a);
-                const removed = a.status === "removed";
-                return (
-                  <Pressable
-                    key={a.id}
-                    style={[st.row, removed && st.rowRemoved]}
-                    onPress={() => !removed && push({ type: "AUCTION_DETAIL", auctionId: a.id })}
-                    disabled={removed}
-                  >
-                    <View style={st.thumb}>
-                      {img ? (
-                        <Image source={{ uri: img }} style={st.thumbImg} />
-                      ) : (
-                        <View style={st.thumbPlaceholder}>
-                          <Ionicons name={removed ? "trash-outline" : "hammer-outline"} size={18} color={C.textMuted} />
-                        </View>
-                      )}
-                    </View>
-                    <View style={st.rowInfo}>
-                      <Text style={[st.rowTitle, removed && st.rowTitleRemoved]} numberOfLines={1}>
-                        {a.card_name}
-                      </Text>
-                      <Text style={st.rowSub} numberOfLines={1}>
-                        {removed ? "This auction is no longer available" : (a.edition ?? (a.status === "active" ? "Live auction" : a.status))}
-                      </Text>
-                      {!removed && <Text style={st.rowPrice}>{auctionPriceLabel(a)}</Text>}
-                    </View>
-                    {!removed && <Feather name="chevron-right" size={16} color={C.textMuted} />}
-                  </Pressable>
-                );
-              })}
-            </View>
-          )}
-
-          {bookmarkedWanted.length > 0 && (
-            <View style={st.section}>
-              <Text style={st.sectionTitle}>Bookmarked Wanted</Text>
-              {bookmarkedWanted.map((w) => {
-                const removed = (w as any).status === "removed";
-                return (
-                  <Pressable
-                    key={w.id}
-                    style={[st.row, removed && st.rowRemoved]}
-                    onPress={() => !removed && push({ type: "WANTED_DETAIL", wantedId: w.id })}
-                    disabled={removed}
-                  >
-                    <View style={st.thumb}>
-                      {w.image_url ? (
-                        <Image source={{ uri: w.image_url }} style={st.thumbImg} />
-                      ) : (
-                        <View style={st.thumbPlaceholder}>
-                          <Ionicons name={removed ? "trash-outline" : "image-outline"} size={18} color={C.textMuted} />
-                        </View>
-                      )}
-                    </View>
-                    <View style={st.rowInfo}>
-                      <Text style={[st.rowTitle, removed && st.rowTitleRemoved]} numberOfLines={1}>
-                        {w.card_name}
-                      </Text>
-                      <Text style={st.rowSub} numberOfLines={1}>
-                        {removed ? "This post is no longer available" : (w.edition ?? w.category)}
-                      </Text>
-                      {!removed && <Text style={st.rowPrice}>{formatListingPrice(w.offer_price)}</Text>}
-                    </View>
-                    {!removed && <Feather name="chevron-right" size={16} color={C.textMuted} />}
-                  </Pressable>
-                );
-              })}
-            </View>
-          )}
-        </ScrollView>
+          renderItem={({ item }) => renderBookmark(item)}
+        />
       )}
     </SafeAreaView>
   );
@@ -353,75 +439,18 @@ export default function MyBookmarksScreen({ onBack }: Props) {
 
 const st = StyleSheet.create({
   safe: { flex: 1, backgroundColor: C.bg },
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: S.screenPadding,
-    paddingVertical: S.md,
-    gap: S.md,
-    borderBottomWidth: 1,
-    borderBottomColor: C.border,
-  },
-  backBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: C.elevated,
-    borderWidth: 1,
-    borderColor: C.border,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  headerTitle: {
-    flex: 1,
-    color: C.textPrimary,
-    fontSize: 16,
-    fontWeight: "800",
-    textAlign: "center",
-  },
   scroll: {
     paddingHorizontal: S.screenPadding,
     paddingTop: S.xl,
     paddingBottom: 120,
   },
-  centerLoading: { flex: 1, alignItems: "center", justifyContent: "center" },
-  emptyWrap: {
-    flexGrow: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: S.screenPadding,
-  },
-  emptyCard: {
-    width: "100%",
-    backgroundColor: C.surface,
-    borderRadius: S.radiusCard,
-    borderWidth: 1,
-    borderColor: C.border,
-    padding: S.lg,
-    gap: 8,
-    alignItems: "center",
-    textAlign: "center",
-  },
-  emptyTitle: {
-    color: C.textPrimary,
-    fontSize: 18,
-    fontWeight: "900",
-    marginTop: 6,
-  },
-  emptySub: {
-    color: C.textSecondary,
-    fontSize: 13,
-    fontWeight: "500",
-    lineHeight: 18,
-    textAlign: "center",
-  },
-  section: { marginBottom: S.xl },
   sectionTitle: {
     color: C.textSecondary,
     fontSize: 12,
     fontWeight: "800",
     textTransform: "uppercase",
     letterSpacing: 0.8,
+    marginTop: S.lg,
     marginBottom: S.md,
     marginLeft: 2,
   },
@@ -453,5 +482,13 @@ const st = StyleSheet.create({
   rowTitleRemoved: { color: C.textMuted, textDecorationLine: "line-through" },
   rowSub: { color: C.textSecondary, fontSize: 12, fontWeight: "600" },
   rowPrice: { color: C.link, fontSize: 13, fontWeight: "900", marginTop: 2 },
+  unsaveBtn: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: C.dangerBg,
+    alignItems: "center",
+    justifyContent: "center",
+  },
 });
 

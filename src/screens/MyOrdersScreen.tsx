@@ -16,11 +16,13 @@ import {
 import { StatusBar } from "expo-status-bar";
 import { Feather, Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
+import * as Clipboard from "expo-clipboard";
 import { C, S } from "../theme";
 import { supabase } from "../lib/supabase";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import TruncationNotice from "../components/TruncationNotice";
 import ErrorState from "../components/ErrorState";
+import Shimmer, { ShimmerGroup } from "../components/Shimmer";
 
 type FulfillmentStatus = "pending" | "confirmed" | "shipped" | "delivered" | "cancelled" | "refunded";
 type FilterId = "all" | FulfillmentStatus | "to_rate";
@@ -53,8 +55,6 @@ type OrderItemRow = {
   winId?: string;
   /** `auction_items.id` — open AUCTION_DETAIL, not LISTING_DETAIL */
   auctionDetailId?: string;
-  /** Paid flash purchase — no marketplace listing to open */
-  flashOrder?: boolean;
   tracking_number?: string | null;
   delivered_at?: string | null;
   received_at?: string | null;
@@ -205,44 +205,42 @@ export default function MyOrdersScreen({
       if (!user) return;
       setUserId(user.id);
 
+      // order_items has no FK to `listings` (so it can't be embedded) and
+      // PostgREST can't filter it by `orders.buyer_id` inline. Resolve the
+      // buyer's order ids first, then fetch their items. Listing details are
+      // hydrated below by listing_id (covers both market + auction sources).
       const SELECT = `
         id, order_id, listing_id, seller_id, quantity, unit_price, fulfillment_status, created_at,
         tracking_number, delivered_at, received_at, dispute_deadline,
-        flash_pin_id, item_name, item_image_url,
-        listing:listings(id, card_name, edition, grade, images),
         seller:profiles!seller_id(username, display_name, avatar_url, rating, review_count)
       `;
 
+      const { data: orders } = await supabase
+        .from("orders")
+        .select("id")
+        .eq("buyer_id", user.id);
+
+      if (!orders || orders.length === 0) {
+        setRawItems([]);
+        return;
+      }
+
+      const orderIds = orders.map((o) => o.id);
       const { data, error } = await supabase
         .from("order_items")
         .select(SELECT)
-        .eq("order_id.buyer_id", user.id)
+        // Hide orders awaiting a card payment that hasn't completed yet.
+        .neq("fulfillment_status", "pending_payment")
+        .in("order_id", orderIds)
         .order("created_at", { ascending: false })
         .limit(500);
 
-      let rows: any[] = data ?? [];
-
       if (error) {
-        const { data: orders } = await supabase
-          .from("orders")
-          .select("id")
-          .eq("buyer_id", user.id);
-
-        if (!orders || orders.length === 0) {
-          setRawItems([]);
-          return;
-        }
-
-        const orderIds = orders.map((o) => o.id);
-        const { data: fallbackData } = await supabase
-          .from("order_items")
-          .select(SELECT)
-          .in("order_id", orderIds)
-          .order("created_at", { ascending: false })
-          .limit(500);
-
-        rows = fallbackData ?? [];
+        setLoadError(true);
+        return;
       }
+
+      const rows: any[] = data ?? [];
 
       // Shopee model: checkout = paid → market orders are at minimum "To Ship".
       // If the DB still has fulfillment_status='pending' it means payment went
@@ -297,11 +295,8 @@ export default function MyOrdersScreen({
       const { data: wins } = await supabase
         .from("auction_wins")
         .select(`
-          id, auction_id, flash_pin_id, seller_id, winning_bid, payment_status, created_at,
+          id, auction_id, seller_id, winning_bid, payment_status, created_at,
           auction:auction_items!auction_id(id, card_name, edition, grade, condition, images),
-          flash_pin:live_stream_pins!flash_pin_id(flash_name, flash_image_url,
-            host:profiles!host_id(username, display_name)
-          ),
           seller:profiles!seller_id(username, display_name, avatar_url, rating, review_count)
         `)
         .eq("winner_id", user.id)
@@ -311,11 +306,7 @@ export default function MyOrdersScreen({
 
       const auctionRows: OrderItemRow[] = (wins ?? []).map((w: any) => {
         const auction = Array.isArray(w.auction) ? w.auction[0] : w.auction;
-        const flashPin = Array.isArray(w.flash_pin) ? w.flash_pin[0] : w.flash_pin;
         const seller = Array.isArray(w.seller) ? w.seller[0] : w.seller;
-        const isFlash = !auction && !!flashPin;
-        const host = flashPin ? (Array.isArray(flashPin.host) ? flashPin.host[0] : flashPin.host) : null;
-        const streamerName = host?.display_name ?? host?.username ?? null;
         return {
           id: `auction-${w.id}`,
           order_id: `auction-${w.id}`,
@@ -333,20 +324,10 @@ export default function MyOrdersScreen({
                 grade: auction.grade ?? auction.condition ?? null,
                 images: normalizeImages(auction.images),
               }
-            : isFlash
-            ? {
-                id: w.flash_pin_id ?? "",
-                card_name: flashPin.flash_name ?? "Flash Auction Item",
-                edition: null,
-                grade: null,
-                images: flashPin.flash_image_url ? [flashPin.flash_image_url] : [],
-              }
             : null,
           seller: seller ?? null,
           source: "auction",
-          sourceLabel: isFlash
-            ? `⚡ Flash Auction${streamerName ? ` · ${streamerName}'s live` : ""}`
-            : "Auction Win",
+          sourceLabel: "Auction Win",
           winId: w.id,
         };
       });
@@ -424,19 +405,6 @@ export default function MyOrdersScreen({
           : m;
         if (row.listing_id && auctionItemIdsHydrated.has(row.listing_id)) {
           row = { ...row, auctionDetailId: row.listing_id };
-        }
-        if (m.flash_pin_id) {
-          row = {
-            ...row,
-            flashOrder: true,
-            listing: row.listing ?? {
-              id: "",
-              card_name: m.item_name ?? "Flash auction item",
-              edition: null,
-              grade: null,
-              images: m.item_image_url ? [m.item_image_url] : [],
-            },
-          };
         }
         return row;
       });
@@ -627,6 +595,30 @@ export default function MyOrdersScreen({
     setDisputeImages((prev) => [...prev, ...uris].slice(0, 5));
   }
 
+  function resetDisputeDraft() {
+    setDisputeModal(null);
+    setDisputeReason("");
+    setDisputeDesc("");
+    setDisputeImages([]);
+  }
+
+  function requestCloseDispute() {
+    const hasDraft =
+      !!disputeReason || disputeDesc.trim().length > 0 || disputeImages.length > 0;
+    if (!hasDraft) {
+      resetDisputeDraft();
+      return;
+    }
+    Alert.alert(
+      "Discard dispute?",
+      "Your reason, details, and photos will be cleared.",
+      [
+        { text: "Keep Editing", style: "cancel" },
+        { text: "Discard", style: "destructive", onPress: resetDisputeDraft },
+      ],
+    );
+  }
+
   async function handleFileDispute() {
     if (!disputeModal || !disputeReason || !userId) return;
     if (disputeImages.length < 3) {
@@ -693,9 +685,22 @@ export default function MyOrdersScreen({
       </View>
 
       {loading ? (
-        <View style={st.loadingWrap}>
-          <ActivityIndicator color={C.accent} size="large" />
-        </View>
+        <ShimmerGroup>
+          <View style={{ paddingHorizontal: S.screenPadding, paddingTop: S.lg, gap: 12 }}>
+            {[0, 1, 2, 3].map((i) => (
+              <View key={i} style={st.skeletonCard}>
+                <View style={{ flexDirection: "row", gap: 12 }}>
+                  <Shimmer width={56} height={56} borderRadius={12} />
+                  <View style={{ flex: 1, gap: 8 }}>
+                    <Shimmer width="60%" height={14} borderRadius={6} />
+                    <Shimmer width="40%" height={11} borderRadius={5} />
+                    <Shimmer width="30%" height={13} borderRadius={6} />
+                  </View>
+                </View>
+              </View>
+            ))}
+          </View>
+        </ShimmerGroup>
       ) : (
         <>
           <ScrollView
@@ -734,7 +739,9 @@ export default function MyOrdersScreen({
             <View style={st.emptyState}>
               <Ionicons name="receipt-outline" size={48} color={C.textMuted} />
               <Text style={st.emptyTitle}>
-                {filter === "all" ? "No orders yet" : `No ${filter} orders`}
+                {filter === "all"
+                  ? "No orders yet"
+                  : `No ${(FILTERS.find((f) => f.id === filter)?.label ?? filter).toLowerCase()} orders`}
               </Text>
               <Text style={st.emptySub}>
                 {filter === "all"
@@ -788,8 +795,8 @@ export default function MyOrdersScreen({
         </>
       )}
       {/* Dispute Modal */}
-      <Modal visible={!!disputeModal} transparent animationType="fade" onRequestClose={() => setDisputeModal(null)}>
-        <Pressable style={st.modalOverlay} onPress={() => setDisputeModal(null)}>
+      <Modal visible={!!disputeModal} transparent animationType="fade" onRequestClose={requestCloseDispute}>
+        <Pressable style={st.modalOverlay} onPress={requestCloseDispute}>
           <Pressable style={st.modalSheet} onPress={() => {}}>
             <View style={st.modalHandle} />
             <Text style={st.modalTitle}>File a Dispute</Text>
@@ -847,7 +854,7 @@ export default function MyOrdersScreen({
             )}
 
             <View style={st.modalActions}>
-              <Pressable style={st.modalCancel} onPress={() => { setDisputeModal(null); setDisputeImages([]); }}>
+              <Pressable style={st.modalCancel} onPress={requestCloseDispute}>
                 <Text style={st.modalCancelText}>Cancel</Text>
               </Pressable>
               <Pressable
@@ -888,6 +895,7 @@ function OrderCard({
   onReceived?: (itemIds: string[]) => void;
   onDispute?: (orderId: string, itemId: string, sellerId: string) => void;
 }) {
+  const [trackingCopied, setTrackingCopied] = useState(false);
   const cfg = STATUS_CONFIG[order.status];
   const sellerName =
     order.seller?.display_name ?? order.seller?.username ?? "Seller";
@@ -960,13 +968,6 @@ function OrderCard({
                   onViewAuction?.(oi.auctionDetailId);
                   return;
                 }
-                if (oi.flashOrder) {
-                  Alert.alert(
-                    "Flash auction item",
-                    "This purchase was from a live flash auction. There is no separate product listing.",
-                  );
-                  return;
-                }
                 if (oi.listing?.id) {
                   onViewItem(oi.listing.id);
                 }
@@ -1026,7 +1027,21 @@ function OrderCard({
         <View style={st.trackingRow}>
           <Ionicons name="locate-outline" size={14} color={C.textAccent} />
           <Text style={st.trackingLabel}>Tracking:</Text>
-          <Text style={st.trackingNumber}>{trackingNumber}</Text>
+          <Text style={st.trackingNumber} selectable>{trackingNumber}</Text>
+          <Pressable
+            style={st.trackingCopyBtn}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel="Copy tracking number"
+            onPress={async () => {
+              await Clipboard.setStringAsync(trackingNumber);
+              setTrackingCopied(true);
+              setTimeout(() => setTrackingCopied(false), 1500);
+            }}
+          >
+            <Feather name={trackingCopied ? "check" : "copy"} size={12} color={C.textAccent} />
+            <Text style={st.trackingCopyText}>{trackingCopied ? "Copied" : "Copy"}</Text>
+          </Pressable>
         </View>
       )}
 
@@ -1124,6 +1139,13 @@ function OrderCard({
 const st = StyleSheet.create({
   safe: { flex: 1, backgroundColor: C.bg },
   loadingWrap: { flex: 1, alignItems: "center", justifyContent: "center" },
+  skeletonCard: {
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border,
+    borderRadius: S.radiusCard,
+    padding: S.lg,
+  },
 
   header: {
     flexDirection: "row",
@@ -1299,7 +1321,18 @@ const st = StyleSheet.create({
     fontSize: 12,
     fontWeight: "800",
     letterSpacing: 0.5,
+    flex: 1,
   },
+  trackingCopyBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+    backgroundColor: "rgba(44,128,255,0.1)",
+  },
+  trackingCopyText: { color: C.textAccent, fontSize: 11, fontWeight: "700" },
 
   // ── Order Received button ──
   receivedBtn: {

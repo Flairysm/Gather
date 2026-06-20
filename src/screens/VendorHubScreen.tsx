@@ -7,6 +7,7 @@ import {
   Image,
   Modal,
   Pressable,
+  RefreshControl,
   SafeAreaView,
   ScrollView,
   StyleSheet,
@@ -14,14 +15,29 @@ import {
   TextInput,
   View,
 } from "react-native";
+import { StatusBar } from "expo-status-bar";
 import { Feather, Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
+import * as Clipboard from "expo-clipboard";
 import { C, S } from "../theme";
 import { supabase } from "../lib/supabase";
+import { onAppEvent, APP_EVENTS } from "../lib/appEvents";
 import { useAppNavigation } from "../navigation/NavigationContext";
+import ScreenHeader from "../components/ScreenHeader";
 import DisputesView from "./DisputesView";
+import {
+  getSellerBalance,
+  getPayoutAccount,
+  savePayoutAccount,
+  requestPayout,
+  cancelPayout,
+  fetchSellerPayouts,
+  type SellerBalance,
+  type PayoutAccount,
+  type SellerPayout,
+} from "../data/payouts";
 
-type ViewId = "home" | "orders" | "listings" | "auctions" | "store" | "performance" | "disputes";
+type ViewId = "home" | "orders" | "listings" | "auctions" | "store" | "performance" | "disputes" | "payouts";
 
 type VendorStore = {
   id: string;
@@ -30,7 +46,27 @@ type VendorStore = {
   logo_url: string | null;
   banner_url: string | null;
   theme_color: string;
+  stripe_account_id: string | null;
+  stripe_charges_enabled: boolean;
+  stripe_payouts_enabled: boolean;
+  stripe_details_submitted: boolean;
+  social_links: Record<string, string> | null;
+  specialties: string[] | null;
 };
+
+const SOCIAL_PLATFORMS: {
+  key: string;
+  label: string;
+  icon: keyof typeof Feather.glyphMap;
+  placeholder: string;
+}[] = [
+  { key: "instagram", label: "Instagram", icon: "instagram", placeholder: "@handle or link" },
+  { key: "tiktok", label: "TikTok", icon: "music", placeholder: "@handle or link" },
+  { key: "twitter", label: "X / Twitter", icon: "twitter", placeholder: "@handle or link" },
+  { key: "youtube", label: "YouTube", icon: "youtube", placeholder: "Channel link" },
+  { key: "whatsapp", label: "WhatsApp", icon: "message-circle", placeholder: "Phone or wa.me link" },
+  { key: "website", label: "Website", icon: "globe", placeholder: "https://" },
+];
 
 type DisplayItem = {
   id: string;
@@ -83,8 +119,21 @@ type SellerOrderItem = {
     total: number;
     created_at: string;
     buyer: { username: string; display_name: string | null } | null;
+    shipping_address: ShippingAddressSnapshot | null;
   } | null;
   source?: "market" | "auction";
+};
+
+type ShippingAddressSnapshot = {
+  full_name?: string | null;
+  phone?: string | null;
+  address_line1?: string | null;
+  address_line2?: string | null;
+  city?: string | null;
+  state?: string | null;
+  zip?: string | null;
+  country?: string | null;
+  label?: string | null;
 };
 
 type VendorAuction = {
@@ -157,6 +206,45 @@ function formatCurrency(v: number) {
   return `RM${v.toLocaleString("en-MY", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
 }
 
+function formatCurrency2(v: number) {
+  return `RM${v.toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+// Common Malaysian banks for the payout account dropdown. "Others" lets the
+// seller type a bank not in the list.
+const MALAYSIAN_BANKS = [
+  "Maybank",
+  "CIMB Bank",
+  "Public Bank",
+  "RHB Bank",
+  "Hong Leong Bank",
+  "AmBank",
+  "Bank Islam",
+  "Bank Rakyat",
+  "Affin Bank",
+  "Alliance Bank",
+  "Bank Simpanan Nasional (BSN)",
+  "OCBC Bank",
+  "HSBC Bank",
+  "Standard Chartered",
+  "UOB Bank",
+  "Bank Muamalat",
+  "Agrobank",
+  "MBSB Bank",
+  "Citibank",
+];
+const OTHER_BANK = "Others";
+
+const PAYOUT_STATUS_META: Record<
+  SellerPayout["status"],
+  { label: string; icon: React.ComponentProps<typeof Ionicons>["name"]; color: string }
+> = {
+  requested: { label: "Pending", icon: "time-outline", color: "#F59E0B" },
+  paid: { label: "Paid", icon: "checkmark-circle", color: C.success },
+  cancelled: { label: "Cancelled", icon: "close-circle-outline", color: C.textSecondary },
+  rejected: { label: "Rejected", icon: "alert-circle-outline", color: C.danger },
+};
+
 function relativeTime(dateStr: string) {
   const diff = Date.now() - new Date(dateStr).getTime();
   const mins = Math.floor(diff / 60000);
@@ -179,12 +267,29 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
   const [myListings, setMyListings] = useState<VendorListing[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [payoutLoading, setPayoutLoading] = useState(false);
+  const [payoutsLoading, setPayoutsLoading] = useState(true);
+  const [payoutsError, setPayoutsError] = useState(false);
+  const [balance, setBalance] = useState<SellerBalance | null>(null);
+  const [payoutAccount, setPayoutAccount] = useState<PayoutAccount | null>(null);
+  const [payouts, setPayouts] = useState<SellerPayout[]>([]);
+  const [editingAccount, setEditingAccount] = useState(false);
+  const [savingAccount, setSavingAccount] = useState(false);
+  const [cancellingPayoutId, setCancellingPayoutId] = useState<string | null>(null);
+  // Bank account form fields
+  const [paHolder, setPaHolder] = useState("");
+  const [paBank, setPaBank] = useState("");
+  const [paAccount, setPaAccount] = useState("");
+  const [bankOpen, setBankOpen] = useState(false);
+  const [bankIsOther, setBankIsOther] = useState(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const toastOpacity = useRef(new Animated.Value(0)).current;
 
   const [orderItems, setOrderItems] = useState<SellerOrderItem[]>([]);
   const [orderFilter, setOrderFilter] = useState<FulfillmentStatus | "all">("all");
   const [updatingOrderId, setUpdatingOrderId] = useState<string | null>(null);
+  const [ordersLoading, setOrdersLoading] = useState(true);
+  const [refreshingOrders, setRefreshingOrders] = useState(false);
 
   const [storeName, setStoreName] = useState("");
   const [storeDesc, setStoreDesc] = useState("");
@@ -194,15 +299,8 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
   const [bannerLocalUri, setBannerLocalUri] = useState<string | null>(null);
   const [uploadingImage, setUploadingImage] = useState(false);
   const [themeColor, setThemeColor] = useState("#2C80FF");
-
-  const [editingListingId, setEditingListingId] = useState<string | null>(null);
-  const [editName, setEditName] = useState("");
-  const [editEdition, setEditEdition] = useState("");
-  const [editGrade, setEditGrade] = useState("");
-  const [editCondition, setEditCondition] = useState("");
-  const [editPrice, setEditPrice] = useState("");
-  const [editQuantity, setEditQuantity] = useState("");
-  const [savingListing, setSavingListing] = useState(false);
+  const [socialLinks, setSocialLinks] = useState<Record<string, string>>({});
+  const [specialtiesInput, setSpecialtiesInput] = useState("");
 
   const [myAuctions, setMyAuctions] = useState<VendorAuction[]>([]);
   const [auctionFilter, setAuctionFilter] = useState<"all" | "active" | "ended" | "cancelled">("active");
@@ -226,6 +324,7 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
     cancelled: orderItems.filter((oi) => oi.fulfillment_status === "cancelled").length,
     pending: orderItems.filter((oi) => oi.fulfillment_status === "pending").length,
     delivered: orderItems.filter((oi) => oi.fulfillment_status === "delivered").length,
+    refunded: orderItems.filter((oi) => oi.fulfillment_status === "refunded").length,
   };
 
   const activeListingCount = myListings.filter((l) => l.status === "active").length;
@@ -269,7 +368,9 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
       setUserId(user.id);
       const { data, error } = await supabase
         .from("vendor_stores")
-        .select("id, store_name, description, logo_url, banner_url, theme_color")
+        .select(
+          "id, store_name, description, logo_url, banner_url, theme_color, stripe_account_id, stripe_charges_enabled, stripe_payouts_enabled, stripe_details_submitted, social_links, specialties",
+        )
         .eq("profile_id", user.id)
         .maybeSingle();
       if (error) throw error;
@@ -280,9 +381,39 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
         setLogoUrl(data.logo_url ?? "");
         setBannerUrl(data.banner_url ?? "");
         setThemeColor(data.theme_color ?? "#2C80FF");
+        setSocialLinks(
+          data.social_links && typeof data.social_links === "object"
+            ? (data.social_links as Record<string, string>)
+            : {},
+        );
+        setSpecialtiesInput(Array.isArray(data.specialties) ? data.specialties.join(", ") : "");
       }
     } catch (e) {
       showToast(errMsg(e, "Failed to load store"));
+    }
+  }, []);
+
+  const loadPayouts = useCallback(async () => {
+    setPayoutsError(false);
+    try {
+      const [bal, acct, list] = await Promise.all([
+        getSellerBalance(),
+        getPayoutAccount(),
+        fetchSellerPayouts(50),
+      ]);
+      setBalance(bal);
+      setPayoutAccount(acct);
+      setPayouts(list);
+      if (acct) {
+        setPaHolder(acct.account_holder ?? "");
+        setPaBank(acct.bank_name ?? "");
+        setPaAccount(acct.account_number ?? "");
+        setBankIsOther(!!acct.bank_name && !MALAYSIAN_BANKS.includes(acct.bank_name));
+      }
+    } catch {
+      setPayoutsError(true);
+    } finally {
+      setPayoutsLoading(false);
     }
   }, []);
 
@@ -355,14 +486,18 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
   const loadOrderItems = useCallback(async () => {
     if (!userId) return;
     try {
+      // order_items has no FK to `listings`, so listing details can't be
+      // embedded here — they are hydrated by listing_id further below.
       const { data, error } = await supabase
         .from("order_items")
         .select(`
           id, order_id, listing_id, quantity, unit_price, fulfillment_status, tracking_number, created_at,
-          listing:listings(card_name, edition, grade, images),
-          order:orders(id, buyer_id, total, created_at)
+          order:orders(id, buyer_id, total, created_at, shipping_address)
         `)
         .eq("seller_id", userId)
+        // Hide orders still awaiting card payment — they only become real sales
+        // once Stripe confirms (status flips to 'confirmed').
+        .neq("fulfillment_status", "pending_payment")
         .order("created_at", { ascending: false })
         .limit(500);
       if (error) throw error;
@@ -401,9 +536,8 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
       const { data: wins } = await supabase
         .from("auction_wins")
         .select(`
-          id, winner_id, seller_id, winning_bid, payment_status, created_at, flash_pin_id,
+          id, winner_id, seller_id, winning_bid, payment_status, created_at,
           auction:auction_items!auction_id(id, card_name, edition, grade, condition, images),
-          flash_pin:live_stream_pins!flash_pin_id(flash_name, flash_image_url),
           winner:profiles!winner_id(username, display_name)
         `)
         .eq("seller_id", userId)
@@ -413,9 +547,7 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
 
       const auctionMapped: SellerOrderItem[] = (wins ?? []).map((row: any) => {
         const auction = Array.isArray(row.auction) ? row.auction[0] : row.auction;
-        const flashPin = Array.isArray(row.flash_pin) ? row.flash_pin[0] : row.flash_pin;
         const winner = Array.isArray(row.winner) ? row.winner[0] : row.winner;
-        const isFlash = !auction && !!flashPin;
         return {
           id: `auction-${row.id}`,
           order_id: `auction-${row.id}`,
@@ -427,15 +559,35 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
           tracking_number: null,
           listing: auction
             ? { card_name: auction.card_name, edition: auction.edition, grade: auction.grade ?? auction.condition ?? null, images: normalizeImages(auction.images) }
-            : isFlash
-            ? { card_name: flashPin.flash_name ?? "Flash Auction Item", edition: null, grade: null, images: flashPin.flash_image_url ? [flashPin.flash_image_url] : [] }
             : null,
-          order: { id: `auction-${row.id}`, buyer_id: row.winner_id, total: Number(row.winning_bid), created_at: row.created_at, buyer: winner ?? null },
+          order: { id: `auction-${row.id}`, buyer_id: row.winner_id, total: Number(row.winning_bid), created_at: row.created_at, buyer: winner ?? null, shipping_address: null },
           source: "auction",
         };
       });
 
-      // Hydrate real order_items that reference auction_items (listing_id → auction_items.id)
+      // Hydrate listing details by listing_id. Market items resolve from
+      // `listings`; auction-origin items (listing_id → auction_items.id)
+      // resolve from `auction_items`.
+      const marketListingIds = [...new Set(mapped.filter((m) => !m.listing && !!m.listing_id).map((m) => m.listing_id))];
+      if (marketListingIds.length > 0) {
+        const { data: listingRows } = await supabase
+          .from("listings")
+          .select("id, card_name, edition, grade, images")
+          .in("id", marketListingIds);
+        for (const l of listingRows ?? []) {
+          for (const m of mapped) {
+            if (m.listing_id === (l as any).id && !m.listing) {
+              (m as any).listing = {
+                card_name: (l as any).card_name,
+                edition: (l as any).edition ?? null,
+                grade: (l as any).grade ?? null,
+                images: normalizeImages((l as any).images),
+              };
+            }
+          }
+        }
+      }
+
       const missingListingIds = [...new Set(mapped.filter((m) => !m.listing && !!m.listing_id).map((m) => m.listing_id))];
       if (missingListingIds.length > 0) {
         const { data: aiRows } = await supabase
@@ -443,14 +595,15 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
           .select("id, card_name, edition, grade, condition, images")
           .in("id", missingListingIds);
         for (const a of aiRows ?? []) {
-          const existing = mapped.find((m) => m.listing_id === (a as any).id && !m.listing);
-          if (existing) {
-            (existing as any).listing = {
-              card_name: (a as any).card_name,
-              edition: (a as any).edition ?? null,
-              grade: (a as any).grade ?? (a as any).condition ?? null,
-              images: normalizeImages((a as any).images),
-            };
+          for (const m of mapped) {
+            if (m.listing_id === (a as any).id && !m.listing) {
+              (m as any).listing = {
+                card_name: (a as any).card_name,
+                edition: (a as any).edition ?? null,
+                grade: (a as any).grade ?? (a as any).condition ?? null,
+                images: normalizeImages((a as any).images),
+              };
+            }
           }
         }
       }
@@ -460,6 +613,8 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
       );
     } catch (e) {
       showToast(errMsg(e, "Failed to load orders"));
+    } finally {
+      setOrdersLoading(false);
     }
   }, [userId]);
 
@@ -497,7 +652,8 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
     if (!userId) return;
     loadOrderItems();
     loadMyAuctions();
-  }, [userId, loadOrderItems, loadMyAuctions]);
+    loadPayouts();
+  }, [userId, loadOrderItems, loadMyAuctions, loadPayouts]);
 
   useEffect(() => {
     if (store?.id) loadDisplayItems();
@@ -506,6 +662,14 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
   useEffect(() => {
     if (userId) loadMyListings();
   }, [userId, loadMyListings]);
+
+  // Refresh products when a listing is edited on the dedicated edit screen.
+  useEffect(() => {
+    return onAppEvent(APP_EVENTS.listingsChanged, () => {
+      loadMyListings();
+      loadDisplayItems();
+    });
+  }, [loadMyListings, loadDisplayItems]);
 
   // ── Order Fulfillment ──
   // Vendor flow: confirmed → shipped (requires tracking number). Buyer handles delivered.
@@ -588,12 +752,25 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
       return;
     }
 
+    const cleanedSocials = Object.fromEntries(
+      Object.entries(socialLinks)
+        .map(([k, v]) => [k, (v ?? "").trim()])
+        .filter(([, v]) => v.length > 0),
+    );
+    const cleanedSpecialties = specialtiesInput
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
+      .slice(0, 12);
+
     const payload = {
       store_name: storeName.trim(),
       description: storeDesc.trim() || null,
       logo_url: finalLogoUrl,
       banner_url: finalBannerUrl,
       theme_color: themeColor,
+      social_links: cleanedSocials,
+      specialties: cleanedSpecialties,
       updated_at: new Date().toISOString(),
     };
 
@@ -663,38 +840,7 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
     await loadDisplayItems();
   }
 
-  // ── Listing Editor ──
-
-  function startEditListing(item: VendorListing) {
-    setEditingListingId(item.id);
-    setEditName(item.card_name); setEditEdition(item.edition ?? "");
-    setEditGrade(item.grade ?? ""); setEditCondition(item.condition ?? "");
-    setEditPrice(String(item.price)); setEditQuantity(String(item.quantity));
-  }
-
-  function cancelEditListing() {
-    setEditingListingId(null);
-    setEditName(""); setEditEdition(""); setEditGrade("");
-    setEditCondition(""); setEditPrice(""); setEditQuantity("");
-  }
-
-  async function saveListingEdits(listingId: string) {
-    const parsed = Number(editPrice);
-    const parsedQty = parseInt(editQuantity, 10);
-    if (!editName.trim()) { showToast("Card name is required"); return; }
-    if (!Number.isFinite(parsed) || parsed <= 0) { showToast("Enter a valid price"); return; }
-    if (isNaN(parsedQty) || parsedQty < 0) { showToast("Quantity must be 0 or more"); return; }
-    setSavingListing(true);
-    const { error } = await supabase.from("listings").update({
-      card_name: editName.trim(), edition: editEdition.trim() || null,
-      grade: editGrade.trim() || null, condition: editCondition.trim() || null,
-      price: parsed, quantity: parsedQty, updated_at: new Date().toISOString(),
-    }).eq("id", listingId);
-    setSavingListing(false);
-    if (error) { showToast(errMsg(error, "Failed to update listing")); return; }
-    await loadMyListings(); await loadDisplayItems();
-    cancelEditListing(); showToast("Listing updated");
-  }
+  // ── Listing actions ──
 
   async function removeListing(item: VendorListing) {
     Alert.alert("Remove listing?", "This will remove it from your store, but keep order history.", [
@@ -706,7 +852,6 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
           if (dispErr) console.warn("removeListing display cleanup:", dispErr.message);
           const { error } = await supabase.from("listings").update({ status: "removed", updated_at: new Date().toISOString() }).eq("id", item.id);
           if (error) { showToast(errMsg(error, "Failed to remove listing")); return; }
-          if (editingListingId === item.id) cancelEditListing();
           await loadMyListings(); await loadDisplayItems();
           showToast("Listing removed");
         },
@@ -750,16 +895,106 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
     setView("orders");
   }
 
+  async function refreshOrders() {
+    setRefreshingOrders(true);
+    await loadOrderItems();
+    setRefreshingOrders(false);
+  }
+
+  function messageBuyer(oi: SellerOrderItem) {
+    const buyerId = oi.order?.buyer_id;
+    if (!buyerId) return;
+    push({
+      type: "CHAT",
+      sellerId: buyerId,
+      listingId: oi.listing_id || undefined,
+      topic: oi.listing?.card_name ?? undefined,
+    });
+  }
+
+  async function handleSaveAccount() {
+    if (!paHolder.trim() || !paBank.trim() || !paAccount.trim()) {
+      showToast("Fill in name, bank, and account number");
+      return;
+    }
+    setSavingAccount(true);
+    try {
+      await savePayoutAccount({
+        account_holder: paHolder,
+        bank_name: paBank,
+        account_number: paAccount,
+      });
+      await loadPayouts();
+      setEditingAccount(false);
+      showToast("Bank account saved");
+    } catch (e) {
+      showToast(errMsg(e, "Couldn't save bank account"));
+    } finally {
+      setSavingAccount(false);
+    }
+  }
+
+  async function handleRequestPayout() {
+    const available = balance?.available ?? 0;
+    if (available <= 0) {
+      showToast("No funds available to withdraw");
+      return;
+    }
+    if (!payoutAccount) {
+      showToast("Add a bank account first");
+      setEditingAccount(true);
+      return;
+    }
+    Alert.alert(
+      "Request payout?",
+      `Withdraw ${formatCurrency2(available)} to ${payoutAccount.bank_name} ${payoutAccount.account_number}. The Evend team will transfer it and mark it paid.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Request",
+          onPress: async () => {
+            setPayoutLoading(true);
+            try {
+              const { amount } = await requestPayout(null);
+              await loadPayouts();
+              showToast(`Payout of ${formatCurrency2(amount)} requested`);
+            } catch (e) {
+              showToast(errMsg(e, "Couldn't request payout"));
+            } finally {
+              setPayoutLoading(false);
+            }
+          },
+        },
+      ],
+    );
+  }
+
+  async function handleCancelPayout(id: string) {
+    setCancellingPayoutId(id);
+    try {
+      await cancelPayout(id);
+      await loadPayouts();
+      showToast("Payout request cancelled");
+    } catch (e) {
+      showToast(errMsg(e, "Couldn't cancel payout"));
+    } finally {
+      setCancellingPayoutId(null);
+    }
+  }
+
   // ── Sub-view header ──
   function SubHeader({ title }: { title: string }) {
     return (
-      <View style={st.subHeader}>
-        <Pressable onPress={() => setView("home")} style={st.subBackBtn}>
-          <Feather name="arrow-left" size={20} color={C.textPrimary} />
-        </Pressable>
-        <Text style={st.subHeaderTitle}>{title}</Text>
-        <View style={{ width: 36 }} />
-      </View>
+      <>
+        <StatusBar style="light" />
+        <View style={st.subHeader}>
+          <Pressable onPress={() => setView("home")} style={st.subBackBtn}>
+            <Feather name="arrow-left" size={20} color={C.textPrimary} />
+          </Pressable>
+          <Text style={st.subHeaderTitle}>{title}</Text>
+          <View style={{ width: 36 }} />
+        </View>
+      </>
     );
   }
 
@@ -768,6 +1003,8 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
   if (loading) {
     return (
       <SafeAreaView style={st.safe}>
+        <StatusBar style="light" />
+        <ScreenHeader title="My Shop" onBack={onBack} />
         <View style={st.center}><ActivityIndicator color={C.accent} size="large" /></View>
       </SafeAreaView>
     );
@@ -777,6 +1014,7 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
   if (view === "home") {
     return (
       <SafeAreaView style={st.safe}>
+        <StatusBar style="light" />
         <View style={st.header}>
           <Pressable onPress={onBack} style={st.backBtn}>
             <Feather name="arrow-left" size={20} color={C.textPrimary} />
@@ -817,6 +1055,53 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
             </View>
           </View>
 
+          {/* Payout Setup Alert */}
+          {payoutsLoading ? (
+            <View style={[st.shipAlert, st.payoutSkeleton]}>
+              <View style={[st.shipAlertIcon, { backgroundColor: C.elevated }]} />
+              <View style={st.shipAlertInfo}>
+                <View style={st.skeletonLineWide} />
+                <View style={st.skeletonLineNarrow} />
+              </View>
+            </View>
+          ) : payoutsError ? (
+            <Pressable
+              style={[st.shipAlert, { backgroundColor: "rgba(239,68,68,0.08)", borderColor: "rgba(239,68,68,0.25)" }]}
+              onPress={() => { setPayoutsLoading(true); loadPayouts(); }}
+            >
+              <View style={[st.shipAlertIcon, { backgroundColor: "#EF4444" }]}>
+                <Ionicons name="alert-circle-outline" size={20} color="#fff" />
+              </View>
+              <View style={st.shipAlertInfo}>
+                <Text style={[st.shipAlertTitle, { color: "#EF4444" }]}>Couldn't load payouts</Text>
+                <Text style={st.shipAlertSub}>Tap to retry</Text>
+              </View>
+              <Feather name="refresh-cw" size={16} color="#EF4444" />
+            </Pressable>
+          ) : store && !payoutAccount ? (
+            <Pressable style={st.shipAlert} onPress={() => setView("payouts")}>
+              <View style={[st.shipAlertIcon, { backgroundColor: "#10B981" }]}>
+                <Ionicons name="card-outline" size={20} color="#fff" />
+              </View>
+              <View style={st.shipAlertInfo}>
+                <Text style={st.shipAlertTitle}>Set up payouts</Text>
+                <Text style={st.shipAlertSub}>Add a bank account to withdraw your sales earnings</Text>
+              </View>
+              <Feather name="chevron-right" size={16} color={C.accent} />
+            </Pressable>
+          ) : store && (balance?.available ?? 0) > 0 && !payouts.some((p) => p.status === "requested") ? (
+            <Pressable style={st.shipAlert} onPress={() => setView("payouts")}>
+              <View style={[st.shipAlertIcon, { backgroundColor: "#10B981" }]}>
+                <Ionicons name="cash-outline" size={20} color="#fff" />
+              </View>
+              <View style={st.shipAlertInfo}>
+                <Text style={st.shipAlertTitle}>{formatCurrency2(balance?.available ?? 0)} ready to withdraw</Text>
+                <Text style={st.shipAlertSub}>Tap to request a payout to your bank</Text>
+              </View>
+              <Feather name="chevron-right" size={16} color={C.accent} />
+            </Pressable>
+          ) : null}
+
           {/* To Ship Alert */}
           {orderCounts.confirmed > 0 && (
             <Pressable style={st.shipAlert} onPress={() => goToOrders("confirmed")}>
@@ -847,10 +1132,12 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
 
           <View style={st.statusGrid}>
             {([
+              { key: "pending" as const, label: "Unpaid", icon: "time-outline", color: "#F59E0B" },
               { key: "confirmed" as const, label: "To Ship", icon: "cube-outline", color: C.accent },
               { key: "shipped" as const, label: "Shipping", icon: "airplane-outline", color: "#8B5CF6" },
+              { key: "delivered" as const, label: "Completed", icon: "checkmark-done-circle-outline", color: C.success },
               { key: "cancelled" as const, label: "Cancelled", icon: "close-circle-outline", color: "#EF4444" },
-              { key: "pending" as const, label: "Unpaid", icon: "time-outline", color: "#F59E0B" },
+              { key: "refunded" as const, label: "Refunded", icon: "receipt-outline", color: "#6B7280" },
             ] as const).map((item) => (
               <Pressable
                 key={item.key}
@@ -877,7 +1164,7 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
               { icon: "hammer-outline", label: "My Auctions", color: "#F59E0B", bg: "rgba(245,158,11,0.1)", onPress: () => setView("auctions") },
               { icon: "bar-chart-outline", label: "Performance", color: C.success, bg: "rgba(34,197,94,0.1)", onPress: () => setView("performance") },
               { icon: "alert-circle-outline", label: "Disputes", color: "#EF4444", bg: "rgba(239,68,68,0.1)", onPress: () => setView("disputes"), badge: openDisputeCount },
-              { icon: "storefront-outline", label: "Store Settings", color: "#8B5CF6", bg: "rgba(139,92,246,0.1)", onPress: () => setView("store") },
+              { icon: "card-outline", label: "Payouts", color: "#10B981", bg: "rgba(16,185,129,0.1)", onPress: () => setView("payouts") },
               { icon: "add-circle-outline", label: "New Listing", color: C.accent, bg: "rgba(44,128,255,0.1)", onPress: () => push({ type: "CREATE_LISTING" }) },
               { icon: "add-circle-outline", label: "New Auction", color: "#F59E0B", bg: "rgba(245,158,11,0.1)", onPress: () => push({ type: "CREATE_AUCTION" }) },
             ].map((tool, i) => (
@@ -937,16 +1224,27 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
           })}
         </ScrollView>
 
-        {filteredOrders.length === 0 ? (
-          <View style={[st.emptyCard, { margin: S.screenPadding, marginTop: 40 }]}>
-            <Ionicons name="receipt-outline" size={36} color={C.textMuted} />
-            <Text style={st.emptyTitle}>
-              {orderFilter === "all" ? "No Orders Yet" : `No ${FULFILLMENT_CONFIG[orderFilter as FulfillmentStatus]?.label ?? orderFilter} orders`}
-            </Text>
-            <Text style={st.emptySub}>
-              {orderFilter === "all" ? "When buyers purchase your items, orders appear here" : "Try a different filter"}
-            </Text>
+        {ordersLoading && orderItems.length === 0 ? (
+          <View style={st.center}>
+            <ActivityIndicator size="large" color={C.accent} />
           </View>
+        ) : filteredOrders.length === 0 ? (
+          <ScrollView
+            contentContainerStyle={{ flexGrow: 1 }}
+            refreshControl={
+              <RefreshControl tintColor={C.accent} refreshing={refreshingOrders} onRefresh={refreshOrders} />
+            }
+          >
+            <View style={[st.emptyCard, { margin: S.screenPadding, marginTop: 40 }]}>
+              <Ionicons name="receipt-outline" size={36} color={C.textMuted} />
+              <Text style={st.emptyTitle}>
+                {orderFilter === "all" ? "No Orders Yet" : `No ${FULFILLMENT_CONFIG[orderFilter as FulfillmentStatus]?.label ?? orderFilter} orders`}
+              </Text>
+              <Text style={st.emptySub}>
+                {orderFilter === "all" ? "When buyers purchase your items, orders appear here" : "Try a different filter"}
+              </Text>
+            </View>
+          </ScrollView>
         ) : (
           <FlatList
             data={filteredOrders}
@@ -956,8 +1254,11 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
             maxToRenderPerBatch={8}
             windowSize={5}
             removeClippedSubviews
+            refreshControl={
+              <RefreshControl tintColor={C.accent} refreshing={refreshingOrders} onRefresh={refreshOrders} />
+            }
             renderItem={({ item: oi }) => {
-              const cfg = FULFILLMENT_CONFIG[oi.fulfillment_status];
+              const cfg = FULFILLMENT_CONFIG[oi.fulfillment_status] ?? FULFILLMENT_CONFIG.pending;
               const action = oi.source !== "auction" ? vendorNextAction(oi.fulfillment_status) : null;
               const imgUrl = oi.listing?.images?.[0];
               const buyerDisplay = oi.order?.buyer?.display_name ?? oi.order?.buyer?.username ?? "Buyer";
@@ -1011,16 +1312,93 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
                     </View>
                   )}
 
+                  {/* Shipping address — where to send the parcel */}
+                  {oi.source !== "auction" && oi.order?.shipping_address?.address_line1 ? (
+                    (() => {
+                      const a = oi.order.shipping_address!;
+                      const line2 = [a.address_line2, [a.zip, a.city].filter(Boolean).join(" "), a.state]
+                        .filter(Boolean)
+                        .join(", ");
+                      const copyText = [
+                        a.full_name,
+                        a.address_line1,
+                        a.address_line2,
+                        [a.zip, a.city].filter(Boolean).join(" "),
+                        a.state,
+                        a.country,
+                        a.phone ? `Phone: ${a.phone}` : null,
+                      ]
+                        .filter(Boolean)
+                        .join("\n");
+                      return (
+                        <View style={st.shipAddrRow}>
+                          <Ionicons name="location-outline" size={14} color={C.textAccent} style={{ marginTop: 1 }} />
+                          <View style={{ flex: 1 }}>
+                            <View style={st.shipAddrNameRow}>
+                              <Text style={st.shipAddrName}>{a.full_name ?? "Recipient"}</Text>
+                              {a.phone ? <Text style={st.shipAddrPhone}>{a.phone}</Text> : null}
+                            </View>
+                            <Text style={st.shipAddrText} selectable>{a.address_line1}</Text>
+                            {line2 ? <Text style={st.shipAddrText} selectable>{line2}</Text> : null}
+                          </View>
+                          <Pressable
+                            style={st.shipCopyBtn}
+                            hitSlop={8}
+                            accessibilityRole="button"
+                            accessibilityLabel="Copy shipping address"
+                            onPress={async () => {
+                              await Clipboard.setStringAsync(copyText);
+                              showToast("Address copied");
+                            }}
+                          >
+                            <Feather name="copy" size={13} color={C.textAccent} />
+                            <Text style={st.shipCopyText}>Copy</Text>
+                          </Pressable>
+                        </View>
+                      );
+                    })()
+                  ) : oi.source !== "auction" ? (
+                    <View style={st.shipAddrRow}>
+                      <Ionicons name="location-outline" size={14} color={C.textMuted} style={{ marginTop: 1 }} />
+                      <View style={{ flex: 1 }}>
+                        <Text style={st.shipAddrName}>Address not provided</Text>
+                        <Text style={st.shipAddrText}>Ask the buyer for a delivery address before shipping.</Text>
+                      </View>
+                      <Pressable
+                        style={st.shipCopyBtn}
+                        hitSlop={8}
+                        accessibilityRole="button"
+                        accessibilityLabel="Message buyer"
+                        onPress={() => messageBuyer(oi)}
+                      >
+                        <Feather name="message-circle" size={13} color={C.textAccent} />
+                        <Text style={st.shipCopyText}>Message</Text>
+                      </Pressable>
+                    </View>
+                  ) : null}
+
+                  {/* Unpaid auction win — vendor waits for the buyer to pay */}
+                  {oi.source === "auction" && oi.fulfillment_status === "pending" && (
+                    <View style={st.waitingRow}>
+                      <Ionicons name="time-outline" size={14} color="#F59E0B" />
+                      <Text style={st.waitingText}>Waiting for buyer to pay</Text>
+                    </View>
+                  )}
+
                   {oi.source !== "auction" && (action || oi.fulfillment_status === "pending") && (
                     <View style={st.orderActions}>
                       {oi.fulfillment_status === "pending" && (
                         <Pressable
                           style={[st.orderActionBtn, st.orderActionDanger]}
                           onPress={() => {
-                            Alert.alert("Cancel Order?", "This will cancel the order for the buyer.", [
-                              { text: "Keep", style: "cancel" },
-                              { text: "Cancel Order", style: "destructive", onPress: () => updateFulfillment(oi.id, "cancelled") },
-                            ]);
+                            Alert.alert(
+                              "Cancel Order?",
+                              "This cancels the order for the buyer. Any payment they've made will be refunded to their original payment method. This can't be undone.",
+                              [
+                                { text: "Keep", style: "cancel" },
+                                { text: "Cancel Order", style: "destructive", onPress: () => updateFulfillment(oi.id, "cancelled") },
+                              ],
+                            );
                           }}
                           disabled={updatingOrderId === oi.id}
                         >
@@ -1099,6 +1477,7 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
   // ══════════════════ LISTINGS (My Products) ══════════════════
   if (view === "listings") {
     const LISTING_TABS: { id: typeof listingFilter; label: string; count: number }[] = [
+      { id: "all", label: "All", count: myListings.length },
       { id: "active", label: "Live", count: listingTabCounts.active },
       { id: "sold", label: "Sold out", count: listingTabCounts.sold },
       { id: "paused", label: "Paused", count: listingTabCounts.paused },
@@ -1140,9 +1519,13 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
           <View style={[st.emptyCard, { margin: S.screenPadding, marginTop: 20 }]}>
             <Ionicons name="pricetag-outline" size={32} color={C.textMuted} />
             <Text style={st.emptyTitle}>
-              {listingFilter === "active" ? "No live products" : `No ${listingFilter} products`}
+              {listingFilter === "active" ? "No live products" : listingFilter === "all" ? "No products yet" : `No ${listingFilter} products`}
             </Text>
             <Text style={st.emptySub}>Create a listing to start selling</Text>
+            <Pressable style={st.emptyCtaBtn} onPress={() => push({ type: "CREATE_LISTING" })}>
+              <Ionicons name="add" size={16} color={C.textHero} />
+              <Text style={st.emptyCtaText}>Add New Product</Text>
+            </Pressable>
           </View>
         ) : (
           <FlatList
@@ -1155,7 +1538,6 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
             removeClippedSubviews
             renderItem={({ item }) => {
               const isDisplayed = displayItems.some((d) => d.listing_id === item.id);
-              const isEditing = editingListingId === item.id;
               const sold = soldCounts[item.id] ?? 0;
 
               return (
@@ -1199,48 +1581,30 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
                     </Pressable>
                     <Pressable
                       style={[st.prodActionBtn, st.prodActionBtnEdit]}
-                      onPress={() => startEditListing(item)}
+                      onPress={() => push({ type: "EDIT_LISTING", listingId: item.id })}
                     >
                       <Text style={st.prodActionEditText}>Edit</Text>
                     </Pressable>
                     <View style={{ flex: 1 }} />
                     {store && (
                       <Pressable
-                        style={st.prodActionBtnMore}
+                        style={[st.prodActionBtnFeature, isDisplayed && st.prodActionBtnFeatureActive]}
+                        hitSlop={8}
+                        accessibilityRole="button"
+                        accessibilityLabel={isDisplayed ? "Remove from featured" : "Add to featured"}
                         onPress={() =>
                           isDisplayed
                             ? removeDisplayItem(displayItems.find((d) => d.listing_id === item.id)!.id)
                             : addDisplayItem(item.id)
                         }
                       >
-                        <Ionicons name={isDisplayed ? "star" : "star-outline"} size={18} color={isDisplayed ? "#F59E0B" : C.textMuted} />
+                        <Ionicons name={isDisplayed ? "star" : "star-outline"} size={16} color={isDisplayed ? "#F59E0B" : C.textMuted} />
+                        <Text style={[st.prodActionFeatureText, isDisplayed && { color: "#F59E0B" }]}>
+                          {isDisplayed ? "Featured" : "Feature"}
+                        </Text>
                       </Pressable>
                     )}
                   </View>
-
-                  {/* Inline editor */}
-                  {isEditing && (
-                    <View style={st.editorPane}>
-                      <TextInput style={st.editorInput} value={editName} onChangeText={setEditName} placeholder="Card name" placeholderTextColor={C.textMuted} />
-                      <View style={st.editorRow}>
-                        <TextInput style={[st.editorInput, st.editorHalf]} value={editEdition} onChangeText={setEditEdition} placeholder="Edition" placeholderTextColor={C.textMuted} />
-                        <TextInput style={[st.editorInput, st.editorHalf]} value={editGrade} onChangeText={setEditGrade} placeholder="Grade" placeholderTextColor={C.textMuted} />
-                      </View>
-                      <View style={st.editorRow}>
-                        <TextInput style={[st.editorInput, st.editorHalf]} value={editCondition} onChangeText={setEditCondition} placeholder="Condition" placeholderTextColor={C.textMuted} />
-                        <TextInput style={[st.editorInput, st.editorHalf]} value={editPrice} onChangeText={setEditPrice} placeholder="Price" keyboardType="numeric" placeholderTextColor={C.textMuted} />
-                      </View>
-                      <TextInput style={st.editorInput} value={editQuantity} onChangeText={setEditQuantity} placeholder="Quantity" keyboardType="number-pad" placeholderTextColor={C.textMuted} />
-                      <View style={st.editorBtns}>
-                        <Pressable style={st.editorCancelBtn} onPress={cancelEditListing} disabled={savingListing}>
-                          <Text style={st.editorCancelText}>Cancel</Text>
-                        </Pressable>
-                        <Pressable style={st.editorSaveBtn} onPress={() => saveListingEdits(item.id)} disabled={savingListing}>
-                          {savingListing ? <ActivityIndicator size="small" color="#fff" /> : <Text style={st.editorSaveText}>Save</Text>}
-                        </Pressable>
-                      </View>
-                    </View>
-                  )}
                 </View>
               );
             }}
@@ -1335,10 +1699,7 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
                 : diff <= 0 ? "Ending..." : diff < 3600000 ? `${Math.floor(diff / 60000)}m left` : diff < 86400000 ? `${Math.floor(diff / 3600000)}h left` : `${Math.floor(diff / 86400000)}d left`;
 
               return (
-                <Pressable
-                  style={st.prodCard}
-                  onPress={() => push({ type: "AUCTION_DETAIL", auctionId: auction.id })}
-                >
+                <View style={st.prodCard}>
                   {/* Main row */}
                   <View style={st.prodCardRow}>
                     <View style={st.prodThumb}>
@@ -1407,7 +1768,7 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
                       <Text style={st.prodActionEditText}>View Details</Text>
                     </Pressable>
                   </View>
-                </Pressable>
+                </View>
               );
             }}
           />
@@ -1626,7 +1987,319 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
     );
   }
 
-  // ══════════════════ DISPUTES ══════════════════
+  // ══════════════════ PAYOUTS ══════════════════
+  if (view === "payouts") {
+    const available = balance?.available ?? 0;
+    const pendingPayout = payouts.find((p) => p.status === "requested") ?? null;
+    const canRequest = available > 0 && !!payoutAccount && !pendingPayout && !payoutLoading;
+    const showForm = editingAccount || !payoutAccount;
+    return (
+      <SafeAreaView style={st.safe}>
+        <SubHeader title="Payouts" />
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+          contentContainerStyle={st.homeScroll}
+        >
+          {payoutsLoading ? (
+            <View style={st.payoutStateWrap}>
+              <ActivityIndicator size="large" color={C.accent} />
+              <Text style={st.payoutStateText}>Loading your payouts…</Text>
+            </View>
+          ) : payoutsError ? (
+            <View style={st.payoutStateWrap}>
+              <Ionicons name="cloud-offline-outline" size={40} color={C.textMuted} />
+              <Text style={st.payoutStateText}>Couldn't load your payout details.</Text>
+              <Pressable
+                style={st.payoutRetryBtn}
+                onPress={() => { setPayoutsLoading(true); loadPayouts(); }}
+              >
+                <Text style={st.payoutRetryText}>Try again</Text>
+              </Pressable>
+            </View>
+          ) : (
+          <>
+          {/* Balance */}
+          <View style={st.payoutBalanceCard}>
+            <Text style={st.earningsLabel}>Available to withdraw</Text>
+            <Text style={st.payoutBalanceValue}>{formatCurrency2(available)}</Text>
+            <View style={st.payoutStatRow}>
+              <View style={st.payoutStat}>
+                <Text style={st.payoutStatValue}>{formatCurrency2(balance?.in_escrow ?? 0)}</Text>
+                <Text style={st.payoutStatLabel}>In escrow</Text>
+              </View>
+              <View style={st.payoutStatSep} />
+              <View style={st.payoutStat}>
+                <Text style={st.payoutStatValue}>{formatCurrency2(balance?.pending ?? 0)}</Text>
+                <Text style={st.payoutStatLabel}>Pending</Text>
+              </View>
+              <View style={st.payoutStatSep} />
+              <View style={st.payoutStat}>
+                <Text style={st.payoutStatValue}>{formatCurrency2(balance?.lifetime_paid ?? 0)}</Text>
+                <Text style={st.payoutStatLabel}>Paid out</Text>
+              </View>
+            </View>
+            <Text style={st.earningsHint}>
+              Escrow is released once the buyer receives the order and the dispute window closes. Amounts shown are what you receive after a {Math.round((balance?.fee_rate ?? 0.05) * 100)}% platform fee.
+            </Text>
+          </View>
+
+          {/* Request / pending */}
+          {pendingPayout ? (
+            <View style={st.pendingCard}>
+              <View style={st.pendingIcon}>
+                <Ionicons name="time-outline" size={18} color="#F59E0B" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={st.pendingTitle}>Payout requested</Text>
+                <Text style={st.pendingSub}>
+                  {formatCurrency2(pendingPayout.amount)} · the Evend team will transfer it to your bank
+                </Text>
+              </View>
+              <Pressable
+                onPress={() =>
+                  Alert.alert(
+                    "Cancel payout request?",
+                    `This withdrawal request of ${formatCurrency2(pendingPayout.amount)} will be cancelled and the funds returned to your available balance.`,
+                    [
+                      { text: "Keep Request", style: "cancel" },
+                      { text: "Cancel Payout", style: "destructive", onPress: () => handleCancelPayout(pendingPayout.id) },
+                    ],
+                  )
+                }
+                disabled={cancellingPayoutId === pendingPayout.id}
+                style={st.pendingCancel}
+              >
+                {cancellingPayoutId === pendingPayout.id ? (
+                  <ActivityIndicator size="small" color={C.textSecondary} />
+                ) : (
+                  <Text style={st.pendingCancelText}>Cancel</Text>
+                )}
+              </Pressable>
+            </View>
+          ) : (
+            <Pressable
+              style={[st.payoutBtn, !canRequest && { opacity: 0.5 }]}
+              onPress={handleRequestPayout}
+              disabled={!canRequest}
+            >
+              {payoutLoading ? (
+                <ActivityIndicator color="#fff" size="small" />
+              ) : (
+                <>
+                  <Ionicons name="cash-outline" size={18} color="#fff" />
+                  <Text style={st.payoutBtnText}>
+                    {available > 0 ? `Withdraw ${formatCurrency2(available)}` : "No funds to withdraw"}
+                  </Text>
+                </>
+              )}
+            </Pressable>
+          )}
+
+          {!pendingPayout && !canRequest && !payoutLoading && (
+            <Text style={st.withdrawHint}>
+              {!payoutAccount
+                ? "Add a bank account below before you can withdraw."
+                : available <= 0
+                  ? "No funds available yet. Earnings become available after the buyer confirms receipt and the dispute window closes."
+                  : "Withdrawals are temporarily unavailable. Please try again shortly."}
+            </Text>
+          )}
+
+          {/* Bank account */}
+          <View style={st.payoutSectionHead}>
+            <Text style={st.payoutSectionTitle}>Bank account</Text>
+            {payoutAccount && !showForm && (
+              <Pressable onPress={() => setEditingAccount(true)} hitSlop={8}>
+                <Text style={st.payoutEditLink}>Edit</Text>
+              </Pressable>
+            )}
+          </View>
+
+          {!showForm && payoutAccount ? (
+            <View style={st.bankCard}>
+              <View style={st.bankIcon}>
+                <Ionicons name="business-outline" size={18} color={C.accent} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={st.bankHolder}>{payoutAccount.account_holder}</Text>
+                <Text style={st.bankLine}>
+                  {payoutAccount.bank_name} · {payoutAccount.account_number}
+                </Text>
+              </View>
+            </View>
+          ) : (
+            <View style={st.bankForm}>
+              <Text style={st.payoutInputLabel}>Account holder name</Text>
+              <TextInput
+                style={st.payoutInput}
+                value={paHolder}
+                onChangeText={setPaHolder}
+                placeholder="As shown on your bank account"
+                placeholderTextColor={C.textMuted}
+              />
+              <Text style={st.payoutInputLabel}>Bank</Text>
+              <Pressable
+                style={st.bankSelect}
+                onPress={() => setBankOpen((o) => !o)}
+              >
+                <Text style={[st.bankSelectText, !bankIsOther && !paBank && { color: C.textMuted }]}>
+                  {bankIsOther ? OTHER_BANK : paBank || "Select your bank"}
+                </Text>
+                <Ionicons name={bankOpen ? "chevron-up" : "chevron-down"} size={18} color={C.textMuted} />
+              </Pressable>
+              {bankOpen && (
+                <View style={st.bankDropdown}>
+                  <ScrollView style={{ maxHeight: 240 }} nestedScrollEnabled keyboardShouldPersistTaps="handled">
+                    {MALAYSIAN_BANKS.map((b) => {
+                      const active = !bankIsOther && paBank === b;
+                      return (
+                        <Pressable
+                          key={b}
+                          style={[st.bankOption, active && st.bankOptionActive]}
+                          onPress={() => {
+                            setBankIsOther(false);
+                            setPaBank(b);
+                            setBankOpen(false);
+                          }}
+                        >
+                          <Text style={[st.bankOptionText, active && { color: C.accent }]}>{b}</Text>
+                          {active && <Ionicons name="checkmark" size={16} color={C.accent} />}
+                        </Pressable>
+                      );
+                    })}
+                    <Pressable
+                      style={[st.bankOption, bankIsOther && st.bankOptionActive]}
+                      onPress={() => {
+                        setBankIsOther(true);
+                        setPaBank("");
+                        setBankOpen(false);
+                      }}
+                    >
+                      <Text style={[st.bankOptionText, bankIsOther && { color: C.accent }]}>{OTHER_BANK}</Text>
+                      {bankIsOther && <Ionicons name="checkmark" size={16} color={C.accent} />}
+                    </Pressable>
+                  </ScrollView>
+                </View>
+              )}
+              {bankIsOther && (
+                <TextInput
+                  style={[st.payoutInput, { marginTop: 8 }]}
+                  value={paBank}
+                  onChangeText={setPaBank}
+                  placeholder="Enter your bank name"
+                  placeholderTextColor={C.textMuted}
+                  autoFocus
+                />
+              )}
+              <Text style={st.payoutInputLabel}>Account number</Text>
+              <TextInput
+                style={st.payoutInput}
+                value={paAccount}
+                onChangeText={setPaAccount}
+                placeholder="Your bank account number"
+                placeholderTextColor={C.textMuted}
+                keyboardType="number-pad"
+              />
+              <View style={st.bankFormBtnRow}>
+                {payoutAccount && (
+                  <Pressable
+                    style={st.bankCancelBtn}
+                    onPress={() => {
+                      setEditingAccount(false);
+                      setBankOpen(false);
+                      setPaHolder(payoutAccount.account_holder ?? "");
+                      setPaBank(payoutAccount.bank_name ?? "");
+                      setPaAccount(payoutAccount.account_number ?? "");
+                      setBankIsOther(!!payoutAccount.bank_name && !MALAYSIAN_BANKS.includes(payoutAccount.bank_name));
+                    }}
+                  >
+                    <Text style={st.bankCancelText}>Cancel</Text>
+                  </Pressable>
+                )}
+                <Pressable
+                  style={[st.bankSaveBtn, savingAccount && { opacity: 0.6 }]}
+                  onPress={handleSaveAccount}
+                  disabled={savingAccount}
+                >
+                  {savingAccount ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <Text style={st.bankSaveText}>Save bank account</Text>
+                  )}
+                </Pressable>
+              </View>
+            </View>
+          )}
+
+          {/* History */}
+          {payouts.length === 0 ? (
+            <>
+              <Text style={[st.payoutSectionTitle, { marginTop: 22, marginBottom: 10 }]}>Payout history</Text>
+              <View style={st.historyEmptyCard}>
+                <Ionicons name="receipt-outline" size={22} color={C.textMuted} />
+                <Text style={st.historyEmptyText}>No payouts yet</Text>
+                <Text style={st.historyEmptySub}>Your withdrawal requests will appear here.</Text>
+              </View>
+            </>
+          ) : (
+            <>
+              <Text style={[st.payoutSectionTitle, { marginTop: 22, marginBottom: 10 }]}>Payout history</Text>
+              <View style={st.historyCard}>
+                {payouts.map((p, i) => {
+                  const meta = PAYOUT_STATUS_META[p.status];
+                  return (
+                    <View key={p.id}>
+                      {i > 0 && <View style={st.historyDivider} />}
+                      <View style={st.historyRow}>
+                        <View style={[st.historyIcon, { backgroundColor: meta.color + "1A" }]}>
+                          <Ionicons name={meta.icon} size={16} color={meta.color} />
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={st.historyLabel}>{formatCurrency2(p.amount)}</Text>
+                          <Text style={st.historyDate}>
+                            {new Date(p.created_at).toLocaleDateString("en-MY", {
+                              day: "2-digit",
+                              month: "short",
+                              year: "numeric",
+                            })}
+                            {p.reference ? ` · Ref ${p.reference}` : ""}
+                          </Text>
+                          {p.status === "rejected" && p.note ? (
+                            <Text style={st.historyNote}>{p.note}</Text>
+                          ) : null}
+                        </View>
+                        <View style={[st.payoutBadge, { backgroundColor: meta.color + "22" }]}>
+                          <Text style={[st.payoutBadgeText, { color: meta.color }]}>{meta.label}</Text>
+                        </View>
+                      </View>
+                    </View>
+                  );
+                })}
+              </View>
+            </>
+          )}
+
+          <View style={st.payoutNoteRow}>
+            <Ionicons name="information-circle-outline" size={14} color={C.textMuted} />
+            <Text style={st.payoutNoteText}>
+              Payouts are processed manually by the Evend team via bank transfer, usually within 1–3 business days of your request.
+            </Text>
+          </View>
+          </>
+          )}
+        </ScrollView>
+
+        {toastMsg && (
+          <Animated.View style={[st.toast, { opacity: toastOpacity }]}>
+            <Feather name="check-circle" size={16} color="#fff" />
+            <Text style={st.toastText}>{toastMsg}</Text>
+          </Animated.View>
+        )}
+      </SafeAreaView>
+    );
+  }
+
   if (view === "disputes") {
     return <DisputesView userId={userId ?? ""} onBack={() => setView("home")} />;
   }
@@ -1681,11 +2354,53 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
           <View style={st.field}>
             <Text style={st.fieldLabel}>Store Name *</Text>
             <TextInput style={st.fieldInput} value={storeName} onChangeText={setStoreName} placeholder="Enter store name" placeholderTextColor={C.textMuted} />
+            {!storeName.trim() && (
+              <Text style={st.fieldError}>Store name is required to save.</Text>
+            )}
           </View>
           <View style={st.field}>
             <Text style={st.fieldLabel}>Description</Text>
             <TextInput style={[st.fieldInput, st.fieldMulti]} value={storeDesc} onChangeText={setStoreDesc} placeholder="Tell buyers about your store" placeholderTextColor={C.textMuted} multiline numberOfLines={3} />
           </View>
+          <View style={st.field}>
+            <Text style={st.fieldLabel}>Specialties</Text>
+            <TextInput
+              style={st.fieldInput}
+              value={specialtiesInput}
+              onChangeText={setSpecialtiesInput}
+              placeholder="e.g. Pokémon, Vintage, Graded slabs"
+              placeholderTextColor={C.textMuted}
+              autoCapitalize="words"
+            />
+            <Text style={st.fieldHint}>Comma-separated tags shown on your storefront.</Text>
+          </View>
+        </View>
+
+        {/* ── Social Links ── */}
+        <Text style={st.formLabel}>Social Links</Text>
+        <View style={st.formCard}>
+          <Text style={st.fieldHint}>
+            Shown on your storefront once you're a verified seller.
+          </Text>
+          {SOCIAL_PLATFORMS.map((p) => (
+            <View key={p.key} style={st.socialRow}>
+              <View style={st.socialIcon}>
+                <Feather name={p.icon} size={15} color={C.textSecondary} />
+              </View>
+              <View style={st.socialInputWrap}>
+                <Text style={st.socialLabel}>{p.label}</Text>
+                <TextInput
+                  style={st.socialInput}
+                  value={socialLinks[p.key] ?? ""}
+                  onChangeText={(t) => setSocialLinks((prev) => ({ ...prev, [p.key]: t }))}
+                  placeholder={p.placeholder}
+                  placeholderTextColor={C.textMuted}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                />
+              </View>
+            </View>
+          ))}
         </View>
 
         {/* ── Branding ── */}
@@ -1783,7 +2498,20 @@ export default function VendorHubScreen({ onBack }: { onBack: () => void }) {
                       <Pressable onPress={() => moveDisplayItem(item.id, "down")} style={[st.miniBtn, idx === displayItems.length - 1 && { opacity: 0.3 }]} disabled={idx === displayItems.length - 1} hitSlop={8}>
                         <Feather name="chevron-down" size={14} color={C.textPrimary} />
                       </Pressable>
-                      <Pressable onPress={() => removeDisplayItem(item.id)} style={st.miniBtn} hitSlop={8}>
+                      <Pressable
+                        onPress={() =>
+                          Alert.alert(
+                            "Remove featured item?",
+                            `"${item.listing?.card_name ?? "This item"}" will no longer be featured on your store page.`,
+                            [
+                              { text: "Keep", style: "cancel" },
+                              { text: "Remove", style: "destructive", onPress: () => removeDisplayItem(item.id) },
+                            ],
+                          )
+                        }
+                        style={st.miniBtn}
+                        hitSlop={8}
+                      >
                         <Feather name="x" size={14} color={C.danger} />
                       </Pressable>
                     </View>
@@ -1949,6 +2677,13 @@ const st = StyleSheet.create({
   shipAlertInfo: { flex: 1, gap: 1 },
   shipAlertTitle: { color: C.accent, fontSize: 14, fontWeight: "800" },
   shipAlertSub: { color: C.textSecondary, fontSize: 11, fontWeight: "500" },
+  payoutSkeleton: { backgroundColor: C.surface, borderColor: C.border },
+  skeletonLineWide: {
+    height: 12, width: "60%", borderRadius: 6, backgroundColor: C.elevated, marginBottom: 6,
+  },
+  skeletonLineNarrow: {
+    height: 10, width: "40%", borderRadius: 5, backgroundColor: C.elevated,
+  },
 
   storeCard: {
     backgroundColor: C.surface, borderRadius: 16,
@@ -1983,10 +2718,10 @@ const st = StyleSheet.create({
   sectionLinkText: { color: C.textAccent, fontSize: 12, fontWeight: "600" },
 
   statusGrid: {
-    flexDirection: "row", gap: 10, marginBottom: 24,
+    flexDirection: "row", flexWrap: "wrap", gap: 10, marginBottom: 24,
   },
   statusTile: {
-    flex: 1, alignItems: "center", justifyContent: "center",
+    flexGrow: 1, flexBasis: "30%", alignItems: "center", justifyContent: "center",
     backgroundColor: C.surface, borderRadius: 14,
     borderWidth: 1, borderColor: C.border, paddingVertical: 14, gap: 4,
   },
@@ -2109,6 +2844,44 @@ const st = StyleSheet.create({
   trackingLabel: { color: C.textSecondary, fontSize: 11, fontWeight: "600" },
   trackingNumber: { color: C.textAccent, fontSize: 11, fontWeight: "800", letterSpacing: 0.5 },
 
+  shipAddrRow: {
+    flexDirection: "row",
+    gap: 8,
+    marginHorizontal: 12,
+    marginBottom: 10,
+    padding: 10,
+    borderRadius: 10,
+    backgroundColor: "rgba(44,128,255,0.05)",
+    borderWidth: 1,
+    borderColor: C.border,
+  },
+  shipAddrNameRow: { flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" },
+  shipAddrName: { color: C.textPrimary, fontSize: 12, fontWeight: "800" },
+  shipAddrPhone: { color: C.textSecondary, fontSize: 11, fontWeight: "600" },
+  shipAddrText: { color: C.textSecondary, fontSize: 11, fontWeight: "500", lineHeight: 15, marginTop: 1 },
+  shipCopyBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    alignSelf: "flex-start",
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: C.border,
+    backgroundColor: C.surface,
+  },
+  shipCopyText: { color: C.textAccent, fontSize: 11, fontWeight: "700" },
+
+  waitingRow: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    marginHorizontal: 12, marginBottom: 10,
+    paddingHorizontal: 10, paddingVertical: 8, borderRadius: 10,
+    backgroundColor: "rgba(245,158,11,0.08)",
+    borderWidth: 1, borderColor: "rgba(245,158,11,0.25)",
+  },
+  waitingText: { color: "#F59E0B", fontSize: 12, fontWeight: "700" },
+
   modalOverlay: {
     flex: 1, backgroundColor: "rgba(0,0,0,0.6)",
     alignItems: "center", justifyContent: "center", padding: 24,
@@ -2207,6 +2980,14 @@ const st = StyleSheet.create({
     alignItems: "center", justifyContent: "center",
     backgroundColor: C.surface,
   },
+  prodActionBtnFeature: {
+    flexDirection: "row", alignItems: "center", gap: 5,
+    height: 36, paddingHorizontal: 12, borderRadius: 8,
+    borderWidth: 1, borderColor: C.border,
+    justifyContent: "center", backgroundColor: C.surface,
+  },
+  prodActionBtnFeatureActive: { borderColor: "#F59E0B" },
+  prodActionFeatureText: { color: C.textMuted, fontSize: 12, fontWeight: "700" },
 
   prodBottomBar: {
     position: "absolute", bottom: 0, left: 0, right: 0,
@@ -2345,7 +3126,21 @@ const st = StyleSheet.create({
     backgroundColor: C.elevated, borderRadius: S.radiusSmall, borderWidth: 1, borderColor: C.border,
     paddingHorizontal: 12, paddingVertical: 10, color: C.textPrimary, fontSize: 14, fontWeight: "500",
   },
+  fieldError: { color: C.danger, fontSize: 11, fontWeight: "600", marginTop: 5 },
+  fieldHint: { color: C.textMuted, fontSize: 11, fontWeight: "500", marginTop: 4 },
   fieldMulti: { minHeight: 72, textAlignVertical: "top" as const },
+  socialRow: { flexDirection: "row" as const, alignItems: "center" as const, gap: 10 },
+  socialIcon: {
+    width: 34, height: 34, borderRadius: 17,
+    backgroundColor: C.elevated, borderWidth: 1, borderColor: C.border,
+    alignItems: "center" as const, justifyContent: "center" as const,
+  },
+  socialInputWrap: { flex: 1, gap: 3 },
+  socialLabel: { color: C.textSecondary, fontSize: 11, fontWeight: "700" },
+  socialInput: {
+    backgroundColor: C.elevated, borderRadius: S.radiusSmall, borderWidth: 1, borderColor: C.border,
+    paddingHorizontal: 12, paddingVertical: 8, color: C.textPrimary, fontSize: 13, fontWeight: "500",
+  },
   uploadBtn: {
     flexDirection: "row" as const, alignItems: "center" as const, gap: 10,
     backgroundColor: C.elevated, borderRadius: S.radiusSmall, borderWidth: 1, borderColor: C.border,
@@ -2453,6 +3248,12 @@ const st = StyleSheet.create({
   },
   emptyTitle: { color: C.textPrimary, fontSize: 15, fontWeight: "800" },
   emptySub: { color: C.textSecondary, fontSize: 12, fontWeight: "500", textAlign: "center", paddingHorizontal: 40 },
+  emptyCtaBtn: {
+    flexDirection: "row", alignItems: "center", gap: 6, marginTop: 8,
+    backgroundColor: C.accent, borderRadius: S.radiusSmall,
+    paddingHorizontal: 18, paddingVertical: 11,
+  },
+  emptyCtaText: { color: C.textHero, fontSize: 13, fontWeight: "800" },
 
   toast: {
     position: "absolute", bottom: 40, left: 20, right: 20,
@@ -2461,4 +3262,189 @@ const st = StyleSheet.create({
     flexDirection: "row", alignItems: "center", gap: 8,
   },
   toastText: { color: "#fff", fontSize: 13, fontWeight: "700" },
+
+  // ── Earnings ──
+  earningsCard: {
+    backgroundColor: C.surface, borderRadius: 14,
+    borderWidth: 1, borderColor: C.border,
+    padding: 16, marginTop: 8, gap: 12,
+  },
+  earningsTopRow: { flexDirection: "row" },
+  earningsPending: { flex: 1, gap: 2 },
+  earningsLabel: { color: C.textSecondary, fontSize: 12, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.4 },
+  earningsBig: { color: C.textPrimary, fontSize: 28, fontWeight: "900" },
+  earningsHint: { color: C.textSecondary, fontSize: 11, fontWeight: "500" },
+  earningsBottomRow: { flexDirection: "row", alignItems: "center" },
+  earningsCell: { flex: 1, gap: 2 },
+  earningsCellDivider: { width: 1, alignSelf: "stretch", backgroundColor: C.border, marginHorizontal: 8 },
+  earningsCellLabel: { color: C.textSecondary, fontSize: 12, fontWeight: "600" },
+  earningsCellValue: { fontSize: 18, fontWeight: "800" },
+  earningsFootnote: { color: C.textSecondary, fontSize: 11, lineHeight: 16 },
+
+  // ── Payouts ──
+  payoutHero: { alignItems: "center", paddingVertical: 20, paddingHorizontal: 12, gap: 10 },
+  payoutHeroIcon: {
+    width: 64, height: 64, borderRadius: 32,
+    alignItems: "center", justifyContent: "center",
+  },
+  payoutHeroTitle: { color: C.textPrimary, fontSize: 20, fontWeight: "800", textAlign: "center" },
+  payoutHeroSub: {
+    color: C.textSecondary, fontSize: 13, lineHeight: 19,
+    textAlign: "center", paddingHorizontal: 8,
+  },
+  payoutStatusCard: {
+    backgroundColor: C.surface, borderRadius: 14,
+    borderWidth: 1, borderColor: C.border,
+    padding: 16, marginTop: 8, gap: 12,
+  },
+  payoutStatusRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  payoutStatusLabel: { color: C.textPrimary, fontSize: 14, fontWeight: "700" },
+  payoutCheckLabel: { color: C.textSecondary, fontSize: 13, fontWeight: "600" },
+  payoutBadge: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    paddingVertical: 4, paddingHorizontal: 10, borderRadius: 999,
+  },
+  payoutDot: { width: 7, height: 7, borderRadius: 4 },
+  payoutBadgeText: { fontSize: 12, fontWeight: "800" },
+  payoutDivider: { height: 1, backgroundColor: C.border },
+  payoutBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8,
+    backgroundColor: C.accent, borderRadius: 14, paddingVertical: 15, marginTop: 18,
+  },
+  payoutBtnText: { color: "#fff", fontSize: 15, fontWeight: "800" },
+  withdrawHint: {
+    color: C.textSecondary, fontSize: 11, fontWeight: "500",
+    textAlign: "center", lineHeight: 15, marginTop: 8, paddingHorizontal: 12,
+  },
+  payoutFootnote: {
+    color: C.textSecondary, fontSize: 11, textAlign: "center",
+    marginTop: 12, paddingHorizontal: 16, lineHeight: 16,
+  },
+
+  // ── Manual payouts ──
+  payoutBalanceCard: {
+    backgroundColor: C.accentGlow, borderRadius: 16,
+    borderWidth: 1, borderColor: C.borderStream, padding: 18, gap: 6,
+  },
+  payoutBalanceValue: { color: C.textPrimary, fontSize: 34, fontWeight: "900", letterSpacing: -1 },
+  payoutStatRow: {
+    flexDirection: "row", alignItems: "center",
+    marginTop: 10, marginBottom: 4,
+  },
+  payoutStat: { flex: 1, gap: 2, alignItems: "center" },
+  payoutStatSep: { width: 1, alignSelf: "stretch", backgroundColor: C.border, marginVertical: 2 },
+  payoutStatValue: { color: C.textPrimary, fontSize: 14, fontWeight: "800" },
+  payoutStatLabel: { color: C.textSecondary, fontSize: 11, fontWeight: "600" },
+
+  pendingCard: {
+    flexDirection: "row", alignItems: "center", gap: 12,
+    backgroundColor: C.surface, borderRadius: 14,
+    borderWidth: 1, borderColor: "rgba(245,158,11,0.35)",
+    padding: 14, marginTop: 14,
+  },
+  pendingIcon: {
+    width: 36, height: 36, borderRadius: 18,
+    backgroundColor: "rgba(245,158,11,0.12)",
+    alignItems: "center", justifyContent: "center",
+  },
+  pendingTitle: { color: C.textPrimary, fontSize: 14, fontWeight: "800" },
+  pendingSub: { color: C.textSecondary, fontSize: 12, fontWeight: "500", marginTop: 1 },
+  pendingCancel: {
+    paddingHorizontal: 12, paddingVertical: 7, borderRadius: 8,
+    borderWidth: 1, borderColor: C.border,
+  },
+  pendingCancelText: { color: C.textSecondary, fontSize: 12, fontWeight: "700" },
+
+  payoutSectionHead: {
+    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
+    marginTop: 22, marginBottom: 10,
+  },
+  payoutSectionTitle: { color: C.textPrimary, fontSize: 15, fontWeight: "800" },
+  payoutEditLink: { color: C.link, fontSize: 13, fontWeight: "700" },
+
+  bankCard: {
+    flexDirection: "row", alignItems: "center", gap: 12,
+    backgroundColor: C.surface, borderRadius: 14,
+    borderWidth: 1, borderColor: C.border, padding: 14,
+  },
+  bankIcon: {
+    width: 38, height: 38, borderRadius: 12,
+    backgroundColor: C.accentGlow, borderWidth: 1, borderColor: C.borderStream,
+    alignItems: "center", justifyContent: "center",
+  },
+  bankHolder: { color: C.textPrimary, fontSize: 14, fontWeight: "800" },
+  bankLine: { color: C.textSecondary, fontSize: 12, fontWeight: "600", marginTop: 2 },
+  bankSub: { color: C.textMuted, fontSize: 11, fontWeight: "500", marginTop: 1 },
+
+  bankForm: {
+    backgroundColor: C.surface, borderRadius: 14,
+    borderWidth: 1, borderColor: C.border, padding: 14, gap: 6,
+  },
+  payoutInputLabel: { color: C.textSecondary, fontSize: 12, fontWeight: "700", marginTop: 6 },
+  payoutInput: {
+    backgroundColor: C.elevated, borderRadius: 10,
+    borderWidth: 1, borderColor: C.border,
+    paddingHorizontal: 12, paddingVertical: 11,
+    color: C.textPrimary, fontSize: 14, fontWeight: "600",
+  },
+  bankSelect: {
+    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
+    backgroundColor: C.elevated, borderRadius: 10,
+    borderWidth: 1, borderColor: C.border,
+    paddingHorizontal: 12, paddingVertical: 11,
+  },
+  bankSelectText: { color: C.textPrimary, fontSize: 14, fontWeight: "600", flex: 1 },
+  bankDropdown: {
+    marginTop: 6, backgroundColor: C.elevated, borderRadius: 10,
+    borderWidth: 1, borderColor: C.border, overflow: "hidden",
+  },
+  bankOption: {
+    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
+    paddingHorizontal: 12, paddingVertical: 12,
+    borderBottomWidth: 1, borderBottomColor: C.border,
+  },
+  bankOptionActive: { backgroundColor: C.accentGlow },
+  bankOptionText: { color: C.textPrimary, fontSize: 14, fontWeight: "600" },
+  bankFormBtnRow: { flexDirection: "row", gap: 10, marginTop: 12 },
+  bankCancelBtn: {
+    paddingHorizontal: 16, paddingVertical: 13, borderRadius: 10,
+    borderWidth: 1, borderColor: C.border, alignItems: "center", justifyContent: "center",
+  },
+  bankCancelText: { color: C.textSecondary, fontSize: 14, fontWeight: "700" },
+  bankSaveBtn: {
+    flex: 1, backgroundColor: C.accent, borderRadius: 10,
+    paddingVertical: 13, alignItems: "center", justifyContent: "center",
+  },
+  bankSaveText: { color: "#fff", fontSize: 14, fontWeight: "800" },
+
+  historyCard: {
+    backgroundColor: C.surface, borderRadius: 14,
+    borderWidth: 1, borderColor: C.border, overflow: "hidden",
+  },
+  historyDivider: { height: 1, backgroundColor: C.border, marginLeft: 60 },
+  historyRow: { flexDirection: "row", alignItems: "center", gap: 12, padding: 14 },
+  historyIcon: { width: 34, height: 34, borderRadius: 11, alignItems: "center", justifyContent: "center" },
+  historyLabel: { color: C.textPrimary, fontSize: 14, fontWeight: "800" },
+  historyDate: { color: C.textMuted, fontSize: 11, fontWeight: "500", marginTop: 1 },
+  historyNote: { color: C.danger, fontSize: 11, fontWeight: "600", marginTop: 2 },
+
+  historyEmptyCard: {
+    backgroundColor: C.surface, borderRadius: 14,
+    borderWidth: 1, borderColor: C.border,
+    alignItems: "center", justifyContent: "center",
+    paddingVertical: 24, gap: 6,
+  },
+  historyEmptyText: { color: C.textSecondary, fontSize: 13, fontWeight: "700" },
+  historyEmptySub: { color: C.textMuted, fontSize: 11, fontWeight: "500" },
+
+  payoutStateWrap: { alignItems: "center", justifyContent: "center", paddingVertical: 64, gap: 12 },
+  payoutStateText: { color: C.textSecondary, fontSize: 13, fontWeight: "600", textAlign: "center" },
+  payoutRetryBtn: {
+    marginTop: 4, paddingHorizontal: 18, paddingVertical: 9,
+    borderRadius: 10, borderWidth: 1, borderColor: C.border, backgroundColor: C.elevated,
+  },
+  payoutRetryText: { color: C.textPrimary, fontSize: 13, fontWeight: "700" },
+
+  payoutNoteRow: { flexDirection: "row", alignItems: "flex-start", gap: 6, marginTop: 18 },
+  payoutNoteText: { flex: 1, color: C.textMuted, fontSize: 11, fontWeight: "500", lineHeight: 15 },
 });

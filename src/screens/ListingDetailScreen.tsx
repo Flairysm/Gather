@@ -328,8 +328,17 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
             },
           ]}
         >
-          <Ionicons name="checkmark-circle" size={18} color={C.textHero} />
-          <Text style={ld.cartToastText}>Added to cart</Text>
+          <Pressable
+            style={{ flexDirection: "row", alignItems: "center", gap: 8 }}
+            onPress={() => {
+              setShowCartToast(false);
+              push({ type: "CART" });
+            }}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Ionicons name="checkmark-circle" size={18} color={C.textHero} />
+            <Text style={ld.cartToastText}>Added to cart · View cart</Text>
+          </Pressable>
         </Animated.View>
       )}
 
@@ -451,17 +460,20 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
                 <Text style={ld.qtyCancelText}>Cancel</Text>
               </Pressable>
               <Pressable
-                style={ld.qtyConfirmBtn}
+                style={[ld.qtyConfirmBtn, item.quantity <= 0 && { opacity: 0.45 }]}
+                disabled={item.quantity <= 0}
                 onPress={() => {
+                  if (item.quantity <= 0) return;
+                  const safeQty = Math.min(qtyToAdd, item.quantity);
                   closeSheet(() => {
-                    addItem(item, qtyToAdd);
+                    addItem(item, safeQty);
                     triggerCartToast();
                   });
                 }}
               >
                 <Ionicons name="cart" size={16} color={C.textHero} />
                 <Text style={ld.qtyConfirmText}>
-                  Add to Cart
+                  {item.quantity > 0 ? "Add to Cart" : "Out of Stock"}
                 </Text>
               </Pressable>
             </View>
@@ -479,7 +491,11 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
           <Pressable style={ld.headerIconBtn} onPress={handleShare}>
             <Feather name="share" size={16} color={C.textSearch} />
           </Pressable>
-          <Pressable style={ld.headerIconBtn} onPress={handleToggleSave}>
+          <Pressable
+            style={[ld.headerIconBtn, togglingSave && { opacity: 0.5 }]}
+            onPress={handleToggleSave}
+            disabled={togglingSave}
+          >
             <Ionicons name={isSaved ? "bookmark" : "bookmark-outline"} size={16} color={isSaved ? C.accent : C.textSearch} />
           </Pressable>
         </View>
@@ -617,6 +633,13 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
             >
               <Text style={ld.viewProfileText}>View Vendor</Text>
             </Pressable>
+          ) : item.seller_id ? (
+            <Pressable
+              style={ld.viewProfileBtn}
+              onPress={() => push({ type: "USER_PROFILE", userId: item.seller_id })}
+            >
+              <Text style={ld.viewProfileText}>View Profile</Text>
+            </Pressable>
           ) : null}
         </View>
 
@@ -708,7 +731,7 @@ export default function ListingDetailScreen({ listingId, onBack }: Props) {
                 push({
                   type: "CHAT",
                   sellerId: item.seller_id,
-                  listingId: "",
+                  listingId: item.id,
                   topic: item.card_name,
                 })
               }

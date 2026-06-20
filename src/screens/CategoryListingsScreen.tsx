@@ -5,12 +5,14 @@ import {
   FlatList,
   Image,
   Pressable,
+  RefreshControl,
   SafeAreaView,
   ScrollView,
   Text,
   TextInput,
   View,
 } from "react-native";
+import { StatusBar } from "expo-status-bar";
 import { Feather, Ionicons } from "@expo/vector-icons";
 import { C, S } from "../theme";
 import { supabase } from "../lib/supabase";
@@ -59,14 +61,6 @@ function normalizeImages(value: unknown): string[] {
   return [];
 }
 
-const CATEGORY_META: Record<string, { icon: React.ComponentProps<typeof Ionicons>["name"]; color: string }> = {
-  "Pokémon": { icon: "flash", color: "#F59E0B" },
-  MTG: { icon: "sparkles", color: "#8B5CF6" },
-  Sports: { icon: "football", color: "#22C55E" },
-  YGO: { icon: "eye", color: "#3B82F6" },
-  All: { icon: "layers-outline", color: C.accent },
-};
-
 export default function CategoryListingsScreen({
   category,
   onBack,
@@ -78,11 +72,12 @@ export default function CategoryListingsScreen({
   const [listings, setListings] = useState<ListingRow[]>([]);
   const [vendorStoreNames, setVendorStoreNames] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("newest");
 
-  const meta = CATEGORY_META[category] ?? { icon: "pricetag-outline" as const, color: C.accent };
+  const meta = { color: C.accent };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -145,6 +140,12 @@ export default function CategoryListingsScreen({
     load();
   }, [load]);
 
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await load();
+    setRefreshing(false);
+  }, [load]);
+
   const filtered = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     const searched = !q
@@ -191,6 +192,11 @@ export default function CategoryListingsScreen({
             <Text style={st.gradeText}>{item.grade}</Text>
           </View>
         )}
+        {item.quantity <= 0 && (
+          <View style={st.soldOutOverlay}>
+            <Text style={st.soldOutText}>Sold out</Text>
+          </View>
+        )}
       </View>
       <Text style={st.cardEdition} numberOfLines={1}>
         {item.edition ?? item.category}
@@ -225,7 +231,6 @@ export default function CategoryListingsScreen({
       {/* ── Category Badge ── */}
       <View style={st.catBadgeRow}>
         <View style={[st.catBadge, { backgroundColor: meta.color + "18", borderColor: meta.color + "44" }]}>
-          <Ionicons name={meta.icon} size={14} color={meta.color} />
           <Text style={[st.catBadgeText, { color: meta.color }]}>
             {category === "All" ? "All Categories" : category}
           </Text>
@@ -264,8 +269,8 @@ export default function CategoryListingsScreen({
       >
         {([
           { key: "newest" as SortKey, label: "Newest", icon: "sparkles-outline" as const },
-          { key: "price_asc" as SortKey, label: "Price ↑", icon: "trending-up-outline" as const },
-          { key: "price_desc" as SortKey, label: "Price ↓", icon: "trending-down-outline" as const },
+          { key: "price_asc" as SortKey, label: "Price: Low to High", icon: "arrow-up-outline" as const },
+          { key: "price_desc" as SortKey, label: "Price: High to Low", icon: "arrow-down-outline" as const },
           { key: "name_asc" as SortKey, label: "A–Z", icon: "text-outline" as const },
         ]).map((s) => (
           <Pressable
@@ -300,13 +305,13 @@ export default function CategoryListingsScreen({
 
   return (
     <SafeAreaView style={st.safe}>
+      <StatusBar style="light" />
       {/* Header */}
       <View style={st.header}>
         <Pressable onPress={onBack} style={st.backBtn}>
           <Feather name="arrow-left" size={20} color={C.textPrimary} />
         </Pressable>
         <View style={st.headerCenter}>
-          <Ionicons name={meta.icon} size={16} color={meta.color} />
           <Text style={st.headerTitle} numberOfLines={1}>
             {category === "All" ? "All Listings" : category}
           </Text>
@@ -335,6 +340,13 @@ export default function CategoryListingsScreen({
           windowSize={5}
           removeClippedSubviews
           ListHeaderComponent={ListHeader}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor={meta.color}
+            />
+          }
           ListEmptyComponent={
             <View style={st.emptyWrap}>
               <Ionicons
@@ -529,6 +541,24 @@ const st = StyleSheet.create({
     color: "#fff",
     fontSize: 9,
     fontWeight: "700",
+  },
+  soldOutOverlay: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(4,7,13,0.55)",
+    borderRadius: S.radiusCardInner,
+  },
+  soldOutText: {
+    color: "#fff",
+    fontSize: 12,
+    fontWeight: "900",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
   },
   cardEdition: {
     color: C.textMuted,

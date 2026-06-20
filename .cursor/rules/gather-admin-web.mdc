@@ -1,0 +1,11 @@
+---
+description: Next.js 16 admin dashboard — admin-web
+globs: admin-web/**/*
+alwaysApply: false
+---
+
+# admin-web
+
+- Read **`admin-web/AGENTS.md`** before changing App Router, server components, or middleware. Next 16 may differ from older training data.
+- Keep **admin API** and **Supabase admin** usage aligned with `admin-web/src/app/api/` and `admin-web/src/lib/` patterns.
+- Use **Tailwind v4** conventions already present in the admin app; follow existing layout and dashboard structure.

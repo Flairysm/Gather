@@ -11,27 +11,19 @@ import {
   TextInput,
   View,
 } from "react-native";
-import { Feather, Ionicons } from "@expo/vector-icons";
+import { StatusBar } from "expo-status-bar";
+import { Ionicons } from "@expo/vector-icons";
 
 import { C, S } from "../theme";
 import { supabase } from "../lib/supabase";
+import { requireNetwork } from "../lib/network";
+import { useAppNavigation } from "../navigation/NavigationContext";
 import type { Listing, WantedPost } from "../data/market";
 import Shimmer, { ShimmerGroup, FadeIn } from "../components/Shimmer";
 import ErrorState from "../components/ErrorState";
+import ScreenHeader from "../components/ScreenHeader";
 
 type Props = { onBack: () => void };
-
-type EditableListing = {
-  id: string;
-  card_name: string;
-  edition: string | null;
-  grade: string | null;
-  price: number;
-  category: string;
-  description: string | null;
-  status: string;
-  images: string[];
-};
 
 type EditableWanted = {
   id: string;
@@ -44,11 +36,28 @@ type EditableWanted = {
   status: string;
 };
 
-const STATUS_OPTIONS = ["active", "sold", "removed"] as const;
-const WANTED_STATUS_OPTIONS = ["active", "fulfilled", "removed"] as const;
+const WANTED_STATUS_OPTIONS: { key: string; label: string }[] = [
+  { key: "active", label: "Active" },
+  { key: "fulfilled", label: "Fulfilled" },
+  { key: "removed", label: "Removed" },
+];
 type TabId = "listings" | "wtb";
 
+function formatStatus(status: string) {
+  const n = (status || "").toLowerCase();
+  const map: Record<string, string> = {
+    active: "Active",
+    sold: "Sold",
+    removed: "Removed",
+    fulfilled: "Fulfilled",
+    paused: "Paused",
+    draft: "Draft",
+  };
+  return map[n] ?? (n ? n.charAt(0).toUpperCase() + n.slice(1) : "Unknown");
+}
+
 export default function MyListingsScreen({ onBack }: Props) {
+  const { push } = useAppNavigation();
   const [tab, setTab] = useState<TabId>("listings");
   const [rows, setRows] = useState<Listing[]>([]);
   const [wantedRows, setWantedRows] = useState<WantedPost[]>([]);
@@ -56,7 +65,6 @@ export default function MyListingsScreen({ onBack }: Props) {
   const [loadError, setLoadError] = useState(false);
   const [saving, setSaving] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
-  const [editing, setEditing] = useState<EditableListing | null>(null);
   const [editingWanted, setEditingWanted] = useState<EditableWanted | null>(null);
   const [soldCounts, setSoldCounts] = useState<Record<string, number>>({});
 
@@ -180,45 +188,9 @@ export default function MyListingsScreen({ onBack }: Props) {
     ]);
   }
 
-  async function handleSaveEdit() {
-    if (!editing || !currentUserId) return;
-    setSaving(true);
-    const nextPrice = parseFloat(
-      String(editing.price).replace(/(RM|\$|,)/gi, ""),
-    );
-    if (isNaN(nextPrice) || nextPrice <= 0) {
-      setSaving(false);
-      Alert.alert("Error", "Price must be a valid number.");
-      return;
-    }
-
-    const { error } = await supabase
-      .from("listings")
-      .update({
-        card_name: editing.card_name.trim(),
-        edition: editing.edition?.trim() || null,
-        grade: editing.grade?.trim() || null,
-        price: nextPrice,
-        category: editing.category.trim(),
-        description: editing.description?.trim() || null,
-        status: editing.status,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", editing.id)
-      .eq("seller_id", currentUserId);
-
-    setSaving(false);
-    if (error) {
-      Alert.alert("Error", error.message);
-      return;
-    }
-
-    setEditing(null);
-    await load();
-  }
-
   async function handleSaveWantedEdit() {
     if (!editingWanted || !currentUserId) return;
+    if (!(await requireNetwork())) return;
     setSaving(true);
     const nextPrice = parseFloat(
       String(editingWanted.offer_price).replace(/(RM|\$|,)/gi, ""),
@@ -256,15 +228,16 @@ export default function MyListingsScreen({ onBack }: Props) {
 
   return (
     <SafeAreaView style={st.safe}>
-      <View style={st.header}>
-        <Pressable onPress={onBack} style={st.backBtn}>
-          <Feather name="arrow-left" size={20} color={C.textPrimary} />
-        </Pressable>
-        <Text style={st.title}>My Listings</Text>
-        <Pressable onPress={() => load()} style={st.refreshBtn}>
-          <Ionicons name="refresh" size={18} color={C.textPrimary} />
-        </Pressable>
-      </View>
+      <StatusBar style="light" />
+      <ScreenHeader
+        title="My Listings"
+        onBack={onBack}
+        right={
+          <Pressable onPress={() => load()} style={st.refreshBtn} hitSlop={8}>
+            <Ionicons name="refresh" size={18} color={C.textPrimary} />
+          </Pressable>
+        }
+      />
       <View style={st.segmentRow}>
         <Pressable
           style={[st.segmentTab, tab === "listings" && st.segmentTabActive]}
@@ -315,9 +288,20 @@ export default function MyListingsScreen({ onBack }: Props) {
           </Text>
           <Text style={st.emptySub}>
             {tab === "listings"
-              ? "Create your first listing from Market."
-              : "Create your first wanted post from Market."}
+              ? "Create your first listing to start selling."
+              : "Create a wanted post to find cards you're after."}
           </Text>
+          <Pressable
+            style={st.emptyCtaBtn}
+            onPress={() =>
+              push(tab === "listings" ? { type: "CREATE_LISTING" } : { type: "CREATE_WANTED" })
+            }
+          >
+            <Ionicons name="add" size={16} color={C.textHero} />
+            <Text style={st.emptyCtaText}>
+              {tab === "listings" ? "Create Listing" : "Create WTB Post"}
+            </Text>
+          </Pressable>
         </View>
       ) : (
         <FadeIn>
@@ -369,19 +353,7 @@ export default function MyListingsScreen({ onBack }: Props) {
                     </Pressable>
                     <Pressable
                       style={[st.prodActionBtn, st.prodActionBtnEdit]}
-                      onPress={() =>
-                        setEditing({
-                          id: item.id,
-                          card_name: item.card_name,
-                          edition: item.edition,
-                          grade: item.grade,
-                          price: item.price,
-                          category: item.category,
-                          description: item.description,
-                          status: item.status,
-                          images: item.images ?? [],
-                        })
-                      }
+                      onPress={() => push({ type: "EDIT_LISTING", listingId: item.id })}
                     >
                       <Text style={st.prodActionEditText}>Edit</Text>
                     </Pressable>
@@ -416,7 +388,7 @@ export default function MyListingsScreen({ onBack }: Props) {
                   </View>
                   <View style={st.prodStat}>
                     <Ionicons name="checkmark-circle-outline" size={13} color={C.textMuted} />
-                    <Text style={st.prodStatText}>{item.status}</Text>
+                    <Text style={st.prodStatText}>{formatStatus(item.status)}</Text>
                   </View>
                 </View>
                 <View style={st.prodActionsRow}>
@@ -448,87 +420,6 @@ export default function MyListingsScreen({ onBack }: Props) {
         </FadeIn>
       )}
 
-      {editing && (
-        <View style={st.modalScrim}>
-          <View style={st.modal}>
-            <Text style={st.modalTitle}>Edit Listing</Text>
-            <TextInput
-              style={st.input}
-              value={editing.card_name}
-              onChangeText={(v) => setEditing({ ...editing, card_name: v })}
-              placeholder="Card name"
-              placeholderTextColor={C.textMuted}
-            />
-            <TextInput
-              style={st.input}
-              value={editing.edition ?? ""}
-              onChangeText={(v) => setEditing({ ...editing, edition: v })}
-              placeholder="Edition"
-              placeholderTextColor={C.textMuted}
-            />
-            <TextInput
-              style={st.input}
-              value={editing.grade ?? ""}
-              onChangeText={(v) => setEditing({ ...editing, grade: v })}
-              placeholder="Grade"
-              placeholderTextColor={C.textMuted}
-            />
-            <TextInput
-              style={st.input}
-              value={String(editing.price)}
-              onChangeText={(v) => setEditing({ ...editing, price: Number(v) || 0 })}
-              placeholder="Price"
-              placeholderTextColor={C.textMuted}
-              keyboardType="numeric"
-            />
-            <TextInput
-              style={st.input}
-              value={editing.category}
-              onChangeText={(v) => setEditing({ ...editing, category: v })}
-              placeholder="Category"
-              placeholderTextColor={C.textMuted}
-            />
-            <TextInput
-              style={[st.input, st.inputMulti]}
-              value={editing.description ?? ""}
-              onChangeText={(v) => setEditing({ ...editing, description: v })}
-              placeholder="Description"
-              placeholderTextColor={C.textMuted}
-              multiline
-            />
-            <View style={st.statusRow}>
-              {STATUS_OPTIONS.map((s) => (
-                <Pressable
-                  key={s}
-                  onPress={() => setEditing({ ...editing, status: s })}
-                  style={[st.statusOption, editing.status === s && st.statusOptionActive]}
-                >
-                  <Text
-                    style={[
-                      st.statusOptionText,
-                      editing.status === s && st.statusOptionTextActive,
-                    ]}
-                  >
-                    {s}
-                  </Text>
-                </Pressable>
-              ))}
-            </View>
-            <View style={st.modalActions}>
-              <Pressable style={st.cancelBtn} onPress={() => setEditing(null)}>
-                <Text style={st.cancelText}>Cancel</Text>
-              </Pressable>
-              <Pressable style={st.saveBtn} onPress={handleSaveEdit} disabled={saving}>
-                {saving ? (
-                  <ActivityIndicator size="small" color={C.textHero} />
-                ) : (
-                  <Text style={st.saveText}>Save</Text>
-                )}
-              </Pressable>
-            </View>
-          </View>
-        </View>
-      )}
       {editingWanted && (
         <View style={st.modalScrim}>
           <View style={st.modal}>
@@ -582,17 +473,17 @@ export default function MyListingsScreen({ onBack }: Props) {
             <View style={st.statusRow}>
               {WANTED_STATUS_OPTIONS.map((s) => (
                 <Pressable
-                  key={s}
-                  onPress={() => setEditingWanted({ ...editingWanted, status: s })}
-                  style={[st.statusOption, editingWanted.status === s && st.statusOptionActive]}
+                  key={s.key}
+                  onPress={() => setEditingWanted({ ...editingWanted, status: s.key })}
+                  style={[st.statusOption, editingWanted.status === s.key && st.statusOptionActive]}
                 >
                   <Text
                     style={[
                       st.statusOptionText,
-                      editingWanted.status === s && st.statusOptionTextActive,
+                      editingWanted.status === s.key && st.statusOptionTextActive,
                     ]}
                   >
-                    {s}
+                    {s.label}
                   </Text>
                 </Pressable>
               ))}
@@ -618,25 +509,6 @@ export default function MyListingsScreen({ onBack }: Props) {
 
 const st = StyleSheet.create({
   safe: { flex: 1, backgroundColor: C.bg },
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: S.screenPadding,
-    paddingVertical: S.md,
-    borderBottomWidth: 1,
-    borderBottomColor: C.border,
-  },
-  backBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: C.elevated,
-    borderWidth: 1,
-    borderColor: C.border,
-    alignItems: "center",
-    justifyContent: "center",
-  },
   refreshBtn: {
     width: 36,
     height: 36,
@@ -647,7 +519,6 @@ const st = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  title: { color: C.textPrimary, fontSize: 16, fontWeight: "800" },
   segmentRow: {
     flexDirection: "row",
     marginHorizontal: S.screenPadding,
@@ -676,9 +547,20 @@ const st = StyleSheet.create({
   segmentTextActive: {
     color: C.textHero,
   },
-  centerWrap: { flex: 1, alignItems: "center", justifyContent: "center", gap: 8 },
+  centerWrap: { flex: 1, alignItems: "center", justifyContent: "center", gap: 8, paddingHorizontal: 40 },
   emptyTitle: { color: C.textPrimary, fontSize: 15, fontWeight: "800" },
-  emptySub: { color: C.textSecondary, fontSize: 12 },
+  emptySub: { color: C.textSecondary, fontSize: 12, textAlign: "center" },
+  emptyCtaBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginTop: 8,
+    backgroundColor: C.accent,
+    borderRadius: S.radiusSmall,
+    paddingHorizontal: 18,
+    paddingVertical: 11,
+  },
+  emptyCtaText: { color: C.textHero, fontSize: 13, fontWeight: "800" },
   list: { padding: S.screenPadding, gap: S.md, paddingBottom: 80 },
   row: {
     flexDirection: "row",

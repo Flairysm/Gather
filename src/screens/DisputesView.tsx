@@ -4,7 +4,9 @@ import {
   Alert,
   FlatList,
   Image,
+  KeyboardAvoidingView,
   Modal,
+  Platform,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -13,9 +15,13 @@ import {
   TextInput,
   View,
 } from "react-native";
+import { StatusBar } from "expo-status-bar";
 import { Feather, Ionicons } from "@expo/vector-icons";
 import { C, S } from "../theme";
 import { supabase } from "../lib/supabase";
+import ScreenHeader from "../components/ScreenHeader";
+import ErrorState from "../components/ErrorState";
+import EmptyState from "../components/EmptyState";
 
 type Dispute = {
   id: string;
@@ -53,18 +59,22 @@ export default function DisputesView({ userId, onBack }: Props) {
   const [replyModal, setReplyModal] = useState<Dispute | null>(null);
   const [replyText, setReplyText] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [viewerImage, setViewerImage] = useState<string | null>(null);
 
   const [loadError, setLoadError] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     setLoadError(false);
+    // order_items has no FK to `listings`, so the listing can't be embedded
+    // through the order_item. Fetch the order_item's listing_id, then resolve
+    // listing details from `listings` (market) / `auction_items` (auction).
     const { data, error } = await supabase
       .from("disputes")
       .select(`
         *,
         buyer:profiles!buyer_id(username, display_name),
-        order_item:order_items!order_item_id(listing:listings!listing_id(card_name, images))
+        order_item:order_items!order_item_id(listing_id)
       `)
       .eq("seller_id", userId)
       .order("created_at", { ascending: false });
@@ -76,12 +86,48 @@ export default function DisputesView({ userId, onBack }: Props) {
       return;
     }
 
-    const mapped: Dispute[] = (data ?? []).map((d: any) => ({
+    const base = (data ?? []).map((d: any) => ({
       ...d,
       buyer: Array.isArray(d.buyer) ? d.buyer[0] : d.buyer,
-      listing: d.order_item
-        ? Array.isArray(d.order_item) ? d.order_item[0]?.listing : d.order_item?.listing
-        : null,
+      order_item: Array.isArray(d.order_item) ? d.order_item[0] : d.order_item,
+    }));
+
+    const normImages = (v: unknown): string[] => {
+      if (Array.isArray(v)) return v.filter((x): x is string => typeof x === "string" && !!x);
+      if (typeof v === "string") {
+        try {
+          const p = JSON.parse(v);
+          if (Array.isArray(p)) return p.filter((x): x is string => typeof x === "string" && !!x);
+        } catch { /* no-op */ }
+      }
+      return [];
+    };
+
+    const listingIds = [...new Set(base.map((d: any) => d.order_item?.listing_id).filter(Boolean))] as string[];
+    const listingMap: Record<string, { card_name: string; images: string[] }> = {};
+    if (listingIds.length > 0) {
+      const { data: listingRows } = await supabase
+        .from("listings")
+        .select("id, card_name, images")
+        .in("id", listingIds);
+      for (const l of listingRows ?? []) {
+        listingMap[(l as any).id] = { card_name: (l as any).card_name, images: normImages((l as any).images) };
+      }
+      const missing = listingIds.filter((id) => !listingMap[id]);
+      if (missing.length > 0) {
+        const { data: aiRows } = await supabase
+          .from("auction_items")
+          .select("id, card_name, images")
+          .in("id", missing);
+        for (const a of aiRows ?? []) {
+          listingMap[(a as any).id] = { card_name: (a as any).card_name, images: normImages((a as any).images) };
+        }
+      }
+    }
+
+    const mapped: Dispute[] = base.map((d: any) => ({
+      ...d,
+      listing: d.order_item?.listing_id ? listingMap[d.order_item.listing_id] ?? null : null,
     }));
     setDisputes(mapped);
     setLoading(false);
@@ -95,7 +141,7 @@ export default function DisputesView({ userId, onBack }: Props) {
     return d.status === "resolved" || d.status === "rejected";
   });
 
-  async function handleReply() {
+  async function submitReply() {
     if (!replyModal || !replyText.trim()) return;
     setSubmitting(true);
     const { error } = await supabase
@@ -117,6 +163,21 @@ export default function DisputesView({ userId, onBack }: Props) {
     setSubmitting(false);
   }
 
+  function handleReply() {
+    if (!replyModal || !replyText.trim()) return;
+    const hadPrevious = !!replyModal.resolution_notes?.trim();
+    Alert.alert(
+      "Submit response?",
+      hadPrevious
+        ? "This will replace your previous response and send it to the admin team for review."
+        : "Your response will be sent to the admin team for review.",
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Submit", onPress: submitReply },
+      ],
+    );
+  }
+
   function formatDate(d: string) {
     return new Date(d).toLocaleDateString("en-MY", {
       day: "numeric",
@@ -127,15 +188,22 @@ export default function DisputesView({ userId, onBack }: Props) {
 
   return (
     <SafeAreaView style={st.safe}>
-      <View style={st.header}>
-        <Pressable style={st.backBtn} onPress={onBack}>
-          <Feather name="arrow-left" size={20} color={C.textPrimary} />
-        </Pressable>
-        <Text style={st.headerTitle}>Disputes</Text>
-        <Pressable style={st.backBtn} onPress={load}>
-          <Ionicons name="refresh" size={16} color={C.textPrimary} />
-        </Pressable>
-      </View>
+      <StatusBar style="light" />
+      <ScreenHeader
+        title="Disputes"
+        onBack={onBack}
+        right={
+          <Pressable
+            style={st.iconBtn}
+            onPress={load}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel="Refresh"
+          >
+            <Ionicons name="refresh" size={16} color={C.textPrimary} />
+          </Pressable>
+        }
+      />
 
       <View style={st.filterRow}>
         {(["all", "open", "resolved"] as const).map((f) => (
@@ -145,7 +213,7 @@ export default function DisputesView({ userId, onBack }: Props) {
             onPress={() => setFilter(f)}
           >
             <Text style={[st.filterText, filter === f && st.filterTextActive]}>
-              {f === "all" ? "All" : f === "open" ? "Open" : "Resolved"}
+              {f === "all" ? "All" : f === "open" ? "Open" : "Closed"}
             </Text>
           </Pressable>
         ))}
@@ -155,14 +223,19 @@ export default function DisputesView({ userId, onBack }: Props) {
         <View style={st.centerWrap}>
           <ActivityIndicator size="large" color={C.accent} />
         </View>
+      ) : loadError ? (
+        <ErrorState
+          message="Couldn't load disputes. Check your connection and try again."
+          onRetry={load}
+        />
       ) : filtered.length === 0 ? (
-        <View style={st.centerWrap}>
-          <Ionicons name="shield-checkmark-outline" size={40} color={C.textMuted} />
-          <Text style={st.emptyTitle}>No disputes</Text>
-          <Text style={st.emptySub}>
-            {filter === "open" ? "No open disputes right now." : "No disputes found."}
-          </Text>
-        </View>
+        <EmptyState
+          icon="shield-checkmark-outline"
+          title="No disputes"
+          message={
+            filter === "open" ? "No open disputes right now." : "No disputes found."
+          }
+        />
       ) : (
         <FlatList
           data={filtered}
@@ -199,7 +272,17 @@ export default function DisputesView({ userId, onBack }: Props) {
                     <Text style={st.reasonLabel}>Evidence ({item.evidence_urls.length} photos)</Text>
                     <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={st.evidenceScroll}>
                       {item.evidence_urls.map((url, idx) => (
-                        <Image key={idx} source={{ uri: url }} style={st.evidenceImg} />
+                        <Pressable
+                          key={idx}
+                          onPress={() => setViewerImage(url)}
+                          accessibilityRole="imagebutton"
+                          accessibilityLabel={`View evidence photo ${idx + 1}`}
+                        >
+                          <Image source={{ uri: url }} style={st.evidenceImg} />
+                          <View style={st.evidenceZoom}>
+                            <Ionicons name="expand-outline" size={12} color="#fff" />
+                          </View>
+                        </Pressable>
                       ))}
                     </ScrollView>
                   </View>
@@ -218,13 +301,43 @@ export default function DisputesView({ userId, onBack }: Props) {
                     <Text style={st.replyBtnText}>Respond</Text>
                   </Pressable>
                 )}
+
+                {item.status === "under_review" && (
+                  <View style={st.underReviewRow}>
+                    <Ionicons name="time-outline" size={14} color="#F59E0B" />
+                    <Text style={st.underReviewText}>
+                      Under review — our team will contact you about the next steps.
+                    </Text>
+                  </View>
+                )}
               </View>
             );
           }}
         />
       )}
 
+      <Modal visible={!!viewerImage} transparent animationType="fade" onRequestClose={() => setViewerImage(null)}>
+        <Pressable style={st.viewerOverlay} onPress={() => setViewerImage(null)}>
+          <Pressable
+            style={st.viewerClose}
+            onPress={() => setViewerImage(null)}
+            hitSlop={10}
+            accessibilityRole="button"
+            accessibilityLabel="Close image"
+          >
+            <Ionicons name="close" size={26} color="#fff" />
+          </Pressable>
+          {viewerImage ? (
+            <Image source={{ uri: viewerImage }} style={st.viewerImage} resizeMode="contain" />
+          ) : null}
+        </Pressable>
+      </Modal>
+
       <Modal visible={!!replyModal} transparent animationType="fade" onRequestClose={() => setReplyModal(null)}>
+        <KeyboardAvoidingView
+          style={{ flex: 1 }}
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+        >
         <Pressable style={st.overlay} onPress={() => setReplyModal(null)}>
           <Pressable style={st.modal} onPress={() => {}}>
             <Text style={st.modalTitle}>Respond to Dispute</Text>
@@ -258,6 +371,7 @@ export default function DisputesView({ userId, onBack }: Props) {
             </View>
           </Pressable>
         </Pressable>
+        </KeyboardAvoidingView>
       </Modal>
     </SafeAreaView>
   );
@@ -265,17 +379,11 @@ export default function DisputesView({ userId, onBack }: Props) {
 
 const st = StyleSheet.create({
   safe: { flex: 1, backgroundColor: C.bg },
-  header: {
-    flexDirection: "row", alignItems: "center",
-    paddingHorizontal: S.screenPadding, paddingVertical: S.md, gap: S.md,
-    borderBottomWidth: 1, borderBottomColor: C.border,
-  },
-  backBtn: {
+  iconBtn: {
     width: 36, height: 36, borderRadius: 18,
     backgroundColor: C.elevated, borderWidth: 1, borderColor: C.border,
     alignItems: "center", justifyContent: "center",
   },
-  headerTitle: { flex: 1, color: C.textPrimary, fontSize: 16, fontWeight: "800", textAlign: "center" },
 
   filterRow: { flexDirection: "row", gap: 8, paddingHorizontal: S.screenPadding, paddingVertical: 12 },
   filterPill: {
@@ -287,8 +395,6 @@ const st = StyleSheet.create({
   filterTextActive: { color: C.textHero },
 
   centerWrap: { flex: 1, alignItems: "center", justifyContent: "center", gap: 8, paddingHorizontal: 40 },
-  emptyTitle: { color: C.textPrimary, fontSize: 16, fontWeight: "800" },
-  emptySub: { color: C.textSecondary, fontSize: 12, textAlign: "center" },
 
   list: { paddingHorizontal: S.screenPadding, paddingVertical: 6, gap: 12, paddingBottom: 40 },
   card: {
@@ -314,6 +420,30 @@ const st = StyleSheet.create({
   },
   evidenceImg: {
     width: 80, height: 80, borderRadius: 8,
+  },
+  evidenceZoom: {
+    position: "absolute", bottom: 4, right: 4,
+    width: 18, height: 18, borderRadius: 9,
+    backgroundColor: "rgba(0,0,0,0.55)",
+    alignItems: "center", justifyContent: "center",
+  },
+  underReviewRow: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    backgroundColor: "rgba(245,158,11,0.1)", borderRadius: 10,
+    borderWidth: 1, borderColor: "rgba(245,158,11,0.25)",
+    paddingHorizontal: 10, paddingVertical: 8, marginTop: 2,
+  },
+  underReviewText: { color: "#F59E0B", fontSize: 11, fontWeight: "600", flex: 1, lineHeight: 15 },
+  viewerOverlay: {
+    flex: 1, backgroundColor: "rgba(0,0,0,0.92)",
+    alignItems: "center", justifyContent: "center",
+  },
+  viewerImage: { width: "92%", height: "80%" },
+  viewerClose: {
+    position: "absolute", top: 50, right: 20, zIndex: 10,
+    width: 40, height: 40, borderRadius: 20,
+    backgroundColor: "rgba(255,255,255,0.12)",
+    alignItems: "center", justifyContent: "center",
   },
   replyBox: {
     backgroundColor: "rgba(44,128,255,0.06)", borderRadius: 10, padding: 10, gap: 4,

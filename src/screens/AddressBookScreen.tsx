@@ -15,6 +15,7 @@ import { Feather, Ionicons } from "@expo/vector-icons";
 import { C, S } from "../theme";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import { supabase } from "../lib/supabase";
+import { useToast } from "../components/Toast";
 
 type Address = {
   id: string;
@@ -34,13 +35,20 @@ type Props = { onBack: () => void };
 
 export default function AddressBookScreen({ onBack }: Props) {
   const { push } = useAppNavigation();
+  const { toast, showToast } = useToast();
   const [addresses, setAddresses] = useState<Address[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [signedOut, setSignedOut] = useState(false);
 
   const load = useCallback(async () => {
     const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
+    if (!user) {
+      setSignedOut(true);
+      setAddresses([]);
+      return;
+    }
+    setSignedOut(false);
     const { data, error } = await supabase
       .from("user_addresses")
       .select("*")
@@ -68,15 +76,26 @@ export default function AddressBookScreen({ onBack }: Props) {
   async function handleSetDefault(id: string) {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
+
+    // Optimistically update the UI, then revert if the write fails.
+    const snapshot = addresses;
+    setAddresses((prev) => prev.map((a) => ({ ...a, is_default: a.id === id })));
+
     const { error: clearError } = await supabase.from("user_addresses").update({ is_default: false }).eq("user_id", user.id);
     if (clearError) {
       console.warn("AddressBookScreen clear default failed:", clearError.message);
+      setAddresses(snapshot);
+      Alert.alert("Error", "Couldn't update your default address. Please try again.");
       return;
     }
     const { error: setError } = await supabase.from("user_addresses").update({ is_default: true }).eq("id", id);
     if (setError) {
       console.warn("AddressBookScreen set default failed:", setError.message);
+      setAddresses(snapshot);
+      Alert.alert("Error", "Couldn't update your default address. Please try again.");
+      return;
     }
+    showToast("Default address updated");
     load();
   }
 
@@ -93,7 +112,10 @@ export default function AddressBookScreen({ onBack }: Props) {
             const { error } = await supabase.from("user_addresses").delete().eq("id", address.id);
             if (error) {
               console.warn("AddressBookScreen delete failed:", error.message);
+              Alert.alert("Error", "Couldn't delete this address. Please try again.");
+              return;
             }
+            showToast("Address removed");
             load();
           },
         },
@@ -128,12 +150,16 @@ export default function AddressBookScreen({ onBack }: Props) {
           <Feather name="arrow-left" size={20} color={C.textPrimary} />
         </Pressable>
         <Text style={st.headerTitle}>Address Book</Text>
-        <Pressable
-          style={st.addBtn}
-          onPress={() => push({ type: "ADD_ADDRESS" })}
-        >
-          <Feather name="plus" size={18} color={C.accent} />
-        </Pressable>
+        {signedOut ? (
+          <View style={{ width: 36 }} />
+        ) : (
+          <Pressable
+            style={st.addBtn}
+            onPress={() => push({ type: "ADD_ADDRESS" })}
+          >
+            <Feather name="plus" size={18} color={C.accent} />
+          </Pressable>
+        )}
       </View>
 
       <ScrollView
@@ -143,7 +169,17 @@ export default function AddressBookScreen({ onBack }: Props) {
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.accent} />
         }
       >
-        {addresses.length === 0 ? (
+        {signedOut ? (
+          <View style={st.emptyState}>
+            <View style={st.emptyIcon}>
+              <Ionicons name="lock-closed-outline" size={36} color={C.textMuted} />
+            </View>
+            <Text style={st.emptyTitle}>Sign In Required</Text>
+            <Text style={st.emptySub}>
+              Sign in to view and manage your saved shipping addresses.
+            </Text>
+          </View>
+        ) : addresses.length === 0 ? (
           <View style={st.emptyState}>
             <View style={st.emptyIcon}>
               <Ionicons name="location-outline" size={36} color={C.textMuted} />
@@ -176,11 +212,12 @@ export default function AddressBookScreen({ onBack }: Props) {
                 <View style={st.cardActions}>
                   <Pressable
                     style={st.iconAction}
+                    hitSlop={8}
                     onPress={() => push({ type: "ADD_ADDRESS", editId: addr.id })}
                   >
                     <Feather name="edit-2" size={14} color={C.textSecondary} />
                   </Pressable>
-                  <Pressable style={st.iconAction} onPress={() => handleDelete(addr)}>
+                  <Pressable style={st.iconAction} hitSlop={8} onPress={() => handleDelete(addr)}>
                     <Feather name="trash-2" size={14} color={C.danger} />
                   </Pressable>
                 </View>
@@ -202,6 +239,7 @@ export default function AddressBookScreen({ onBack }: Props) {
           ))
         )}
       </ScrollView>
+      {toast}
     </SafeAreaView>
   );
 }

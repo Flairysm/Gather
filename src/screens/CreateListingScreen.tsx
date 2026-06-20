@@ -22,6 +22,7 @@ import { cf } from "../styles/createForm.styles";
 import { MARKET_FILTERS } from "../data/market";
 import { supabase } from "../lib/supabase";
 import { requireNetwork } from "../lib/network";
+import { emitAppEvent, APP_EVENTS } from "../lib/appEvents";
 
 import GradeConditionPicker from "../components/GradeConditionPicker";
 import { formatGradeCombined, formatConditionLabel } from "../data/grading";
@@ -81,7 +82,15 @@ export default function CreateListingScreen({ onBack }: Props) {
   function canAdvance(): boolean {
     if (step === 0) return images.length > 0;
     if (step === 1) return cardName.trim().length > 0 && category.length > 0;
-    return price.trim().length > 0;
+    return price.trim().length > 0 && images.length > 0;
+  }
+
+  function advanceHint(): string | null {
+    if (canAdvance()) return null;
+    if (step === 0) return "Add at least one photo to continue.";
+    if (step === 1) return "Enter a card name and pick a category to continue.";
+    if (images.length === 0) return "Add at least one photo before posting.";
+    return "Enter an asking price to post your listing.";
   }
 
   function handleNext() {
@@ -92,9 +101,26 @@ export default function CreateListingScreen({ onBack }: Props) {
     }
   }
 
+  const hasUnsavedData =
+    images.length > 0 ||
+    cardName.trim().length > 0 ||
+    edition.trim().length > 0 ||
+    category.length > 0 ||
+    price.trim().length > 0 ||
+    description.trim().length > 0;
+
   function handleBack() {
     if (step > 0) {
       setStep(step - 1);
+    } else if (hasUnsavedData) {
+      Alert.alert(
+        "Discard listing?",
+        "You have unsaved changes. Leaving now will discard this listing.",
+        [
+          { text: "Keep Editing", style: "cancel" },
+          { text: "Discard", style: "destructive", onPress: onBack },
+        ],
+      );
     } else {
       onBack();
     }
@@ -123,6 +149,11 @@ export default function CreateListingScreen({ onBack }: Props) {
   }
 
   async function handleSubmit() {
+    if (images.length === 0) {
+      Alert.alert("Photos required", "Add at least one photo before posting your listing.");
+      setStep(0);
+      return;
+    }
     if (!(await requireNetwork())) return;
     setSubmitting(true);
 
@@ -165,6 +196,7 @@ export default function CreateListingScreen({ onBack }: Props) {
       });
 
       if (error) throw error;
+      emitAppEvent(APP_EVENTS.listingsChanged);
       onBack();
     } catch (err: any) {
       Alert.alert("Error", err?.message ?? "Failed to create listing.");
@@ -405,6 +437,11 @@ export default function CreateListingScreen({ onBack }: Props) {
         </ScrollView>
 
         <View style={[cf.bottomBar, { paddingBottom: Math.max(insets.bottom, 14) }]}>
+          {advanceHint() && (
+            <Text style={[cf.sectionSub, { textAlign: "center", marginBottom: 10 }]}>
+              {advanceHint()}
+            </Text>
+          )}
           {step < 2 ? (
             <Pressable
               style={[cf.nextBtn, !canAdvance() && cf.nextBtnDisabled]}

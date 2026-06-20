@@ -163,12 +163,15 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
     phoneVerified: false, hasAddress: false, isBanned: false, banReason: null, loaded: false,
   });
   const [winRecord, setWinRecord] = useState<WinRecord | null>(null);
-  
+  const [bidError, setBidError] = useState<string | null>(null);
+  const [bidToast, setBidToast] = useState<string | null>(null);
+
   const [realtimeOk, setRealtimeOk] = useState(true);
 
   const sheetAnim = useRef(new Animated.Value(0)).current;
   const backdropAnim = useRef(new Animated.Value(0)).current;
   const snipeAnim = useRef(new Animated.Value(0)).current;
+  const bidToastAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     const iv = setInterval(() => setTick((t) => t + 1), 1000);
@@ -408,6 +411,16 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
     ]).start(() => setSnipeToast(false));
   }
 
+  function triggerBidToast(message: string) {
+    setBidToast(message);
+    bidToastAnim.setValue(0);
+    Animated.sequence([
+      Animated.timing(bidToastAnim, { toValue: 1, duration: 300, useNativeDriver: true }),
+      Animated.delay(2500),
+      Animated.timing(bidToastAnim, { toValue: 0, duration: 300, useNativeDriver: true }),
+    ]).start(() => setBidToast(null));
+  }
+
   function checkEligibility(): boolean {
     if (eligibility.isBanned) {
       Alert.alert(
@@ -431,14 +444,51 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
     prevStackLen.current = stack.length;
   }, [stack.length, loadEligibility]);
 
+  function goToPrerequisite(screen: { type: "PHONE_VERIFY" } | { type: "ADDRESS_BOOK" }) {
+    pendingBidAction.current = true;
+    push(screen);
+  }
+
+  function checkBidPrerequisites(): boolean {
+    if (!currentUserId) {
+      Alert.alert("Sign in required", "Please sign in to place a bid.");
+      return false;
+    }
+    if (!checkEligibility()) return false;
+    if (eligibility.loaded && !eligibility.phoneVerified) {
+      Alert.alert(
+        "Verify your phone",
+        "Verify your phone number before placing a bid.",
+        [
+          { text: "Cancel", style: "cancel" },
+          { text: "Verify", onPress: () => goToPrerequisite({ type: "PHONE_VERIFY" }) },
+        ],
+      );
+      return false;
+    }
+    if (eligibility.loaded && !eligibility.hasAddress) {
+      Alert.alert(
+        "Add a shipping address",
+        "Add a shipping address so we can deliver if you win.",
+        [
+          { text: "Cancel", style: "cancel" },
+          { text: "Add Address", onPress: () => goToPrerequisite({ type: "ADDRESS_BOOK" }) },
+        ],
+      );
+      return false;
+    }
+    return true;
+  }
+
   function openBidSheet() {
     if (!item) return;
-    if (!checkEligibility()) return;
+    if (!checkBidPrerequisites()) return;
 
     const minBid = item.current_bid
       ? item.current_bid + item.min_bid_increment
       : item.starting_price;
     setBidAmount(String(minBid));
+    setBidError(null);
     setShowBidSheet(true);
     sheetAnim.setValue(0);
     backdropAnim.setValue(0);
@@ -460,12 +510,30 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
 
   async function handlePlaceBid() {
     if (!item || bidding) return;
-    if (!(await requireNetwork())) return;
     const amount = parseFloat(bidAmount.replace(/(RM|\$|,)/gi, ""));
     if (isNaN(amount) || amount <= 0) {
-      Alert.alert("Invalid Bid", "Please enter a valid amount.");
+      setBidError("Please enter a valid amount.");
       return;
     }
+    if (amount < minNextBid) {
+      setBidError(`Bid must be at least ${formatPrice(minNextBid)}.`);
+      return;
+    }
+    setBidError(null);
+
+    Alert.alert(
+      "Confirm Your Bid",
+      `Bid ${formatPrice(amount)} on ${item.card_name}?\n\nThis is binding — if you win, you must pay this amount.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Place Bid", style: "default", onPress: () => submitBid(amount) },
+      ],
+    );
+  }
+
+  async function submitBid(amount: number) {
+    if (!item || bidding) return;
+    if (!(await requireNetwork())) return;
 
     setBidding(true);
     const { data, error } = await supabase.rpc("place_bid", {
@@ -486,14 +554,22 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
       return;
     }
 
+    const winning = (data as any)?.highest_bidder_id === currentUserId;
     closeBidSheet(() => {
       loadAuction();
       loadBids();
+      triggerBidToast(
+        winning ? "Bid placed — you're winning!" : "Bid placed.",
+      );
     });
   }
 
   async function handleBuyNow() {
     if (!item || !item.buy_now_price) return;
+    if (!currentUserId) {
+      Alert.alert("Sign in required", "Please sign in to buy this item.");
+      return;
+    }
     if (!checkEligibility()) return;
     Alert.alert(
       "Buy It Now",
@@ -531,6 +607,7 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
   function quickBid(increment: number) {
     const current = parseFloat(bidAmount.replace(/(RM|\$|,)/gi, "")) || 0;
     setBidAmount(String(current + increment));
+    setBidError(null);
   }
 
   function openImageViewer(index: number) {
@@ -601,6 +678,7 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
   const isOwner = currentUserId === item?.seller_id;
   const isWinner = currentUserId === item?.winner_id;
   const isHighBidder = currentUserId === item?.highest_bidder_id;
+  const userHasBid = !!currentUserId && bids.some((b) => b.bidder_id === currentUserId);
   const minNextBid = item
     ? item.current_bid
       ? item.current_bid + item.min_bid_increment
@@ -710,6 +788,24 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
         </Animated.View>
       )}
 
+      {/* Bid placed toast */}
+      {bidToast && (
+        <Animated.View
+          style={[
+            st.snipeToast,
+            {
+              backgroundColor: C.success,
+              top: Math.max(insets.top + 8, 16),
+              opacity: bidToastAnim,
+              transform: [{ translateY: bidToastAnim.interpolate({ inputRange: [0, 1], outputRange: [-20, 0] }) }],
+            },
+          ]}
+        >
+          <Ionicons name="checkmark-circle" size={18} color={C.textHero} />
+          <Text style={st.snipeToastText}>{bidToast}</Text>
+        </Animated.View>
+      )}
+
       {/* Connection lost banner */}
       {!realtimeOk && (
         <Pressable
@@ -751,6 +847,11 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
               <Text style={st.sheetMinText}>Min bid: {formatPrice(minNextBid)}</Text>
             </View>
 
+            <View style={st.sheetMinRow}>
+              <Ionicons name="card-outline" size={14} color={C.textSecondary} />
+              <Text style={st.sheetMinText}>Pay securely by card if you win</Text>
+            </View>
+
             <View style={st.sheetDivider} />
 
             <Text style={st.sheetFieldLabel}>Your Bid</Text>
@@ -759,19 +860,29 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
               <TextInput
                 style={st.sheetInput}
                 value={bidAmount}
-                onChangeText={setBidAmount}
+                onChangeText={(t) => { setBidAmount(t); setBidError(null); }}
                 keyboardType="numeric"
                 placeholder="0"
                 placeholderTextColor={C.textMuted}
               />
             </View>
 
+            {bidError && (
+              <View style={st.bidErrorRow}>
+                <Ionicons name="alert-circle" size={14} color={C.danger} />
+                <Text style={st.bidErrorText}>{bidError}</Text>
+              </View>
+            )}
+
             <View style={st.quickBidRow}>
-              {[1, 5, 10, 50].map((inc) => (
-                <Pressable key={inc} style={st.quickBidBtn} onPress={() => quickBid(inc)}>
-                  <Text style={st.quickBidText}>+RM{inc}</Text>
-                </Pressable>
-              ))}
+              {[1, 2, 5].map((mult) => {
+                const inc = item.min_bid_increment * mult;
+                return (
+                  <Pressable key={mult} style={st.quickBidBtn} onPress={() => quickBid(inc)}>
+                    <Text style={st.quickBidText}>+{formatPrice(inc)}</Text>
+                  </Pressable>
+                );
+              })}
             </View>
 
             {countdown && !countdown.ended && countdown.seconds <= (item.snipe_threshold_seconds ?? 30) && (
@@ -812,19 +923,37 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
           <Pressable style={st.headerIconBtn} onPress={handleShare} hitSlop={6}>
             <Feather name="share" size={16} color={C.textSearch} />
           </Pressable>
-          <Pressable style={st.headerIconBtn} onPress={handleToggleWatch} hitSlop={6}>
-            <Ionicons
-              name={isWatching ? "eye" : "eye-outline"}
-              size={17}
-              color={isWatching ? C.accent : C.textSearch}
-            />
+          <Pressable
+            style={[st.headerIconBtn, togglingWatch && { opacity: 0.5 }]}
+            onPress={handleToggleWatch}
+            hitSlop={6}
+            disabled={togglingWatch}
+          >
+            {togglingWatch ? (
+              <ActivityIndicator size="small" color={C.textSearch} />
+            ) : (
+              <Ionicons
+                name={isWatching ? "eye" : "eye-outline"}
+                size={17}
+                color={isWatching ? C.accent : C.textSearch}
+              />
+            )}
           </Pressable>
-          <Pressable style={st.headerIconBtn} onPress={handleToggleSave} hitSlop={6}>
-            <Ionicons
-              name={isSaved ? "bookmark" : "bookmark-outline"}
-              size={16}
-              color={isSaved ? C.accent : C.textSearch}
-            />
+          <Pressable
+            style={[st.headerIconBtn, togglingSave && { opacity: 0.5 }]}
+            onPress={handleToggleSave}
+            hitSlop={6}
+            disabled={togglingSave}
+          >
+            {togglingSave ? (
+              <ActivityIndicator size="small" color={C.textSearch} />
+            ) : (
+              <Ionicons
+                name={isSaved ? "bookmark" : "bookmark-outline"}
+                size={16}
+                color={isSaved ? C.accent : C.textSearch}
+              />
+            )}
           </Pressable>
         </View>
       </View>
@@ -951,6 +1080,12 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
               <Text style={[st.indicatorText, st.indicatorTextGreen]}>You're Winning</Text>
             </View>
           )}
+          {userHasBid && !isHighBidder && !isEnded && (
+            <View style={[st.indicator, st.indicatorYellow]}>
+              <Ionicons name="arrow-down-circle" size={14} color="#F59E0B" />
+              <Text style={[st.indicatorText, st.indicatorTextYellow]}>Outbid — bid again</Text>
+            </View>
+          )}
           {isEnded && isWinner && (
             <View style={[st.indicator, st.indicatorGreen]}>
               <Ionicons name="trophy" size={14} color={C.success} />
@@ -967,6 +1102,28 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
           )}
         </View>
 
+        {/* Bid prerequisites */}
+        {!isOwner && !isEnded && currentUserId && eligibility.loaded && !eligibility.isBanned &&
+          (!eligibility.phoneVerified || !eligibility.hasAddress) && (
+          <View style={st.eligibilityBanner}>
+            <Text style={st.eligibilityTitle}>Complete these before you bid</Text>
+            {!eligibility.phoneVerified && (
+              <Pressable style={st.eligibilityRow} onPress={() => goToPrerequisite({ type: "PHONE_VERIFY" })}>
+                <Ionicons name="call-outline" size={16} color={C.textAccent} />
+                <Text style={st.eligibilityText}>Verify your phone number</Text>
+                <Feather name="chevron-right" size={16} color={C.textAccent} />
+              </Pressable>
+            )}
+            {!eligibility.hasAddress && (
+              <Pressable style={st.eligibilityRow} onPress={() => goToPrerequisite({ type: "ADDRESS_BOOK" })}>
+                <Ionicons name="location-outline" size={16} color={C.textAccent} />
+                <Text style={st.eligibilityText}>Add a shipping address</Text>
+                <Feather name="chevron-right" size={16} color={C.textAccent} />
+              </Pressable>
+            )}
+          </View>
+        )}
+
         {/* Winner payment banner */}
         {isWinner && isEnded && winRecord && winRecord.payment_status === "pending" && (
           <View style={st.paymentBanner}>
@@ -976,7 +1133,7 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
             </View>
             <Text style={st.paymentBannerAmount}>Amount Due: {formatPrice(winRecord.winning_bid)}</Text>
             <Text style={st.paymentBannerDeadline}>
-              Pay by {new Date(winRecord.payment_deadline).toLocaleDateString("en-US", {
+              Pay by {new Date(winRecord.payment_deadline).toLocaleDateString("en-MY", {
                 month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit",
               })} or your account will be banned from transactions.
             </Text>
@@ -990,7 +1147,7 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
           <View style={st.paidBanner}>
             <Ionicons name="checkmark-circle" size={18} color={C.success} />
             <Text style={st.paidBannerText}>
-              Payment confirmed on {new Date(winRecord.paid_at!).toLocaleDateString("en-US", {
+              Payment confirmed on {new Date(winRecord.paid_at!).toLocaleDateString("en-MY", {
                 month: "short", day: "numeric",
               })}. Seller will ship your item.
             </Text>
@@ -1010,6 +1167,38 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
             <Ionicons name="ban" size={18} color={C.danger} />
             <Text style={st.expiredBannerText}>
               {eligibility.banReason ?? "You are banned from transactions."}
+            </Text>
+          </View>
+        )}
+
+        {isEnded && !isOwner && !isWinner && (
+          <View style={st.endStateBanner}>
+            <Ionicons
+              name={item.winner_id ? "information-circle" : "close-circle-outline"}
+              size={18}
+              color={C.textSecondary}
+            />
+            <Text style={st.endStateText}>
+              {item.winner_id
+                ? userHasBid
+                  ? "Auction ended — you didn't win this time."
+                  : "Auction ended — sold to the highest bidder."
+                : "Auction ended with no sale."}
+            </Text>
+          </View>
+        )}
+
+        {isEnded && isOwner && (
+          <View style={st.endStateBanner}>
+            <Ionicons
+              name={item.winner_id ? "checkmark-circle" : "close-circle-outline"}
+              size={18}
+              color={C.textSecondary}
+            />
+            <Text style={st.endStateText}>
+              {item.winner_id
+                ? "Your auction ended with a winning bid."
+                : "Your auction ended with no sale."}
             </Text>
           </View>
         )}
@@ -1136,21 +1325,61 @@ export default function AuctionDetailScreen({ auctionId, onBack }: Props) {
             <Text style={st.ownBarText}>Your auction</Text>
           </View>
         ) : isEnded ? (
-          <View style={st.ownBar}>
-            <Ionicons name="checkmark-circle" size={18} color={C.textSecondary} />
-            <Text style={st.ownBarText}>Auction ended</Text>
-          </View>
+          isWinner && winRecord && winRecord.payment_status === "pending" ? (
+            <Pressable style={st.payNowBarBtn} onPress={handlePayNow}>
+              <Ionicons name="card" size={18} color={C.textHero} />
+              <Text style={st.payNowBarText}>Pay Now • {formatPrice(winRecord.winning_bid)}</Text>
+            </Pressable>
+          ) : (
+            <View style={st.ownBar}>
+              <Ionicons
+                name={isWinner ? "trophy" : "checkmark-circle"}
+                size={18}
+                color={C.textSecondary}
+              />
+              <Text style={st.ownBarText}>
+                {isWinner
+                  ? winRecord?.payment_status === "paid"
+                    ? "You won — payment confirmed"
+                    : "You won this auction"
+                  : item.winner_id
+                    ? userHasBid
+                      ? "Auction ended — you didn't win"
+                      : "Auction ended"
+                    : "Auction ended — no sale"}
+              </Text>
+            </View>
+          )
         ) : (
           <>
             <Pressable style={st.msgBtn} onPress={() => push({ type: "CHAT", sellerId: item.seller_id, listingId: "", topic: item.card_name })}>
-              <Feather name="message-circle" size={19} color={C.textPrimary} />
+              <Feather name="message-circle" size={18} color={C.textPrimary} />
+              <Text style={st.msgBtnText}>Message</Text>
             </Pressable>
-            <Pressable style={st.bidBtn} onPress={openBidSheet}>
-              <Ionicons name="hammer" size={18} color={C.textHero} />
-              <Text style={st.bidBtnText}>Place Bid</Text>
-            </Pressable>
+            {!currentUserId ? (
+              <Pressable
+                style={st.bidBtn}
+                onPress={() => Alert.alert("Sign in required", "Please sign in to place a bid.")}
+              >
+                <Ionicons name="log-in-outline" size={18} color={C.textHero} />
+                <Text style={st.bidBtnText}>Sign in to Bid</Text>
+              </Pressable>
+            ) : (
+              <Pressable
+                style={[st.bidBtn, eligibility.isBanned && st.bidBtnDisabled]}
+                onPress={openBidSheet}
+                disabled={eligibility.isBanned}
+              >
+                <Ionicons name="hammer" size={18} color={C.textHero} />
+                <Text style={st.bidBtnText}>Place Bid</Text>
+              </Pressable>
+            )}
             {showBuyNow && (
-              <Pressable style={st.binBtn} onPress={handleBuyNow}>
+              <Pressable
+                style={[st.binBtn, eligibility.isBanned && st.bidBtnDisabled]}
+                onPress={handleBuyNow}
+                disabled={eligibility.isBanned}
+              >
                 <Ionicons name="flash" size={18} color={C.textHero} />
                 <Text style={st.binBtnText}>Buy Now</Text>
               </Pressable>
@@ -1247,6 +1476,8 @@ const st = StyleSheet.create({
     borderColor: C.border,
   },
   quickBidText: { color: C.textAccent, fontSize: 13, fontWeight: "800" },
+  bidErrorRow: { flexDirection: "row", alignItems: "center", gap: 6 },
+  bidErrorText: { flex: 1, color: C.danger, fontSize: 12, fontWeight: "700" },
   snipeWarning: {
     flexDirection: "row",
     alignItems: "center",
@@ -1542,15 +1773,18 @@ const st = StyleSheet.create({
   },
   ownBarText: { color: C.textSecondary, fontSize: 14, fontWeight: "700" },
   msgBtn: {
-    width: 50,
-    height: 50,
-    borderRadius: 25,
+    flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
+    gap: 6,
+    height: 50,
+    paddingHorizontal: 14,
+    borderRadius: S.radiusSmall,
     backgroundColor: C.elevated,
     borderWidth: 1,
     borderColor: C.borderIcon,
   },
+  msgBtnText: { color: C.textPrimary, fontSize: 13, fontWeight: "700" },
   bidBtn: {
     flex: 1,
     flexDirection: "row",
@@ -1561,7 +1795,19 @@ const st = StyleSheet.create({
     borderRadius: S.radiusSmall,
     paddingVertical: 14,
   },
+  bidBtnDisabled: { opacity: 0.5 },
   bidBtnText: { color: C.textHero, fontSize: 14, fontWeight: "800" },
+  payNowBarBtn: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    backgroundColor: C.success,
+    borderRadius: S.radiusSmall,
+    paddingVertical: 14,
+  },
+  payNowBarText: { color: C.textHero, fontSize: 14, fontWeight: "800" },
   binBtn: {
     flex: 1,
     flexDirection: "row",
@@ -1612,6 +1858,15 @@ const st = StyleSheet.create({
     padding: S.lg,
   },
   expiredBannerText: { flex: 1, color: C.danger, fontSize: 12, fontWeight: "700", lineHeight: 18 },
+
+  endStateBanner: {
+    flexDirection: "row", alignItems: "center", gap: 10,
+    marginHorizontal: S.screenPadding, marginBottom: S.lg,
+    backgroundColor: C.elevated, borderRadius: S.radiusSmall,
+    borderWidth: 1, borderColor: C.border,
+    padding: S.lg,
+  },
+  endStateText: { flex: 1, color: C.textSecondary, fontSize: 12, fontWeight: "700", lineHeight: 18 },
 
   eligibilityBanner: {
     marginHorizontal: S.screenPadding, marginBottom: S.lg,

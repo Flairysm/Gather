@@ -34,7 +34,7 @@ import { useUser } from "../data/user";
 import { supabase } from "../lib/supabase";
 
 type Tab = "Listings" | "Wanted";
-type SortMode = "newest" | "price_low" | "price_high";
+type SortMode = "recommended" | "newest" | "price_low" | "price_high";
 
 const FILTER_COMPANIES = GRADING_COMPANIES.filter((c) => c.id !== "RAW");
 const RAW_COMPANY = GRADING_COMPANIES.find((c) => c.id === "RAW")!;
@@ -81,7 +81,7 @@ export default function MarketScreen() {
   const [activeFilter, setActiveFilter] = useState("All");
   const [searchQuery, setSearchQuery] = useState("");
   const [showFilterSheet, setShowFilterSheet] = useState(false);
-  const [sortMode, setSortMode] = useState<SortMode>("newest");
+  const [sortMode, setSortMode] = useState<SortMode>("recommended");
   const [selectedCompanies, setSelectedCompanies] = useState<Set<string>>(new Set());
   const [selectedGrades, setSelectedGrades] = useState<Set<string>>(new Set());
   const [rawSelected, setRawSelected] = useState(false);
@@ -99,32 +99,28 @@ export default function MarketScreen() {
   >({});
   const [loadingListings, setLoadingListings] = useState(true);
   const [loadingWanted, setLoadingWanted] = useState(true);
-  const [loadError, setLoadError] = useState(false);
+  const [listingsError, setListingsError] = useState(false);
+  const [wantedError, setWantedError] = useState(false);
 
   const loadListings = useCallback(async (): Promise<boolean> => {
     setLoadingListings(true);
-    const { data, error } = await supabase
-      .from("listings")
-      .select(`
-        id, seller_id, card_name, edition, grade, grading_company, grade_value,
-        condition, price, quantity, category, description, images, views, status, created_at,
-        seller:profiles!seller_id(username, display_name, rating, total_sales, avatar_url)
-      `)
-      .eq("status", "active")
-      .order("created_at", { ascending: false })
-      .limit(50);
+    setListingsError(false);
+    const p_category = activeFilter === "All" ? null : activeFilter;
+    const { data, error } = await supabase.rpc("get_ranked_listings", {
+      p_category,
+      p_limit: 50,
+      p_offset: 0,
+    });
 
     if (error) {
       console.warn("MarketScreen loadListings error:", error.message);
+      setListingsError(true);
       setLoadingListings(false);
       return false;
     }
 
     if (data) {
-      const mapped = (data as any[]).map((r) => ({
-          ...r,
-          seller: Array.isArray(r.seller) ? r.seller[0] : r.seller,
-      }));
+      const mapped = (data ?? []) as Listing[];
       setListings(mapped);
 
       const sellerIds = Array.from(
@@ -165,44 +161,34 @@ export default function MarketScreen() {
     }
     setLoadingListings(false);
     return true;
-  }, []);
+  }, [activeFilter]);
 
   const loadWanted = useCallback(async (): Promise<boolean> => {
     setLoadingWanted(true);
-    const { data, error } = await supabase
-      .from("wanted_posts")
-      .select(`
-        id, buyer_id, card_name, edition, grade_wanted, offer_price,
-        grading_company_wanted, grade_value_wanted,
-        category, description, image_url, views, status, created_at,
-        buyer:profiles!buyer_id(username, display_name, rating, total_purchases, avatar_url)
-      `)
-      .eq("status", "active")
-      .order("created_at", { ascending: false })
-      .limit(50);
+    setWantedError(false);
+    const p_category = activeFilter === "All" ? null : activeFilter;
+    const { data, error } = await supabase.rpc("get_ranked_wanted", {
+      p_category,
+      p_limit: 50,
+      p_offset: 0,
+    });
 
     if (error) {
       console.warn("MarketScreen loadWanted error:", error.message);
       setWantedPosts([]);
+      setWantedError(true);
       setLoadingWanted(false);
       return false;
     }
     if (data) {
-      setWantedPosts(
-        (data as any[]).map((r) => ({
-          ...r,
-          buyer: Array.isArray(r.buyer) ? r.buyer[0] : r.buyer,
-        })),
-      );
+      setWantedPosts((data ?? []) as WantedPost[]);
     }
     setLoadingWanted(false);
     return true;
-  }, []);
+  }, [activeFilter]);
 
   useEffect(() => {
-    Promise.all([loadListings(), loadWanted()]).then((results) => {
-      setLoadError(results.every((ok) => !ok));
-    });
+    Promise.all([loadListings(), loadWanted()]);
   }, [loadListings, loadWanted]);
 
   const normalizedQuery = searchQuery.trim().toLowerCase();
@@ -214,7 +200,7 @@ export default function MarketScreen() {
   const hasMinPrice = Number.isFinite(minPrice) && minPrice > 0;
   const hasMaxPrice = Number.isFinite(maxPrice) && maxPrice > 0;
   const hasAdvancedFilters =
-    sortMode !== "newest" ||
+    sortMode !== "recommended" ||
     hasCompanyFilter ||
     hasGradeFilter ||
     rawSelected ||
@@ -222,7 +208,7 @@ export default function MarketScreen() {
     hasMinPrice ||
     hasMaxPrice;
   const activeFilterCount =
-    (sortMode !== "newest" ? 1 : 0) +
+    (sortMode !== "recommended" ? 1 : 0) +
     (hasCompanyFilter ? selectedCompanies.size : 0) +
     (hasGradeFilter ? selectedGrades.size : 0) +
     (rawSelected ? 1 : 0) +
@@ -284,7 +270,7 @@ export default function MarketScreen() {
       next.sort((a, b) => Number(a.price) - Number(b.price));
     } else if (sortMode === "price_high") {
       next.sort((a, b) => Number(b.price) - Number(a.price));
-    } else {
+    } else if (sortMode === "newest") {
       next.sort(
         (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
       );
@@ -355,7 +341,7 @@ export default function MarketScreen() {
       next.sort((a, b) => Number(a.offer_price) - Number(b.offer_price));
     } else if (sortMode === "price_high") {
       next.sort((a, b) => Number(b.offer_price) - Number(a.offer_price));
-    } else {
+    } else if (sortMode === "newest") {
       next.sort(
         (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
       );
@@ -413,15 +399,13 @@ export default function MarketScreen() {
 
   async function onRefresh() {
     setRefreshing(true);
-    setLoadError(false);
-    const results = await Promise.allSettled([loadListings(), loadWanted()]);
-    setLoadError(results.every((r) => r.status === "rejected"));
+    await Promise.allSettled([loadListings(), loadWanted()]);
     await new Promise((resolve) => setTimeout(resolve, 500));
     setRefreshing(false);
   }
 
   function clearAdvancedFilters() {
-    setSortMode("newest");
+    setSortMode("recommended");
     setSelectedCompanies(new Set());
     setSelectedGrades(new Set());
     setRawSelected(false);
@@ -549,13 +533,6 @@ export default function MarketScreen() {
             ))}
           </View>
 
-          {loadError && !loadingListings && !loadingWanted && (
-            <ErrorState
-              message="Failed to load marketplace. Check your connection and try again."
-              onRetry={onRefresh}
-            />
-          )}
-
           {/* Category Filter Pills */}
           <ScrollView
             horizontal
@@ -583,7 +560,12 @@ export default function MarketScreen() {
           {/* Listings Tab */}
           {activeTab === "Listings" && (
             <View style={m.listingsGrid}>
-              {loadingListings && listings.length === 0 ? (
+              {listingsError && !loadingListings ? (
+                <ErrorState
+                  message="Failed to load listings. Check your connection and try again."
+                  onRetry={loadListings}
+                />
+              ) : loadingListings && listings.length === 0 ? (
                 <ShimmerGroup>
                   <View style={{ flexDirection: "row", flexWrap: "wrap", gap: S.cardGap, width: "100%" }}>
                     {[0, 1, 2, 3].map((i) => (
@@ -607,6 +589,12 @@ export default function MarketScreen() {
                       ? "Try a different keyword"
                       : "Be the first to list a card for sale"}
                   </Text>
+                  {!normalizedQuery && (
+                    <Pressable style={(m as any).emptyCtaBtn} onPress={() => handleFabAction("sell")}>
+                      <Feather name="tag" size={16} color={C.textHero} />
+                      <Text style={(m as any).emptyCtaText}>List a card</Text>
+                    </Pressable>
+                  )}
                 </View>
               ) : (
                 <FadeIn style={{ flexDirection: "row", flexWrap: "wrap", gap: S.cardGap }}>
@@ -635,6 +623,11 @@ export default function MarketScreen() {
                           <Text style={m.gradeBadgeText}>
                             {formatGradeLabel(item.grade)}
                           </Text>
+                        </View>
+                      )}
+                      {(item as any).quantity === 0 && (
+                        <View style={(m as any).soldOutOverlay}>
+                          <Text style={(m as any).soldOutText}>Sold out</Text>
                         </View>
                       )}
                     </View>
@@ -680,7 +673,12 @@ export default function MarketScreen() {
           {/* Wanted Tab */}
           {activeTab === "Wanted" && (
             <View style={m.wantedGrid}>
-              {loadingWanted && wantedPosts.length === 0 ? (
+              {wantedError && !loadingWanted ? (
+                <ErrorState
+                  message="Failed to load wanted posts. Check your connection and try again."
+                  onRetry={loadWanted}
+                />
+              ) : loadingWanted && wantedPosts.length === 0 ? (
                 <ShimmerGroup>
                   <View style={{ flexDirection: "row", flexWrap: "wrap", gap: S.cardGap, width: "100%" }}>
                     {[0, 1, 2, 3].map((i) => (
@@ -704,6 +702,12 @@ export default function MarketScreen() {
                       ? "Try a different keyword"
                       : "Post what cards you're looking for"}
                   </Text>
+                  {!normalizedQuery && (
+                    <Pressable style={(m as any).emptyCtaBtn} onPress={() => handleFabAction("wanted")}>
+                      <MaterialCommunityIcons name="card-search-outline" size={16} color={C.textHero} />
+                      <Text style={(m as any).emptyCtaText}>Post wanted</Text>
+                    </Pressable>
+                  )}
                 </View>
               ) : (
                 <FadeIn style={{ flexDirection: "row", flexWrap: "wrap", gap: S.cardGap }}>
@@ -747,7 +751,14 @@ export default function MarketScreen() {
                     </View>
                     <View style={m.wantedMeta}>
                       <View style={m.wantedBuyerRow}>
-                        <View style={m.wantedAvatar} />
+                        <View style={m.wantedAvatar}>
+                          {item.buyer?.avatar_url ? (
+                            <CachedImage
+                              source={{ uri: item.buyer.avatar_url }}
+                              style={{ width: "100%", height: "100%" }}
+                            />
+                          ) : null}
+                        </View>
                         <Text style={m.wantedBuyer}>
                           @{item.buyer?.username ?? "user"}
                         </Text>
@@ -874,7 +885,7 @@ export default function MarketScreen() {
                 {
                   marginBottom: 72,
                   paddingBottom: Math.max(insets.bottom, 14),
-                  maxHeight: "80%",
+                  height: "80%",
                 },
               ]}
             >
@@ -885,12 +896,23 @@ export default function MarketScreen() {
                 </Pressable>
               </View>
 
-              <ScrollView showsVerticalScrollIndicator={false} style={{ flexGrow: 0 }} contentContainerStyle={{ gap: 16, paddingBottom: 8 }}>
+              <ScrollView
+                showsVerticalScrollIndicator
+                style={{ flex: 1 }}
+                contentContainerStyle={{ gap: 16, paddingBottom: 8 }}
+                keyboardShouldPersistTaps="handled"
+              >
 
               {/* Sort */}
               <View style={{ gap: 8 }}>
                 <Text style={(m as any).filterLabel}>Sort</Text>
                 <View style={(m as any).sortRow}>
+                  <Pressable
+                    style={[(m as any).sortChip, sortMode === "recommended" && (m as any).sortChipActive]}
+                    onPress={() => setSortMode("recommended")}
+                  >
+                    <Text style={[(m as any).sortChipText, sortMode === "recommended" && (m as any).sortChipTextActive]}>Recommended</Text>
+                  </Pressable>
                   <Pressable
                     style={[(m as any).sortChip, sortMode === "newest" && (m as any).sortChipActive]}
                     onPress={() => setSortMode("newest")}
@@ -996,8 +1018,8 @@ export default function MarketScreen() {
                 </View>
               </View>
 
-              {/* Condition tiers for Raw */}
-              {rawSelected && (
+              {/* Condition tiers for Raw — only applies to Listings */}
+              {rawSelected && activeTab === "Listings" && (
                 <View style={{ gap: 8 }}>
                   <Text style={(m as any).filterLabel}>Condition (Raw)</Text>
                   <View style={(m as any).sortRow}>
@@ -1084,7 +1106,7 @@ export default function MarketScreen() {
                   <Text style={(m as any).filterResetText}>Reset</Text>
                 </Pressable>
                 <Pressable style={(m as any).filterApplyBtn} onPress={() => setShowFilterSheet(false)}>
-                  <Text style={(m as any).filterApplyText}>Apply</Text>
+                  <Text style={(m as any).filterApplyText}>Done</Text>
                 </Pressable>
               </View>
             </View>

@@ -42,8 +42,11 @@ export default function CreateWantedScreen({ onBack }: Props) {
   const [gradeValue, setGradeValue] = useState<string | null>(null);
   const [offerPrice, setOfferPrice] = useState("");
   const [description, setDescription] = useState("");
+  const [durationDays, setDurationDays] = useState(14);
 
   const stepTitles = ["Reference Image", "Card Details", "Set Budget"];
+
+  const DURATION_OPTIONS = [7, 14, 30];
 
   async function pickFromGallery() {
     const result = await ImagePicker.launchImageLibraryAsync({
@@ -71,6 +74,18 @@ export default function CreateWantedScreen({ onBack }: Props) {
     if (step === 0) return true; // image is optional
     if (step === 1) return cardName.trim().length > 0 && category.length > 0;
     return offerPrice.trim().length > 0;
+  }
+
+  function advanceHint(): string | null {
+    if (canAdvance()) return null;
+    if (step === 1) {
+      if (cardName.trim().length === 0 && category.length === 0)
+        return "Enter a card name and pick a category to continue";
+      if (cardName.trim().length === 0) return "Enter a card name to continue";
+      return "Pick a category to continue";
+    }
+    if (step === 2) return "Enter an offer price to continue";
+    return null;
   }
 
   function handleNext() {
@@ -140,6 +155,10 @@ export default function CreateWantedScreen({ onBack }: Props) {
         imageUrl = publicUrlData.publicUrl;
       }
 
+      const expiresAt = new Date(
+        Date.now() + durationDays * 24 * 60 * 60 * 1000,
+      ).toISOString();
+
       const { error } = await supabase.from("wanted_posts").insert({
         buyer_id: user.id,
         card_name: cardName.trim(),
@@ -152,10 +171,15 @@ export default function CreateWantedScreen({ onBack }: Props) {
         description: description.trim() || null,
         image_url: imageUrl,
         status: "active",
+        expires_at: expiresAt,
       });
 
       if (error) throw error;
-      onBack();
+      Alert.alert(
+        "Wanted Post Created",
+        "Your wanted post is now live. Sellers can reach out if they have the card.",
+        [{ text: "Done", onPress: onBack }],
+      );
     } catch (err: any) {
       Alert.alert("Error", err?.message ?? "Failed to create wanted post.");
     } finally {
@@ -333,6 +357,32 @@ export default function CreateWantedScreen({ onBack }: Props) {
                 />
               </View>
 
+              <Text style={cf.fieldLabel}>Bounty Duration</Text>
+              <Text style={cf.sectionSub}>
+                Your post stays visible to sellers until it expires.
+              </Text>
+              <View style={cf.categoryRow}>
+                {DURATION_OPTIONS.map((d) => (
+                  <Pressable
+                    key={d}
+                    style={[
+                      cf.categoryPill,
+                      durationDays === d && cf.categoryPillActive,
+                    ]}
+                    onPress={() => setDurationDays(d)}
+                  >
+                    <Text
+                      style={[
+                        cf.categoryPillText,
+                        durationDays === d && cf.categoryPillTextActive,
+                      ]}
+                    >
+                      {d} days
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+
               <Text style={cf.fieldLabel}>Description</Text>
               <TextInput
                 style={cf.textArea}
@@ -376,6 +426,10 @@ export default function CreateWantedScreen({ onBack }: Props) {
                     {formatGradeCombined(gradingCompany, gradeValue) || "—"}
                   </Text>
                 </View>
+                <View style={cf.reviewRow}>
+                  <Text style={cf.reviewLabel}>Duration</Text>
+                  <Text style={cf.reviewValue}>{durationDays} days</Text>
+                </View>
                 <View style={cf.reviewDivider} />
                 <View style={cf.reviewRow}>
                   <Text style={cf.reviewLabel}>Offering</Text>
@@ -399,6 +453,9 @@ export default function CreateWantedScreen({ onBack }: Props) {
         <View
           style={[cf.bottomBar, { paddingBottom: Math.max(insets.bottom, 14) }]}
         >
+          {advanceHint() && (
+            <Text style={cf.advanceHint}>{advanceHint()}</Text>
+          )}
           {step < 2 ? (
             <Pressable
               style={[cf.nextBtn, !canAdvance() && cf.nextBtnDisabled]}

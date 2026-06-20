@@ -218,6 +218,13 @@ export const wd = StyleSheet.create({
     fontSize: 16,
     fontWeight: "800",
   },
+  buyerAvatarImg: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    borderWidth: 1.5,
+    borderColor: C.live,
+  },
   buyerInfo: {
     flex: 1,
     gap: 2,
@@ -418,5 +425,40 @@ export const wd = StyleSheet.create({
     color: C.textHero,
     fontSize: 14,
     fontWeight: "800",
+  },
+  ownPostNote: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    paddingVertical: 14,
+  },
+  ownPostText: {
+    color: C.textMuted,
+    fontSize: 13,
+    fontWeight: "700",
+  },
+
+  // ── Expiry chip ──
+  expiryChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    alignSelf: "flex-start",
+    backgroundColor: C.muted,
+    borderRadius: S.radiusBadge,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    marginHorizontal: S.screenPadding,
+    marginBottom: S.lg,
+  },
+  expiryChipText: {
+    color: C.textSecondary,
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  expiryChipExpired: {
+    color: C.danger,
   },
 });

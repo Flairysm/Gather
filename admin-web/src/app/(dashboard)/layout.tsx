@@ -10,6 +10,8 @@ type AdminRole = "admin" | "user";
 const NAV_ITEMS = [
   { href: "/dashboard", label: "Overview" },
   { href: "/dashboard/orders", label: "Orders" },
+  { href: "/dashboard/payouts", label: "Payouts" },
+  { href: "/dashboard/vouchers", label: "Vouchers" },
   { href: "/dashboard/users", label: "Users" },
   { href: "/dashboard/listings", label: "Listings" },
   { href: "/dashboard/auctions", label: "Auctions" },

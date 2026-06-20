@@ -1,5 +1,4 @@
 import {
-  ActivityIndicator,
   Alert,
   Image,
   Pressable,
@@ -14,17 +13,31 @@ import { StatusBar } from "expo-status-bar";
 import { Feather, Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { C } from "../theme";
+import { C, S } from "../theme";
 import { wd } from "../styles/wantedDetail.styles";
 import { formatListingPrice, timeAgo, type WantedPost } from "../data/market";
 import { useAppNavigation } from "../navigation/NavigationContext";
 import { supabase } from "../lib/supabase";
 import ErrorState from "../components/ErrorState";
+import Shimmer, { ShimmerGroup } from "../components/Shimmer";
 
 type Props = {
   wantedId: string;
   onBack: () => void;
 };
+
+function describeExpiry(expiresAt: string | null): {
+  expiryLabel: string | null;
+  expiryExpired: boolean;
+} {
+  if (!expiresAt) return { expiryLabel: null, expiryExpired: false };
+  const ms = new Date(expiresAt).getTime() - Date.now();
+  if (ms <= 0) return { expiryLabel: "Bounty expired", expiryExpired: true };
+  const days = Math.ceil(ms / (24 * 60 * 60 * 1000));
+  if (days === 1) return { expiryLabel: "Expires in 1 day", expiryExpired: false };
+  if (days <= 60) return { expiryLabel: `Expires in ${days} days`, expiryExpired: false };
+  return { expiryLabel: null, expiryExpired: false };
+}
 
 export default function WantedDetailScreen({ wantedId, onBack }: Props) {
   const { push } = useAppNavigation();
@@ -35,6 +48,7 @@ export default function WantedDetailScreen({ wantedId, onBack }: Props) {
   const [loadError, setLoadError] = useState(false);
   const [isSaved, setIsSaved] = useState(false);
   const [togglingSave, setTogglingSave] = useState(false);
+  const [meId, setMeId] = useState<string | null>(null);
 
   const loadPost = useCallback(async () => {
     setLoading(true);
@@ -43,7 +57,7 @@ export default function WantedDetailScreen({ wantedId, onBack }: Props) {
       .from("wanted_posts")
       .select(`
         id, buyer_id, card_name, edition, grade_wanted, offer_price,
-        category, description, image_url, views, status, created_at,
+        category, description, image_url, views, status, created_at, expires_at,
         buyer:profiles!buyer_id(username, display_name, rating, total_purchases, avatar_url)
       `)
       .eq("id", wantedId)
@@ -72,16 +86,18 @@ export default function WantedDetailScreen({ wantedId, onBack }: Props) {
       } as WantedPost;
       setItem(post);
 
+      const nowISO = new Date().toISOString();
       const { data: sim } = await supabase
         .from("wanted_posts")
         .select(`
           id, buyer_id, card_name, edition, grade_wanted, offer_price,
-          category, description, image_url, views, status, created_at,
+          category, description, image_url, views, status, created_at, expires_at,
           buyer:profiles!buyer_id(username, display_name, rating, total_purchases, avatar_url)
         `)
         .eq("status", "active")
         .eq("category", post.category)
         .neq("id", wantedId)
+        .or(`expires_at.is.null,expires_at.gt.${nowISO}`)
         .order("created_at", { ascending: false })
         .limit(6);
 
@@ -100,6 +116,7 @@ export default function WantedDetailScreen({ wantedId, onBack }: Props) {
   useEffect(() => {
     supabase.auth.getUser().then(({ data: { user } }) => {
       if (user) {
+        setMeId(user.id);
         supabase
           .from("saved_items")
           .select("id")
@@ -123,6 +140,11 @@ export default function WantedDetailScreen({ wantedId, onBack }: Props) {
 
   async function handleToggleSave() {
     if (togglingSave) return;
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      Alert.alert("Sign in required", "Please sign in to bookmark wanted posts.");
+      return;
+    }
     setTogglingSave(true);
     const { data, error } = await supabase.rpc("toggle_save_item", {
       p_item_type: "wanted",
@@ -148,9 +170,25 @@ export default function WantedDetailScreen({ wantedId, onBack }: Props) {
           <Text style={wd.headerTitle}>Wanted</Text>
           <View style={{ width: 68 }} />
         </View>
-        <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
-          <ActivityIndicator size="large" color={C.accent} />
-        </View>
+        <ShimmerGroup>
+          <ScrollView contentContainerStyle={{ padding: S.screenPadding, gap: 14 }}>
+            <Shimmer width="100%" height={220} borderRadius={S.radiusCard} />
+            <Shimmer width="35%" height={12} borderRadius={6} />
+            <Shimmer width="75%" height={20} borderRadius={6} />
+            <Shimmer width="50%" height={13} borderRadius={6} />
+            <View style={{ height: 8 }} />
+            <Shimmer width="30%" height={10} borderRadius={5} />
+            <Shimmer width="45%" height={22} borderRadius={6} />
+            <View style={{ height: 12 }} />
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+              <Shimmer width={40} height={40} borderRadius={20} />
+              <View style={{ flex: 1, gap: 6 }}>
+                <Shimmer width="50%" height={13} borderRadius={5} />
+                <Shimmer width="35%" height={10} borderRadius={5} />
+              </View>
+            </View>
+          </ScrollView>
+        </ShimmerGroup>
       </SafeAreaView>
     );
   }
@@ -176,6 +214,8 @@ export default function WantedDetailScreen({ wantedId, onBack }: Props) {
       </SafeAreaView>
     );
   }
+
+  const { expiryLabel, expiryExpired } = describeExpiry(item.expires_at);
 
   return (
     <SafeAreaView style={wd.safe}>
@@ -250,15 +290,32 @@ export default function WantedDetailScreen({ wantedId, onBack }: Props) {
           )}
         </View>
 
+        {expiryLabel && (
+          <View style={wd.expiryChip}>
+            <Ionicons
+              name={expiryExpired ? "time-outline" : "time"}
+              size={13}
+              color={expiryExpired ? C.danger : C.textSecondary}
+            />
+            <Text style={[wd.expiryChipText, expiryExpired && wd.expiryChipExpired]}>
+              {expiryLabel}
+            </Text>
+          </View>
+        )}
+
         <View style={wd.divider} />
 
         {/* Buyer */}
         <View style={wd.buyerSection}>
-          <View style={wd.buyerAvatar}>
-            <Text style={wd.buyerAvatarText}>
-              {(item.buyer?.username ?? "U").charAt(0).toUpperCase()}
-            </Text>
-          </View>
+          {item.buyer?.avatar_url ? (
+            <Image source={{ uri: item.buyer.avatar_url }} style={wd.buyerAvatarImg} />
+          ) : (
+            <View style={wd.buyerAvatar}>
+              <Text style={wd.buyerAvatarText}>
+                {(item.buyer?.username ?? "U").charAt(0).toUpperCase()}
+              </Text>
+            </View>
+          )}
           <View style={wd.buyerInfo}>
             <Text style={wd.buyerName}>@{item.buyer?.username ?? "user"}</Text>
             <View style={wd.buyerMeta}>
@@ -271,7 +328,10 @@ export default function WantedDetailScreen({ wantedId, onBack }: Props) {
               </Text>
             </View>
           </View>
-          <Pressable style={wd.viewProfileBtn}>
+          <Pressable
+            style={wd.viewProfileBtn}
+            onPress={() => push({ type: "USER_PROFILE", userId: item.buyer_id })}
+          >
             <Text style={wd.viewProfileText}>View Profile</Text>
           </Pressable>
         </View>
@@ -347,20 +407,50 @@ export default function WantedDetailScreen({ wantedId, onBack }: Props) {
 
       {/* Bottom Bar */}
       <View style={[wd.bottomBar, { paddingBottom: Math.max(insets.bottom, 14) }]}>
-        <Pressable
-          style={wd.msgBuyerBtn}
-          onPress={() => push({ type: "MESSAGES" })}
-        >
-          <Feather name="message-circle" size={18} color={C.textPrimary} />
-          <Text style={wd.msgBuyerText}>Message</Text>
-        </Pressable>
-        <Pressable
-          style={wd.haveCardBtn}
-          onPress={() => push({ type: "MESSAGES" })}
-        >
-          <Ionicons name="card" size={18} color={C.textHero} />
-          <Text style={wd.haveCardText}>I Have This Card</Text>
-        </Pressable>
+        {meId && item.buyer_id === meId ? (
+          <View style={wd.ownPostNote}>
+            <Ionicons name="information-circle-outline" size={16} color={C.textMuted} />
+            <Text style={wd.ownPostText}>This is your wanted post</Text>
+          </View>
+        ) : expiryExpired ? (
+          <View style={wd.ownPostNote}>
+            <Ionicons name="time-outline" size={16} color={C.danger} />
+            <Text style={[wd.ownPostText, { color: C.danger }]}>This bounty has expired</Text>
+          </View>
+        ) : (
+          <>
+            <Pressable
+              style={wd.msgBuyerBtn}
+              onPress={() =>
+                push({
+                  type: "CHAT",
+                  sellerId: item.buyer_id,
+                  wantedId: item.id,
+                  topic: item.card_name,
+                })
+              }
+            >
+              <Feather name="message-circle" size={18} color={C.textPrimary} />
+              <Text style={wd.msgBuyerText}>Message</Text>
+            </Pressable>
+            <Pressable
+              style={wd.haveCardBtn}
+              onPress={() =>
+                push({
+                  type: "CHAT",
+                  sellerId: item.buyer_id,
+                  wantedId: item.id,
+                  shareWantedId: item.id,
+                  initialMessage: "I have this card",
+                  topic: item.card_name,
+                })
+              }
+            >
+              <Ionicons name="card" size={18} color={C.textHero} />
+              <Text style={wd.haveCardText}>I Have This Card</Text>
+            </Pressable>
+          </>
+        )}
       </View>
     </SafeAreaView>
   );

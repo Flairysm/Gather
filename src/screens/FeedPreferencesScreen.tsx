@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import {
-  Pressable,
+  Alert,
   SafeAreaView,
   ScrollView,
   StyleSheet,
@@ -8,13 +8,15 @@ import {
   Text,
   View,
 } from "react-native";
-import { Feather, Ionicons } from "@expo/vector-icons";
+import { StatusBar } from "expo-status-bar";
+import { Ionicons } from "@expo/vector-icons";
 import { C, S } from "../theme";
 import { ALL_CATEGORIES } from "../data/categories";
 import { useFeedPreferences } from "../data/feedPreferences";
+import ScreenHeader from "../components/ScreenHeader";
 
 export default function FeedPreferencesScreen({ onBack }: { onBack: () => void }) {
-  const { selectedCategories, toggleCategory } = useFeedPreferences();
+  const { selectedCategories, toggleCategory, loading } = useFeedPreferences();
 
   const enabledCount = selectedCategories.length;
   const subtitle = useMemo(() => {
@@ -25,14 +27,8 @@ export default function FeedPreferencesScreen({ onBack }: { onBack: () => void }
 
   return (
     <SafeAreaView style={st.safe}>
-      {/* Header */}
-      <View style={st.header}>
-        <Pressable onPress={onBack} style={st.backBtn}>
-          <Feather name="arrow-left" size={20} color={C.textPrimary} />
-        </Pressable>
-        <Text style={st.headerTitle}>My Feed Categories</Text>
-        <View style={{ width: 36 }} />
-      </View>
+      <StatusBar style="light" />
+      <ScreenHeader title="My Feed Categories" onBack={onBack} />
 
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={st.scroll}>
         <View style={st.heroCard}>
@@ -53,23 +49,25 @@ export default function FeedPreferencesScreen({ onBack }: { onBack: () => void }
               <View key={cat.key}>
                 {i > 0 && <View style={st.divider} />}
                 <View style={st.row}>
-                  <View
-                    style={[
-                      st.rowIcon,
-                      { backgroundColor: cat.color + "18", borderColor: cat.color + "33" },
-                    ]}
-                  >
-                    <Ionicons name={cat.icon} size={18} color={cat.color} />
-                  </View>
                   <View style={{ flex: 1 }}>
                     <Text style={st.rowLabel}>{cat.label}</Text>
-                    <Text style={st.rowSub}>Show in “For You”</Text>
+                    <Text style={st.rowSub}>Show on Home</Text>
                   </View>
                   <Switch
                     value={isOn}
-                    onValueChange={() => toggleCategory(cat.key)}
-                    trackColor={{ false: C.muted, true: cat.color + "88" }}
-                    thumbColor={isOn ? cat.color : C.textMuted}
+                    disabled={loading}
+                    onValueChange={() => {
+                      if (isOn && enabledCount === 1) {
+                        Alert.alert(
+                          "Keep at least one category on",
+                          "Your Home feed needs at least one category.",
+                        );
+                        return;
+                      }
+                      toggleCategory(cat.key);
+                    }}
+                    trackColor={{ false: C.muted, true: C.accent + "88" }}
+                    thumbColor={isOn ? C.accent : C.textMuted}
                     ios_backgroundColor={C.muted}
                   />
                 </View>
@@ -84,30 +82,6 @@ export default function FeedPreferencesScreen({ onBack }: { onBack: () => void }
 
 const st = StyleSheet.create({
   safe: { flex: 1, backgroundColor: C.bg },
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: S.screenPadding,
-    paddingVertical: 12,
-    gap: S.md,
-  },
-  backBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: C.elevated,
-    borderWidth: 1,
-    borderColor: C.borderIcon,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  headerTitle: {
-    flex: 1,
-    color: C.textPrimary,
-    fontSize: 18,
-    fontWeight: "800",
-    textAlign: "center",
-  },
   scroll: {
     paddingHorizontal: S.screenPadding,
     paddingTop: 6,
@@ -171,16 +145,6 @@ const st = StyleSheet.create({
     paddingHorizontal: S.lg,
     gap: S.md,
   },
-  rowIcon: {
-    width: 32,
-    height: 32,
-    borderRadius: 8,
-    backgroundColor: C.iconBg,
-    borderWidth: 1,
-    borderColor: C.borderIcon,
-    alignItems: "center",
-    justifyContent: "center",
-  },
   rowLabel: {
     color: C.textPrimary,
     fontSize: 14,
@@ -195,7 +159,7 @@ const st = StyleSheet.create({
   divider: {
     height: 1,
     backgroundColor: C.border,
-    marginLeft: 56,
+    marginLeft: S.lg,
   },
 });
 
